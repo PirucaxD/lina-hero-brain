@@ -1314,12 +1314,16 @@ for k, v in pairs(LINA_EXTRA_THREATS) do combined_threats_on_self[k] = v end
 -- The lib pcall-wraps every call, so a stray throw degrades to the catalog
 -- fallback path (cfg.fallback_lock_ttl_s = 2.0s) without crashing dispatch.
 --
--- PERSISTENT_LOCK_CAP_S is the persistent-class cap = PERSISTENT_THREAT_TICK_
--- INTERVAL (2.1s @L1739) + 0.1s - cfg.lock_buffer_s (0.3s) so the resulting
--- post-buffer lock TTL is exactly 2.2s, letting persistent_threats_tick
--- re-acquire the lock on the next tick. Mirrored as a local here (not a
--- forward-reference to L1739) so the table literal stays self-contained.
-local PERSISTENT_LOCK_CAP_S = 1.9  -- = PERSISTENT_THREAT_TICK_INTERVAL + 0.1 - lock_buffer_s
+-- PERSISTENT_LOCK_CAP_S is the persistent-class cap. v0.5.42 fix: the v0.5.40
+-- math had the 0.1s margin term with the wrong sign, yielding TTL = 1.9 + 0.3
+-- = 2.2s which EXCEEDS the 2.1s tick interval and blocked every other
+-- re-fire with dispatch_blocked. Correct derivation: cap = PERSISTENT_
+-- THREAT_TICK_INTERVAL (2.1s @L1739) - 0.1s safety margin BEFORE next tick
+-- - cfg.lock_buffer_s (0.3s) = 1.7s, so resulting post-buffer lock TTL is
+-- exactly 2.0s, leaving 0.1s headroom before the next 2.1s tick.
+-- Mirrored as a local here (not a forward-reference to L1739) so the table
+-- literal stays self-contained.
+local PERSISTENT_LOCK_CAP_S = 1.7  -- v0.5.42: = PERSISTENT_THREAT_TICK_INTERVAL - 0.1 - lock_buffer_s
 
 -- Helper: nil-tolerant distance between two units. Mirrors dist_to() at L278
 -- but does not depend on state.self_npc (resolvers receive both units).
@@ -3114,9 +3118,17 @@ local function pending_step_try_fire(p, env, scratch, i)
         if scratch.removed_any then scratch.kept[#scratch.kept + 1] = p end           -- not eligible yet
     elseif needs_target and not target_ok then
         scratch.on_drop()
+        -- v0.5.42: stamp recently_aborted_intents so cast_verify_tick's
+        -- prefix lookup (L443) suppresses the noisy double_fail emit for the
+        -- pcv entry that safe_issue already registered. Same key format as
+        -- the v0.5.26 no_land stamp below.
+        state.recently_aborted_intents[(p.combo_name or "?") .. "_" .. (p.short or "s")] = now_t
         tlog(2, "scheduled_step_aborted", { combo = p.combo_name, step = p.short, reason = "target_invalid" })
     elseif not self_alive_ok() then
         scratch.on_drop()
+        -- v0.5.42: same stamp as target_invalid branch above; cast_verify
+        -- suppression on self-not-ok abort.
+        state.recently_aborted_intents[(p.combo_name or "?") .. "_" .. (p.short or "s")] = now_t
         tlog(2, "scheduled_step_aborted", { combo = p.combo_name, step = p.short, reason = "self_not_ok" })
     else
         local live = p.ctx_snapshot
@@ -3131,6 +3143,13 @@ local function pending_step_try_fire(p, env, scratch, i)
         end
         if p.cond_fn and not p.cond_fn(live) then
             scratch.on_drop()
+            -- v0.5.42: stamp recently_aborted_intents on cond-skip too. This
+            -- is the path that handles r_kill_steal's MAGIC_IMMUNE / Linkens
+            -- / Lotus / dead target bail; pre-v0.5.42 the pcv entry
+            -- registered by safe_issue would survive and cast_verify_tick
+            -- would later emit a spurious double_fail. Same key format as
+            -- target_invalid / self_not_ok / no_land branches.
+            state.recently_aborted_intents[(p.combo_name or "?") .. "_" .. (p.short or "s")] = now_t
             tlog(3, "scheduled_step", { combo = p.combo_name, step = p.short, ok = "skip" })  -- drop
         else
             local h  = step_handle(p)
@@ -4602,6 +4621,14 @@ state.r_abort_tick = function()
             order_type = UO.DOTA_UNIT_ORDER_STOP, unit = state.self_npc }
         state.abort_counter = (state.abort_counter or 0) + 1
         tlog(1, "r_abort", { target = uname(t), reason = reason })
+        -- v0.5.42: stamp recently_aborted_intents so cast_verify_tick's prefix
+        -- lookup suppresses the spurious double_fail emit for the in-flight
+        -- R cast that we just STOPped. Key format mirrors the pcv intent
+        -- "<combo>_r#N" -> stripped to "<combo>_r". Must stamp BEFORE nil'ing
+        -- state.last_r_combo_name below.
+        if state.last_r_combo_name then
+            state.recently_aborted_intents[state.last_r_combo_name .. "_r"] = now()
+        end
         state.last_r_target = nil; state.last_r_combo_name = nil; state.last_r_dispatch_t = 0
     end
 end
@@ -6670,11 +6697,34 @@ function callbacks.OnModifierCreate(npc, modifier)
     end
 end
 
--- v0.5.36 MAINT-07: removed empty OnModifierDestroy / OnUnitAnimation stubs
--- (E9 cleanup leftovers from v0.5.14). Framework dispatches to keys present
--- on the callbacks table; absent keys are simply not invoked, so deleting
--- the no-op bodies is behaviour-neutral and avoids misleading a future
--- maintainer into assuming guards apply when none do.
+-- v0.5.36 MAINT-07: removed empty OnUnitAnimation stub (E9 cleanup leftover
+-- from v0.5.14). Framework dispatches to keys present on the callbacks table;
+-- absent keys are simply not invoked.
+--
+-- v0.5.42: OnModifierDestroy RESTORED (v0.5.36 MAINT-07 had deleted it as
+-- empty stub; never replaced when the homing-armed-entry pattern needed it).
+-- Clears bara_charge / tusk_snowball armed entries when the homing modifier
+-- is destroyed without armed_post_fire firing (bug-hunt finding: stale
+-- entries persist on a still-alive caster and wrongly fire WW/Pike on a
+-- later same-caster walkup within 480u for Bara / 600u for Tusk, since the
+-- arm-site guards at L6675/L6688 refuse to overwrite a same-caster entry).
+-- Mirrors Sniper.lua L9644-9658.
+function callbacks.OnModifierDestroy(npc, modifier)
+    if not state.self_npc or not modifier then return end
+    local mod_name = Modifier.GetName(modifier)
+    if not mod_name then return end
+    if mod_name == "modifier_spirit_breaker_charge_of_darkness" then
+        if state.armed_threats["bara_charge"] then
+            tlog(2, "bara_charge_cleared", { caster = uname(npc) })
+            state.armed_threats["bara_charge"] = nil
+        end
+    elseif mod_name == "modifier_tusk_snowball_movement" then
+        if state.armed_threats["tusk_snowball"] then
+            tlog(2, "tusk_snowball_cleared", { caster = uname(npc) })
+            state.armed_threats["tusk_snowball"] = nil
+        end
+    end
+end
 
 -- v0.5.11 PE-02: line-projectile intercept (port of Sniper.lua
 -- callbacks.OnLinearProjectileCreate, the Pudge-hook perpendicular-distance
@@ -6994,6 +7044,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.41 Tier 0 closer + generic ResolveSaveOrder: surgical follow-up to v0.5.40 dispatcher unification + v0.5.40.1/.2/.3 hotfixes; 3 themed patches inline-authored (no workflow). **DEDUP-CLEANUP**: 4 belt-and-suspenders Dedup.threat_mark_responded post-stamps removed at the v0.5.40 A3-5 (on_gap_close), A3-6 (on_hard_disable), A3-7 (on_channel_start), and A3-8 (handle_threat_on_self Dispatch branch) sites; Dispatcher per-(target_idx, canonical_mod, caster_idx) lock is sole gate now. Three v0.5.40 stamps deliberately preserved: A3-8 informational else-branch (no Dispatch upstream, stamp is sole dedup), v0.5.14 BL-A6 line_intercept pre-stamp (layer-2 throttle preservation by design), A3-2 lotus_defer + sibling pair (asymmetry with legacy try_save_self fallthrough; deferred to v0.5.42). 6 legacy try_save_self post-stamps also untouched (handle_enemy_buff_threat, try_save_ally A4 separate domain, try_save_lotus_first, lotus_first_disabled fallthrough, defer-to-armed bookkeeping, v0.5.38 MAINT-11.2 armed_post_fire). **FC-PROBE-COVERAGE**: v0.5.39 BUG-1 pre_tf_opener FC site gains the same fc_status_probe one-shot block already present at the starter and tf_burst sites. Pre-v0.5.41, when the opener wins the per-engagement latch (state.fc_tf_opener_fired = true), tf_burst want_fc gate fails and its probe never fires; the only path that emitted the diagnostic was a starter-first session. Restores v0.5.36 intent: whichever FC dispatch fires first owns the probe. **GAP-3-GENERIC**: lib/defense.lua ResolveSaveOrder parameterized via new cfg.post_pick_filter(picked, ctx, threat_mod, authoritative) hook. v0.5.40 hardcoded lina_flame_cloak chain-tail demotion under ctx.fs_shard_window moves into Lina Defense.New cfg as a closure; lib treats ctx as opaque and applies new_auth only when non-nil so a hook returning just a new chain preserves the original authoritative flag. Behavior-neutral for Lina; opens the door for other heroes to register their own chain rewrites without lib edits. lib docblock + cfg field list updated; uczone-toolkit lib mirror + docs/defense.md cfg.post_pick_filter docs pending. **Bridge metadata note**: kickoff prompt reported PowerShell Measure-Object -Line = 6745, actual is 6963 per ripgrep + raw LF count; bridge was right all along. Lesson: prefer ripgrep line numbers or (Get-Content).Count over Measure-Object -Line for Lua source files. luac clean both files, no BOM, lesson 15 banner-swap protocol verified. Source = runtime SHA verify post-deploy.")
+LOG:info("Lina brain v0.5.42 bug-hunt-driven fixes: 14-dimension workflow surfaced 4 real bugs (1 high + 3 med, 0 critical), all in legacy code untouched by v0.5.40-v0.5.41. **P1 Sand King Epicenter** (was high) -- VPK verify caught a second bug the hunt missed: brain's modifier_sandking_epicenter was wrong project-wide (0 VPK hits) vs canonical modifier_sand_king_epicenter (375 hits). lib/threat_data.lua 5 renames (RECOMMENDED_SAVES L432, ABILITY_TO_THREAT value L775, THREAT_TIMING L1400, THREAT_CATEGORY L1539, THREAT_RISK L1775) + new CAST_POINT_THREATS entry (cp_default=2.0, category=delayed_aoe, max_dist=1900). Closes: anim path now arms cast-point-aligned save at impact (was firing at t=0, ~2s early, wasting BKB 10s window and burning Cyclone/WW spin before any Epicenter pulse landed). Plus: OnModifierCreate catch-up now actually matches when the canonical modifier lands (pre-v0.5.42 it never matched because the brain looked for the wrong name). Lesson 13 reinforced: always VPK-verify modifier names before catalog edits. **P2 PERSISTENT_LOCK_CAP_S off-by-one** (med) -- Lina.lua L1322 changed from 1.9 to 1.7. The v0.5.40 math had the 0.1s safety-margin term with the wrong sign: 2.1 + 0.1 - 0.3 = 1.9 yielded TTL=2.2s which EXCEEDS the 2.1s tick interval, blocking every other persistent re-fire (Duel, Static Storm, Naga Ensnare, Bane Nightmare) with dispatch_blocked. Correct: 2.1 - 0.1 - 0.3 = 1.7s -> TTL=2.0s with 0.1s headroom under tick interval. Comment updated. **P3 cast_verify_double_fail stamp leak at 4 sites** (med) -- v0.5.22 demo finding's actual root cause, partial v0.5.26 IMP-A4 fix only covered no_land. Lina.lua adds recently_aborted_intents stamp at: r_abort_tick STOP path (L4609), pending_steps_tick target_invalid (L3121), self_not_ok (L3124), cond_fn skip (L3138). Each uses the existing v0.5.26 key format (combo_name .. _ .. short for pending_steps paths; last_r_combo_name .. _r for r_abort). cast_verify_tick's existing L443 prefix lookup now suppresses the matching pcv entries before they emit level-1 noise. r_kill_steal target-BKBs-mid-cast scenario fully closed. **P4 OnModifierDestroy restored** (med) -- v0.5.36 MAINT-07 deleted an empty stub but the homing-armed-entry pattern needed it; bara_charge / tusk_snowball entries leaked when the modifier was destroyed without armed_post_fire firing (charge dispelled, charge target dies separately, snowball expires on terrain). Stale entry survived on still-alive caster; arm-site guards refused same-caster overwrites; next walkup within 480u/600u wrongly fired WW/Pike on a normal approach. Mirrors Sniper.lua L9644-9658 verbatim. **Workflow stats**: 14 dimensions, 29 agents, ~13min wall clock, 1.6M subagent tokens. 10 of 14 dimensions came back clean: dedup-race-post-v0541, a3-2-sibling-asymmetry (the deferred v0.5.41 pair was a false alarm; drops from v0.5.42 Tier 1), fc-pre-amp-regressions, ally-lock-isolation, canonical-mod-aliases-missed, channel-on-self-footgun, panic-key-edge-cases, hp-gate-fc-defensive, mana-cover-arithmetic, shard-window-predicate-agree. v0.5.40-v0.5.41 structural work confirmed sound. Lina.lua 6999 -> 7049 (+50). lib/threat_data.lua +1 catalog entry + 5 modifier-name renames (text-replace; no line delta beyond the +1). luac clean both files, no BOM, lesson 15 verified, source=runtime SHA verify post-deploy. Lib commit pending for threat_data.lua; uczone-toolkit mirror + public lina-hero-brain repo sync pending.")
 
 return callbacks

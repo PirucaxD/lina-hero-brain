@@ -1,0 +1,85 @@
+name: Release on tag
+
+# Builds the deploy zip (Lina.lua + lib/) and publishes a GitHub
+# Release whenever a tag matching `v*` is pushed.
+#
+# Workflow per version becomes just:
+#   git -c user.name='...' -c user.email='...' tag -a vX.Y.Z -m "..."
+#   git push origin vX.Y.Z
+# and the release lands automatically with the zip attached.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for tag annotation access)
+        uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 is required for `git for-each-ref` to read the
+          # tag annotation message. fetch-tags: true alone collides with
+          # the tag-push trigger ("Cannot fetch both <sha> and refs/tags/X
+          # to refs/tags/X"), since the action fetches the commit SHA AND
+          # the tag ref to the same local path. Full history sidesteps
+          # the collision and the repo is small.
+          fetch-depth: 0
+
+      - name: Build deploy zip
+        run: |
+          set -euo pipefail
+          mkdir -p staging/lib
+          cp Lina/Lina.lua staging/Lina.lua
+          cp lib/*.lua staging/lib/
+          (cd staging && zip -r "../lina-brain-${GITHUB_REF_NAME}.zip" .)
+          ls -la lina-brain-*.zip
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+
+          # Annotated tag message via the GitHub API. actions/checkout fetches
+          # tag refs as lightweight pointers by default, so `git for-each-ref`
+          # would return the underlying commit message instead of the tag
+          # annotation. The API always returns the real annotation regardless
+          # of how the local clone was set up. Lightweight tags surface as
+          # object.type=commit and MSG stays empty (the install footer alone
+          # becomes the body).
+          OBJ_TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" --jq '.object.type')
+          OBJ_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" --jq '.object.sha')
+          MSG=""
+          if [ "${OBJ_TYPE}" = "tag" ]; then
+            MSG=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${OBJ_SHA}" --jq '.message')
+          fi
+
+          # Compose release body: tag message header + install footer.
+          {
+            if [ -n "${MSG}" ]; then
+              printf '%s\n\n---\n\n' "${MSG}"
+            fi
+            cat <<INSTALL
+          ## Install
+
+          Download \`lina-brain-${TAG}.zip\` below, unzip it, and drop the contents into your \`%cheat_dir%/scripts/\` folder. The bundle overlays cleanly: it contains \`Lina.lua\` plus the \`lib/\` folder of shared modules.
+
+          After loading, the in-game log shows \`[Lina] Lina brain ${TAG} loaded\` near the top.
+
+          ## Compatibility
+
+          Requires the UCZone framework with Stage 2 information enabled. Tested on Dota 2 patch 7.41c.
+          INSTALL
+          } > release-notes.md
+
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --notes-file release-notes.md \
+            "lina-brain-${TAG}.zip"

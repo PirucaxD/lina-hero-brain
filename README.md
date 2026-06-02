@@ -249,14 +249,8 @@ state, and cooldown readiness.
 ```
 Lina/
   Lina.lua              the brain (one file, ~7k lines)
-  LIQUIPEDIA_REF.md     Lina ability reference (cast points, ranges, CDs)
-  ITEMS_REF.md          item-side reference for the save chain
-  MATCHUPS_REF.md       per-matchup notes (Lina vs. common mids)
-  ANIM_MAP.md           ability-to-animation map for the anim defense route
 lib/                    shared Lua libraries (see "The library set")
 tools/                  KV-data generators + log/test tooling
-COMBO_PATTERN.md        the offensive combo/sequence dispatch pattern
-DEFENSE_PATTERN.md      the defensive save-layer pattern
 DEFENSE_CATEGORIES.md   threat-category -> save-chain mapping
 API_GOTCHAS.md          UCZone API quirks found the hard way
 API_REFERENCE.md        condensed API reference
@@ -268,8 +262,8 @@ runtime are kept in sync; the repository is the source.
 
 ## Architecture
 
-The full treatment of each layer is in `COMBO_PATTERN.md` and
-`DEFENSE_PATTERN.md`. This section is the map.
+This section is the map. The brain itself is one file; reading it
+end to end is the long form.
 
 ### The Layer 1 / Layer 2 split
 
@@ -752,10 +746,8 @@ A few rules that are not obvious from the code:
 
 ## Where to read more
 
-- `COMBO_PATTERN.md`, the offensive combo/sequence dispatch
-  pattern, reusable for other heroes.
-- `DEFENSE_PATTERN.md` and `DEFENSE_CATEGORIES.md`, the defensive
-  save layer and the threat-to-save mapping.
+- `DEFENSE_CATEGORIES.md`, the threat-category to save-chain mapping
+  the dispatcher consults.
 - `API_GOTCHAS.md`, every UCZone API quirk found the hard way, with
   the symptom and the fix.
 - `API_REFERENCE.md`, the condensed, brain-task-organized API
@@ -763,6 +755,8 @@ A few rules that are not obvious from the code:
 - `tools/README.md`, the KV generators and the log/test tooling.
 - [sniper-hero-brain](https://github.com/PirucaxD/sniper-hero-brain),
   the sister project. Most architecture patterns originated there;
-  this brain is the second hero to confirm the shape.
+  this brain is the second hero to confirm the shape, and its
+  README carries the longer-form treatment of the offensive combo
+  and defensive save-layer patterns.
 - [uczone-toolkit](https://github.com/PirucaxD/uczone-toolkit), the
   upstream MIT-licensed `lib/` source.

@@ -1559,6 +1559,31 @@ local defense_dispatcher = Defense.New {
         if ok then return h end
         return nil
     end,
+    -- v0.5.41 GAP-3-GENERIC: hero-supplied chain rewriter (was hardcoded
+    -- inside lib/defense.lua ResolveSaveOrder pre-v0.5.41). Demotes
+    -- lina_flame_cloak to chain tail under ctx.fs_shard_window so a
+    -- shard-amped FS spend isn't pre-empted by a FC burn. Builds a NEW
+    -- chain table so cfg override / category / default tables stay
+    -- untouched. nil hook in cfg = lib passes resolved chain through.
+    post_pick_filter = function(picked, ctx, threat_mod, authoritative)
+        if not (ctx and ctx.fs_shard_window and picked) then
+            return picked, authoritative
+        end
+        local has_fc = false
+        for i = 1, #picked do
+            if picked[i] == "lina_flame_cloak" then has_fc = true break end
+        end
+        if not has_fc then return picked, authoritative end
+        local demoted = {}
+        for i = 1, #picked do
+            if picked[i] ~= "lina_flame_cloak" then
+                demoted[#demoted + 1] = picked[i]
+            end
+        end
+        demoted[#demoted + 1] = "lina_flame_cloak"
+        tlog(3, "resolve_save_order_fc_demote", { mod = threat_mod, head = demoted[1] or "-", reason = "fs_shard_window" })
+        return demoted, authoritative
+    end,
 }
 
 local function layer2_can_fire()       return defense_dispatcher:CanFire() end
@@ -2493,21 +2518,18 @@ local function on_gap_close(ev)
     -- early, silently swallowing the next observation in that window.
     -- The v0.5.19 entry-side dedup CHECK above still prevents dual-fire
     -- across multi-anim events per cast.
-    -- v0.5.40 A3-5: route gap-close anim through Dispatch with
-    -- category_hint="close_gap". Dedup post-stamp preserved for backward
-    -- compatibility (lock now redundantly enforces; stamp removal deferred
-    -- to v0.5.41). Closes the bara WW+Pike double-fire from the v0.5.39
-    -- demo: this anim path and armed_threats_tick's homing branch now share
-    -- the per-(self_npc,canonical_mod,bara) lock key.
-    if defense_dispatcher:Dispatch("gap_close_" .. (ev.ability_name or "unk"),
-                                   threat, ev.caster,
-                                   state.self_npc, nil,
-                                   "close_gap", ev.ability_name, nil,
-                                   record_save,
-                                   { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
-       and threat then
-        Dedup.threat_mark_responded(state.responded_threats, ev.caster, threat)
-    end
+    -- v0.5.40 A3-5 (+v0.5.41 DEDUP-CLEANUP): route gap-close anim through
+    -- Dispatch with category_hint="close_gap". Closes the bara WW+Pike
+    -- double-fire from the v0.5.39 demo: this anim path and the
+    -- armed_threats_tick homing branch share the per-(self_npc,
+    -- canonical_mod, bara) lock key. v0.5.41: Dispatcher lock is sole gate;
+    -- belt-and-suspenders Dedup.threat_mark_responded post-stamp removed.
+    defense_dispatcher:Dispatch("gap_close_" .. (ev.ability_name or "unk"),
+                                threat, ev.caster,
+                                state.self_npc, nil,
+                                "close_gap", ev.ability_name, nil,
+                                record_save,
+                                { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
 end
 local function on_hard_disable(ev)
     if not ev.target_self then return end
@@ -2553,21 +2575,18 @@ local function on_hard_disable(ev)
         tlog(3, "anim_dedup_skip", { mod = threat, path = "hard_disable", ability = ev.ability_name or "?" })
         return
     end
-    -- v0.5.25 RPR-03: stamp dedup AFTER success (see on_gap_close note).
-    -- v0.5.40 A3-6: route hard-disable anim through Dispatch with
-    -- category_hint="lockdown". Cast-point-armed branch above this site is
-    -- the primary entry; this legacy fall-through services threats not in
-    -- CAST_POINT_BY_ABILITY. Dedup post-stamp preserved (lock redundantly
-    -- enforces; v0.5.41 will remove the stamp).
-    if defense_dispatcher:Dispatch("hard_disable_" .. (ev.ability_name or "unk"),
-                                   threat, ev.caster,
-                                   state.self_npc, nil,
-                                   "lockdown", ev.ability_name, nil,
-                                   record_save,
-                                   { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
-       and threat then
-        Dedup.threat_mark_responded(state.responded_threats, ev.caster, threat)
-    end
+    -- v0.5.40 A3-6 (+v0.5.41 DEDUP-CLEANUP): route hard-disable anim
+    -- through Dispatch with category_hint="lockdown". Cast-point-armed
+    -- branch above this site is the primary entry; this legacy fall-
+    -- through services threats not in CAST_POINT_BY_ABILITY. v0.5.41:
+    -- Dispatcher lock is sole gate; belt-and-suspenders Dedup post-stamp
+    -- removed (v0.5.25 RPR-03 stamp-after-success obsolete here).
+    defense_dispatcher:Dispatch("hard_disable_" .. (ev.ability_name or "unk"),
+                                threat, ev.caster,
+                                state.self_npc, nil,
+                                "lockdown", ev.ability_name, nil,
+                                record_save,
+                                { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
 end
 local function on_channel_start(ev)
     if not ev.target_self then return end
@@ -2577,19 +2596,16 @@ local function on_channel_start(ev)
         tlog(3, "anim_dedup_skip", { mod = threat, path = "channel_start", ability = ev.ability_name or "?" })
         return
     end
-    -- v0.5.25 RPR-03: stamp dedup AFTER success (see on_gap_close note).
-    -- v0.5.40 A3-7: route channel-on-self anim through Dispatch with
-    -- category_hint="channel_on_self". Dedup post-stamp preserved (lock
-    -- redundantly enforces; v0.5.41 will remove the stamp).
-    if defense_dispatcher:Dispatch("channel_" .. (ev.ability_name or "unk"),
-                                   threat, ev.caster,
-                                   state.self_npc, nil,
-                                   "channel_on_self", ev.ability_name, nil,
-                                   record_save,
-                                   { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
-       and threat then
-        Dedup.threat_mark_responded(state.responded_threats, ev.caster, threat)
-    end
+    -- v0.5.40 A3-7 (+v0.5.41 DEDUP-CLEANUP): route channel-on-self anim
+    -- through Dispatch with category_hint="channel_on_self". v0.5.41:
+    -- Dispatcher lock is sole gate; belt-and-suspenders Dedup post-stamp
+    -- removed (v0.5.25 RPR-03 stamp-after-success obsolete here).
+    defense_dispatcher:Dispatch("channel_" .. (ev.ability_name or "unk"),
+                                threat, ev.caster,
+                                state.self_npc, nil,
+                                "channel_on_self", ev.ability_name, nil,
+                                record_save,
+                                { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
 end
 
 ------------------------------------------------- Layer 1 offense foundation --
@@ -4236,6 +4252,24 @@ state.lina_teamfight_tick = function(force)
                           and not fc_throttled
                           and ctx.mana >= opener_cost
     if want_fc_open then
+        -- v0.5.41 FC-PROBE-COVERAGE: probe parity with tf_burst site below
+        -- (L4339 pre-v0.5.41 numbering) and the starter site. v0.5.39 BUG-1's
+        -- pre_tf_opener insertion bypassed both: when the opener wins the
+        -- per-engagement latch (state.fc_tf_opener_fired = true), tf_burst's
+        -- want_fc gate fails and its probe never fires. Restores v0.5.36
+        -- intent that whichever FC dispatch fires first owns the diagnostic.
+        if not state.fc_status_probed then
+            tlog(1, "fc_status_probe", {
+                ability_level = tostring(Ability.GetLevel(ability(A.FC)) or -1),
+                scepter_owned = NPCLib.item(state.self_npc, "item_ultimate_scepter") and "y" or "n",
+                fc_handle_valid = (ability(A.FC) ~= nil) and "y" or "n",
+                fc_cd = string.format("%.2f", (Ability.GetCooldown and ability(A.FC) and Ability.GetCooldown(ability(A.FC)) or -1)),
+                flame_cloak_ready = ctx.flame_cloak_ready and "y" or "n",
+                flame_cloak_active = ctx.flame_cloak_active and "y" or "n",
+                flame_cloak_in_flight = ctx.flame_cloak_in_flight and "y" or "n",
+            })
+            state.fc_status_probed = true
+        end
         tlog(1, "lina_flame_cloak_offensive", {
             trigger = "pre_tf_opener", archetype = "tf_opener",
             cluster = string.format("%d", cluster_n),
@@ -6569,22 +6603,24 @@ local function handle_threat_on_self(npc, modifier, mod_name, is_self)
         --   so a bail (no chain item ready, future per-mod denylist
         --   guards) doesn't leave the threat dedup-locked for 2s.
         if entry.save and entry.save ~= "informational" then
-            -- v0.5.40 A3-8: route legacy modifier-create fall-through through
-            -- Dispatch. category_hint/ability_name nil -- ResolveSaveOrder
-            -- derives the category from threat_mod via TD.CategoryOf,
-            -- matching the v0.5.39 try_save_self("threat_..", mod_name,
-            -- caster) shape exactly. Closes the Sniper Assassinate +
-            -- 'D' second-save double-fire from the v0.5.39 demo: this site
-            -- and the lotus_pending/castpt arming sites now share the
-            -- per-(self_npc,canonical_mod,sniper) lock key.
-            if defense_dispatcher:Dispatch("threat_" .. mod_name,
-                                           mod_name, caster,
-                                           state.self_npc, nil,
-                                           nil, nil, nil,
-                                           record_save,
-                                           { fs_shard_window = fs_shard_window_active() }) then  -- v0.5.40 B2 GAP-3
-                Dedup.threat_mark_responded(state.responded_threats, caster, mod_name)
-            end
+            -- v0.5.40 A3-8 (+v0.5.41 DEDUP-CLEANUP): route legacy modifier-
+            -- create fall-through through Dispatch. category_hint and
+            -- ability_name nil -- ResolveSaveOrder derives the category
+            -- from threat_mod via TD.CategoryOf, matching the v0.5.39
+            -- try_save_self("threat_..", mod_name, caster) shape exactly.
+            -- Closes the Sniper Assassinate + 'D' second-save double-fire
+            -- from the v0.5.39 demo: this site and the lotus_pending /
+            -- castpt arming sites share the per-(self_npc, canonical_mod,
+            -- sniper) lock key. v0.5.41: Dispatcher lock is sole gate;
+            -- belt-and-suspenders Dedup post-stamp removed. The else-
+            -- branch below (informational threats) KEEPS its stamp -- it
+            -- doesn't dispatch, so the stamp is its only dedup.
+            defense_dispatcher:Dispatch("threat_" .. mod_name,
+                                        mod_name, caster,
+                                        state.self_npc, nil,
+                                        nil, nil, nil,
+                                        record_save,
+                                        { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
         else
             Dedup.threat_mark_responded(state.responded_threats, caster, mod_name)
         end
@@ -6958,6 +6994,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.40 Tier 0 dispatcher unification + FS-aware FC reshape: 9 patches via 3 sequential workflows (wf_38209be6 Foundation, wf_9fe4b1ad Routing, wf_a34c2d24 FC Reshape). 6/9 approve + 3/9 changes_requested with verifier suggested_revisions applied (A5-hero hand-applied since the author returned a diff but did not Edit; A6 author-bug return-true-after-fire_steps baked into all 4 thunks per verifier finding). Largest defense release since v0.5.21; closes the v0.5.39 demo Bara WW+Pike double-fire and Sniper Assassinate + D second-save STRUCTURALLY via per-(target,canonical_mod,caster) lock domain. (A1 lib/defense.lua: Dispatcher.in_flight_locks + in_flight_locks_ally per-domain maps; TryAcquireLock / ReleaseLock / ForceNextDispatch / Dispatch / DispatchAlly public methods; TrySaveSelf thin compat wrapper around Dispatch; ResolveSaveOrder gains ctx param for GAP-3 FC tail-demote; verifier revisions baked in: clamp_ttl honors documented 0.3s buffer default, lock_key empty-string guard, both thunk branches re-check CanFire, DispatchAlly hot-swap pcall-wraps cfg.default_chain so save_fire throws cannot corrupt it globally. New cfg surface: canonicalize_mod / eta_resolver / lock_buffer_s / fallback_lock_ttl_s / entity_index / ability_handle. MarkFired unchanged. Identity-by-handle CountConcurrentExcluding unchanged per v0.5.14 BL-A5/B7.) (A2 lib/threat_data.lua: ThreatData.CanonicalMod + CanonicalizeThreatMod + Canonicalize triple-alias closure + AbilityToCanonical + CANONICAL_MOD_ALIASES (13 sibling collapses for Bara _vision/_target/_debuff, Tusk _target/_movement_friendly, PA _phantom_strike bare, Pudge _dismember bare, LC _duel_damage_boost, Lion _delay/_kill_counter, Tinker _blind, OD _charge, Static Storm bare; VPK-verified per feedback-dota-modifier-names-vpk-grep memory). Doom _aura / Bane _cast_illusion / ES Fissure _rooted entries dropped per verifier audit (no VPK reproduction, or canonical not catalogued).) (A0-init Lina.lua: LINA_ETA_RESOLVERS module-local table with 30 per-mod + 4 synthetic FC resolvers; PERSISTENT_LOCK_CAP_S = 1.9 caps channel / persistent classes so 2.2s lock TTL fits inside PERSISTENT_THREAT_TICK_INTERVAL = 2.1s and re-acquire succeeds; cast_point / dist_speed / remaining / line / fc_offensive helper factories; 6 cfg fields wired into Defense.New.) (A3: 8 hero-side bypass paths routed through defense_dispatcher:Dispatch -- try_save_lotus_first L1409 / armed lotus_pending L1617 / line_intercept L6290 / persistent_threats_tick L1771 / on_gap_close L2102 / on_hard_disable L2152 / on_channel_start L2166 / handle_threat_on_self L6076. Lotus self-cast wrapped in fire_thunk; armed_entry threaded; all Dedup.threat_mark_responded stamps preserved belt-and-suspenders for v0.5.40, removal deferred to v0.5.41.) (A4-hero: try_save_ally -> defense_dispatcher:DispatchAlly with separate ally lock domain (in_flight_locks_ally); bespoke SAVE_FIRE_DISTANCE caster->ally proximity gate + ally-Lotus filter preserved inside fire_thunk; Lotus-on-self no longer silences Glimmer-on-ally for the same canonical_mod+caster.) (A5-hero: panic-key migrated -- ForceNextDispatch(state.self_npc, TD.CanonicalMod(threat_mod), threat_caster) called before TrySaveSelf to drop the lock; v0.5.37 last_save_t snapshot/zero/restore preserved verbatim for the CanFire throttle bypass; v0.5.40 panic now covers BOTH lock + throttle gates per design.) (A6 Layer-1 FC offensive: 4 fire_steps sites starter L3447 / tf_opener L3788 / tf_burst L3887 / tf_sustain L3956 routed through Dispatch with synthetic mod keys lina_fc_offensive_pre_combo / _tf_opener / _tf_burst / _tf_sustain; thunk return true after state.fire_steps so the lock stays HELD per verifier finding (state.fire_steps returns nil otherwise); single-spend invariant across offensive + defensive FC use.) (B1 GAP-2 SAVE_FIRE.lina_flame_cloak.fire: defensive FC fire during 5s post-R modifier_lina_laguna_super_charged window early-returns false via state.compute_fs_state.shard_window so chain walker advances to Pike / Force / Ether / Lotus; new fc_defensive_skip_shard tlog v=2.) (B2 GAP-3 ctx.fs_shard_window wiring: hero-side fs_shard_window_active() helper at L1507 mirrors compute_fs_state predicate (NPCLib.has_shard + last_r_cast_t + 5.0s); 14 Dispatch / DispatchAlly / TrySaveSelf call sites pass ctx with fs_shard_window populated; lib ResolveSaveOrder demotes lina_flame_cloak to chain tail during the shard window so BKB / Pike / Force fire before FC -- preserves up to 5 FS stacks.) (B3 GAP-5 pre_tf_opener FS-marginal floor: new FC_OPENER_FS_MAX_FOR_REFRESH = 4 module-local-style constant; want_fc_open gate split into want_fc_open_pre_fs (historic gates byte-equivalent) + want_fc_open (= pre_fs AND fs_stacks <= 4); new fc_opener_skip_fs_marginal tlog v=2 fires only when FS-floor is the lone blocker. Rationale: FC sets FS to 7 outright so marginal stacks gained drop to 1-3 above fs=4 while 50-mana + 25s-CD cost stays flat.) Lina.lua 6445 -> 6926 (+481). luac clean all 3 files, lesson 15 protocol verified, no BOM. (v0.5.40.1 HOTFIX 2026-06-02 post-demo: cfg.self_npc closure was MISSING from the v0.5.40.0 Defense.New cfg table, so lib's TrySaveSelf compat wrapper resolved target_unit = c.self_npc and c.self_npc() = nil -> lock_key returned nil -> lock_key_unresolvable tlog at v=2 -> unlocked v0.5.39 path. Every legacy try_save_self caller (armed_threats_tick homing branch for Bara/Tusk/PA, cast_point_threat branch for Sniper/Lion/Lina Laguna/AA/OD/Tinker/Zeus/Doom, try_save_lotus_first fall-through) silently bypassed the v0.5.40 lock domain. Confirmed in v0.5.40.0 demo log C:/Umbrella/debug.log via grep: lock_acquired only fires for A6 synthetic FC keys (caller passes state.self_npc directly as target) + A4 ally domain (ally as target); every Bara/Sniper/Lion fire path emits lock_key_unresolvable. Hotfix is one line: self_npc = function() return state.self_npc end added to Defense.New cfg. Closes Bara WW+Pike, Sniper Assassinate + 'D' second-save, Lion R double-fires STRUCTURALLY per v0.5.40 design intent. Plus per user spec: defensive FC fire at SAVE_FIRE.lina_flame_cloak.fire gains HP-gate that returns false when NPC.GetHealth / GetMaxHealth > 0.30; new fc_defensive_skip_hp tlog at v=2 with hp_pct payload. Reserves FC for low-HP emergencies; offensive FC pre-amps unaffected. luac clean, no banner-line-count change, deploy and hash-verify post-hotfix.")
+LOG:info("Lina brain v0.5.41 Tier 0 closer + generic ResolveSaveOrder: surgical follow-up to v0.5.40 dispatcher unification + v0.5.40.1/.2/.3 hotfixes; 3 themed patches inline-authored (no workflow). **DEDUP-CLEANUP**: 4 belt-and-suspenders Dedup.threat_mark_responded post-stamps removed at the v0.5.40 A3-5 (on_gap_close), A3-6 (on_hard_disable), A3-7 (on_channel_start), and A3-8 (handle_threat_on_self Dispatch branch) sites; Dispatcher per-(target_idx, canonical_mod, caster_idx) lock is sole gate now. Three v0.5.40 stamps deliberately preserved: A3-8 informational else-branch (no Dispatch upstream, stamp is sole dedup), v0.5.14 BL-A6 line_intercept pre-stamp (layer-2 throttle preservation by design), A3-2 lotus_defer + sibling pair (asymmetry with legacy try_save_self fallthrough; deferred to v0.5.42). 6 legacy try_save_self post-stamps also untouched (handle_enemy_buff_threat, try_save_ally A4 separate domain, try_save_lotus_first, lotus_first_disabled fallthrough, defer-to-armed bookkeeping, v0.5.38 MAINT-11.2 armed_post_fire). **FC-PROBE-COVERAGE**: v0.5.39 BUG-1 pre_tf_opener FC site gains the same fc_status_probe one-shot block already present at the starter and tf_burst sites. Pre-v0.5.41, when the opener wins the per-engagement latch (state.fc_tf_opener_fired = true), tf_burst want_fc gate fails and its probe never fires; the only path that emitted the diagnostic was a starter-first session. Restores v0.5.36 intent: whichever FC dispatch fires first owns the probe. **GAP-3-GENERIC**: lib/defense.lua ResolveSaveOrder parameterized via new cfg.post_pick_filter(picked, ctx, threat_mod, authoritative) hook. v0.5.40 hardcoded lina_flame_cloak chain-tail demotion under ctx.fs_shard_window moves into Lina Defense.New cfg as a closure; lib treats ctx as opaque and applies new_auth only when non-nil so a hook returning just a new chain preserves the original authoritative flag. Behavior-neutral for Lina; opens the door for other heroes to register their own chain rewrites without lib edits. lib docblock + cfg field list updated; uczone-toolkit lib mirror + docs/defense.md cfg.post_pick_filter docs pending. **Bridge metadata note**: kickoff prompt reported PowerShell Measure-Object -Line = 6745, actual is 6963 per ripgrep + raw LF count; bridge was right all along. Lesson: prefer ripgrep line numbers or (Get-Content).Count over Measure-Object -Line for Lua source files. luac clean both files, no BOM, lesson 15 banner-swap protocol verified. Source = runtime SHA verify post-deploy.")
 
 return callbacks

@@ -572,7 +572,7 @@ LINA_SAVE_OVERRIDES["modifier_sniper_assassinate"] = {
 -- runtime-add to LOTUS_WORTHY_INCOMING is deleted: the new arming branch in
 -- handle_threat_on_self fires the save AT END of cast point via the chain head's
 -- SAVE_ETA_TRIGGER, which is strictly better than the previous lotus-first
--- snap-fire at modifier-create. LINA_SAVE_OVERRIDES entry retained , consulted
+-- snap-fire at modifier-create. LINA_SAVE_OVERRIDES entry retained - consulted
 -- by ResolveSaveOrder when the armed entry's category=targeted_burst routes
 -- through the dispatcher.
 
@@ -729,8 +729,11 @@ LINA_SAVE_OVERRIDES["lina_committed_attacker"] = _COMMITTED_ATTACKER_SAVES
 -- State table init (per-tick attacker latches + per-caster re-arm latches).
 -- Declared here adjacent to the helpers so the file stays grep-coherent;
 -- could be hoisted to the L175-230 state.* block if maintenance prefers.
-state.attacking_seen_t           = state.attacking_seen_t or {}
-state.committed_attacker_armed_t = state.committed_attacker_armed_t or {}
+state.attacking_seen_t              = state.attacking_seen_t or {}
+state.committed_attacker_armed_t    = state.committed_attacker_armed_t or {}
+-- v0.5.46 Problem A diag throttle (~5Hz) + last-scan stamp counter.
+state.commit_attacker_diag_t        = state.commit_attacker_diag_t or 0
+state.attacker_latch_last_stamped   = state.attacker_latch_last_stamped or 0
 
 -- Per-tick: stamp attacking_seen_t for any visible enemy hero NPC.IsAttacking
 -- right now. Cheap O(N) scan over heroes in 3200u. API-guarded (NPC.IsAttacking
@@ -744,14 +747,22 @@ state.sample_attacker_latches = function()
     local ok, list = pcall(Entity.GetHeroesInRadius, me, 3200, Enum.TeamType.TEAM_ENEMY)
     if not ok or type(list) ~= "table" then return end
     local t = now()
+    -- v0.5.46 Problem A diag: count stamps per scan; surfaced in the
+    -- aggregate commit_attacker_diag tlog so the v0.5.45.1 debug-hostile
+    -- "silent classifier" no longer hides which gate is filtering PA.
+    local stamped = 0
     for i = 1, #list do
         local h = list[i]
         if h and Entity.IsEntity(h) and Target.IsAlive and Target.IsAlive(h)
            and NPC.IsAttacking and NPC.IsAttacking(h) then
             local ok2, idx = pcall(Entity.GetIndex, h)
-            if ok2 and idx then state.attacking_seen_t[idx] = t end
+            if ok2 and idx then
+                state.attacking_seen_t[idx] = t
+                stamped = stamped + 1
+            end
         end
     end
+    state.attacker_latch_last_stamped = stamped
 end
 
 -- Classifier: returns true iff h is currently committing attacks on Lina
@@ -796,37 +807,97 @@ state.scan_and_arm_committed_attackers = function()
                            Enum.TeamType.TEAM_ENEMY)
     if not ok or type(list) ~= "table" then return end
     local t = now()
+    -- v0.5.46 Problem A diag: v0.5.45.1 Test 5 produced zero
+    -- committed_attacker_armed despite PA attacking. The helpers above
+    -- filter silently (return early without any emit) so debugging the
+    -- which-gate-rejected-PA question required reading the code. Now
+    -- throttled aggregate + per-enemy breakdowns surface (a) the inner-
+    -- scan size, (b) per-enemy NPC.IsAttacking / Target.IsKitingUs /
+    -- latch-age / classifier verdict, (c) re-arm latch blocks. Throttle
+    -- at ~5Hz (200ms) to bound log volume during the typical 60s test.
+    local emit_diag = (t - (state.commit_attacker_diag_t or 0)) >= 0.20
+    local diag_in700      = 0
+    local diag_attacking  = 0
+    local diag_kiting     = 0
+    local diag_committed  = 0
+    local diag_armed      = 0
+    local diag_latched    = 0
     for i = 1, #list do
         local h = list[i]
-        if state.is_committed_attacker_on_self(h) then
-            local ok2, idx = pcall(Entity.GetIndex, h)
-            if ok2 and idx then
-                local last_arm = state.committed_attacker_armed_t[idx] or 0
-                if (t - last_arm) >= LINA_COMMITTED_ATTACK_WINDOW_S then
-                    local d     = dist_to(h) or LINA_ATTACK_ENGAGE_RADIUS
-                    local speed = (NPC.GetMoveSpeed and NPC.GetMoveSpeed(h)) or 300
-                    state.committed_attacker_armed_t[idx] = t
-                    tlog(1, "committed_attacker_armed", {
-                        caster  = uname(h),
-                        dist    = string.format("%.0f", d),
-                        mvspeed = string.format("%.0f", speed),
-                    })
-                    local intent = "committed_attacker_" .. tostring(idx)
-                    defense_dispatcher:Dispatch(
-                        intent,                            -- intent
-                        "lina_committed_attacker",         -- threat_mod (synthetic)
-                        h,                                 -- threat_caster
-                        me,                                -- target_unit
-                        nil,                               -- fire_thunk (use chain walker)
-                        "close_gap",                       -- category_hint
-                        nil,                               -- ability_name
-                        nil,                               -- armed_entry
-                        record_save,                       -- on_save_fired
-                        { fs_shard_window = fs_shard_window_active() }  -- ctx
-                    )
+        if h and Entity.IsEntity(h) and Target.IsAlive and Target.IsAlive(h) then
+            diag_in700 = diag_in700 + 1
+            local attacking_now = (NPC.IsAttacking and NPC.IsAttacking(h)) and true or false
+            local kiting        = (Target.IsKitingUs and Target.IsKitingUs(h, me)) and true or false
+            if attacking_now then diag_attacking = diag_attacking + 1 end
+            if kiting        then diag_kiting    = diag_kiting    + 1 end
+            local committed = state.is_committed_attacker_on_self(h)
+            if committed then diag_committed = diag_committed + 1 end
+            if emit_diag then
+                local d_diag = dist_to(h) or math.huge
+                local ok_d, idx_d = pcall(Entity.GetIndex, h)
+                local seen_t = (ok_d and idx_d and state.attacking_seen_t[idx_d]) or 0
+                local seen_age = seen_t > 0 and (t - seen_t) or -1
+                tlog(3, "commit_attacker_diag_h", {
+                    h         = uname(h),
+                    dist      = string.format("%.0f", d_diag),
+                    attacking = attacking_now and "y" or "n",
+                    kiting    = kiting and "y" or "n",
+                    seen_age  = string.format("%.2f", seen_age),
+                    committed = committed and "y" or "n",
+                })
+            end
+            if committed then
+                local ok2, idx = pcall(Entity.GetIndex, h)
+                if ok2 and idx then
+                    local last_arm = state.committed_attacker_armed_t[idx] or 0
+                    if (t - last_arm) >= LINA_COMMITTED_ATTACK_WINDOW_S then
+                        diag_armed = diag_armed + 1
+                        local d     = dist_to(h) or LINA_ATTACK_ENGAGE_RADIUS
+                        local speed = (NPC.GetMoveSpeed and NPC.GetMoveSpeed(h)) or 300
+                        state.committed_attacker_armed_t[idx] = t
+                        tlog(1, "committed_attacker_armed", {
+                            caster  = uname(h),
+                            dist    = string.format("%.0f", d),
+                            mvspeed = string.format("%.0f", speed),
+                        })
+                        local intent = "committed_attacker_" .. tostring(idx)
+                        defense_dispatcher:Dispatch(
+                            intent,                            -- intent
+                            "lina_committed_attacker",         -- threat_mod (synthetic)
+                            h,                                 -- threat_caster
+                            me,                                -- target_unit
+                            nil,                               -- fire_thunk (use chain walker)
+                            "close_gap",                       -- category_hint
+                            nil,                               -- ability_name
+                            nil,                               -- armed_entry
+                            record_save,                       -- on_save_fired
+                            { fs_shard_window = fs_shard_window_active() }  -- ctx
+                        )
+                    else
+                        diag_latched = diag_latched + 1
+                        if emit_diag then
+                            tlog(3, "commit_attacker_diag_latched", {
+                                h         = uname(h),
+                                latch_age = string.format("%.2f", t - last_arm),
+                                window    = string.format("%.2f", LINA_COMMITTED_ATTACK_WINDOW_S),
+                            })
+                        end
+                    end
                 end
             end
         end
+    end
+    if emit_diag then
+        state.commit_attacker_diag_t = t
+        tlog(3, "commit_attacker_diag", {
+            in700     = tostring(diag_in700),
+            attacking = tostring(diag_attacking),
+            kiting    = tostring(diag_kiting),
+            committed = tostring(diag_committed),
+            armed     = tostring(diag_armed),
+            latched   = tostring(diag_latched),
+            stamped   = tostring(state.attacker_latch_last_stamped or 0),
+        })
     end
 end
 
@@ -1329,6 +1400,23 @@ local SAVE_FIRE = {
                         end
                     end
                 end
+            end
+            -- v0.5.46 Problem B too-late belt+suspenders: armed_post_fire
+            -- stashes the threat's homing eta in state.cur_armed_eta. W's
+            -- 1.1s prep means firing at cur_eta < 1.0s detonates AFTER the
+            -- threat arrives, missing the target (v0.5.45.1 Test 7 Tusk
+            -- snowball: fire at eta=0.51, detonate 0.59s after arrival).
+            -- The primary fix is the SAVE_FIRE_DISTANCE removal which now
+            -- gates the homing path on SAVE_ETA_TRIGGER=1.20 only; this belt
+            -- covers the at-impact eta_critical (eta<=0.35) path PLUS any
+            -- future entry points (proactive Dispatch w/ low-eta hint, etc.)
+            -- that could still arrive at the .fire body with cur_eta<1.0s.
+            if state.cur_armed_eta and state.cur_armed_eta < 1.0 then
+                tlog(3, "w_defensive_skip_too_late", {
+                    intent  = intent_s,
+                    cur_eta = string.format("%.2f", state.cur_armed_eta),
+                })
+                return false
             end
             local w_cost    = (Ability.GetManaCost and Ability.GetManaCost(w)) or 130
             local r_reserve = 450
@@ -2091,7 +2179,18 @@ local SAVE_FIRE_DISTANCE = {
     item_invis_sword        = 240,
     item_silver_edge        = 240,
     item_ethereal_blade_self = 480,
-    lina_w_anti_gap         = 800,  -- v0.5.44: generous spatial gate. W is AoE not self-displacement so the 250u SELF_PUSH_FLOOR does not apply. 800u covers Bara charge fire moments (eta-trigger usually wins first; this is the proximity-fallback gate).
+    -- v0.5.46 Problem B: SAVE_FIRE_DISTANCE entry for lina_w_anti_gap
+    -- REMOVED. The 800u gate (v0.5.44) was fundamentally mistimed for
+    -- W's 1.1s prep window. v0.5.45.1 Test 7 demo: chain walker hit the
+    -- dist gate at d=613 (eta=0.51s) and fired W; W detonated at now+1.1s
+    -- = 0.59s AFTER Tusk snowball arrival, missing the threat at the
+    -- end-of-snowball position. With this entry absent, armed_chain_peek
+    -- skips the dist branch for W and falls through to SAVE_ETA_TRIGGER
+    -- [lina_w_anti_gap]=1.20 (above), which precisely aligns W detonation
+    -- (now+1.10s) with threat arrival (now+1.20s) so the 1.6s stun AoE
+    -- catches the threat at Lina's position. Combined with the .fire
+    -- too-late belt (state.cur_armed_eta < 1.0s skip) so the cast-point
+    -- and proactive Dispatch entry points are also covered.
 }
 -- v0.5.9 (E2): self-displacement saves refuse to fire below this radius --
 -- pushing Lina 600u in facing when the threat already crossed inside would
@@ -2183,6 +2282,13 @@ end
 local function armed_post_fire(key, entry, eta, d, fire_reason)
     entry.fired = true
     state.armed_threats[key] = nil
+    -- v0.5.46 Problem B belt: stash threat eta for SAVE_FIRE.lina_w_anti_gap.fire
+    -- to consult below. W skips if cur_armed_eta < 1.0s (its 1.1s prep would
+    -- land too late). cast_point entries pass eta=0 here as a sentinel (real
+    -- timing lives in entry._cp_t), so stash nil for those to avoid a false
+    -- skip. Cleared at function end so non-armed call sites of W's .fire
+    -- (proactive Dispatch, etc.) see nil and fall through.
+    state.cur_armed_eta = (not entry.cast_point_threat) and eta or nil
     -- v0.5.6 (E2): eta_t shows the per-save effective trigger
     -- actually used this tick (entry default 0.8s when no
     -- override hit, or blink_arrived/eta_critical paths).
@@ -2220,6 +2326,12 @@ local function armed_post_fire(key, entry, eta, d, fire_reason)
     entry._fire_dist_eff = nil
     entry._fire_save_eff = nil
     entry._cp_t = nil
+    -- v0.5.46 Problem B belt: drop the eta stash so subsequent W .fire
+    -- calls outside the armed path (proactive Dispatch, etc.) see nil
+    -- and skip the too-late check. Same-tick chain re-entry not a
+    -- concern here -- the lock domain (v0.5.40) gates re-entry until
+    -- the in-flight save resolves.
+    state.cur_armed_eta = nil
 end
 
 -- Armed homing / instant-blink threats: fire on arrival (instant-blink) or at
@@ -2311,7 +2423,7 @@ local function armed_threats_tick()
                     end
                     if should_fire then
                         entry._cp_t = cp_remaining
-                        -- eta arg is 0 for cp entries , the cp_t field in
+                        -- eta arg is 0 for cp entries - the cp_t field in
                         -- the armed_threat_fire tlog carries the meaningful
                         -- timing signal. via=cp_save_dist / cp_eta_trigger
                         -- distinguishes the path from homing eta_trigger.
@@ -2793,7 +2905,7 @@ end
 local function on_hard_disable(ev)
     if not ev.target_self then return end
     if not is_threat_caster(ev) then return end
-    -- v0.5.39 BUG-3: cast-point arming via the anim path. PRIMARY entry ,
+    -- v0.5.39 BUG-3: cast-point arming via the anim path. PRIMARY entry -
     -- anim fires at cast-start (true pre-cast window), whereas
     -- OnModifierCreate fires after the modifier lands (catch-up only).
     -- If ev.ability_name maps to a CAST_POINT_THREATS entry, ARM and bail;
@@ -7039,7 +7151,7 @@ local function handle_lotus_first(npc, modifier, mod_name, is_self)
     -- targeted_burst chain leads with item_lotus_orb); the arming branch
     -- just gates WHEN the save fires. lina_laguna_blade self-mirror skip:
     -- if the caster is OUR Lina (Rubick spell-steal mirror, Morphling
-    -- adaptive-strike echo), no save makes sense , our own cast resolved
+    -- adaptive-strike echo), no save makes sense - our own cast resolved
     -- already. Fall through to the legacy lotus_first path in that case.
     local cp_entry_lw = CAST_POINT_THREATS[mod_name]
     local laguna_self_mirror = (mod_name == "modifier_lina_laguna_blade"
@@ -7080,7 +7192,7 @@ local function handle_lotus_first(npc, modifier, mod_name, is_self)
     -- to stop; the armed_threats_tick lotus_pending branch will fire Lotus the
     -- moment it readies and stamp dedup then. Note: BUG-3's CAST_POINT_THREATS
     -- arming runs BEFORE the dedup check above; for LOTUS_WORTHY ∩ CAST_POINT
-    -- intersection (Laguna, Finger) BUG-3 wins and this branch is unreachable ,
+    -- intersection (Laguna, Finger) BUG-3 wins and this branch is unreachable -
     -- intentional, castpt arming gives a more precise fire moment.
     if lotus_defer_if_close(mod_name, caster_lw) then
         return true
@@ -7161,7 +7273,7 @@ local function handle_threat_on_self(npc, modifier, mod_name, is_self)
     -- armed_threats_tick can fire the save within the residual window.
     -- lina_laguna_blade self-mirror skip mirrors handle_lotus_first's
     -- guard: if OUR Lina is the caster (Rubick mirror, etc.), no save
-    -- makes sense , fall through so the legacy try_save_self path runs
+    -- makes sense - fall through so the legacy try_save_self path runs
     -- (which will no-op for self-cast via the dispatcher's own guards).
     local cp_entry_ts = CAST_POINT_THREATS[mod_name]
     local cp_caster = cp_entry_ts and Modifier.GetCaster(modifier) or nil
@@ -7627,6 +7739,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.45.1 LB Linkbreaker chain-item override: hotfix for the v0.5.45 Bara double-fire (brain W + framework Pike). v0.5.45 demo log trace at game-time 78.77s showed brain chain walker correctly fired W as tail (Pike fire_returned_false from chain), then 33ms later framework SafeSend pipeline cast Pike on Bara (caster=lina, no brain `issued` event). Pike modifier landed at 78.87s, pushing Bara 425u in his facing. Brain W's 1.1s prep meant W detonated at Lina's old position 1.1s later, by which time Bara was 425u away outside W's 225u AoE. W missed. Source identified: the Lina-specific Linkbreaker subsystem at gui.json Heroes/Hero List/Lina/Main Settings/Items Settings/Linkbreaker Items (L16888 in user gui) has 5 chain-overlap items at true (item_cyclone / item_ethereal_blade / item_force_staff / item_hurricane_pike / item_wind_waker). Linkbreaker is a SEPARATE framework subsystem from the Dodger (v0.5.43 override covers Dodger's Защитные предметы only). Per Sniper.lua L7814 comment 'subsystems: Dodger, Items Manager, Linkbreaker' the three are independent auto-cast layers; we now know two of three. **Fix**: mirror the v0.5.43 Dodger override pattern. New module-level LB table bundling chain items / menu path / read+write Menu API helpers (both nested + container shapes tried, pcall-guarded) / disable + restore functions. Bundled into ONE local table to stay under Lua's 200-local-vars-per-function limit (hit during v0.5.45 + W gate + commit-attacker additions; v0.5.45.1 hotfix had to refactor as a side-task). New Defense menu toggle 'Override Linkbreaker defense items' default true. Hook into the existing GameRules.GetGameState transition block in OnUpdateEx adjacent to the Dodger override hook: capture+zero 5 LB items at GAME_IN_PROGRESS, restore at POST_GAME. Match-scoped per user spec. Idempotent via state.linkbreaker_disabled latch. Safety: if restore captured state is all-false (mid-match brain reload captured already-zeroed state), default to all-true on restore. Diagnostic tlog linkbreaker_chain_disabled / _restored at v=1 with set_ok + read_shape + write_shape so user can verify which Menu API shape resolved. **Verification on next demo**: at match start expect 'linkbreaker_chain_disabled items=5 set_ok=5 read_shape=nested write_shape=nested' (or container). Bara charge with WW/Pike/Force ready: expect brain WW fires alone (no framework Pike collateral); chain walker's normal save_chain_skip+layer2_save sequence, no extra modseen | mod=modifier_item_hurricane_pike_active_alternate | caster=lina events at framework SafeSend timing. If set_ok=0 the Menu API didn't resolve, falls back to manual UI uncheck of the 5 items in Linkbreaker menu. **What was confirmed in v0.5.45 demo log** (despite the framework Pike issue): chain walker fired exactly one save per dispatch (W in tail position when Pike fire_returned_false), v0.5.40 dispatcher lock working correctly (each lock_acquired matched with exactly one save), v0.5.44 W tail behavior per Q1 spec. The 'double fire' was framework + brain, not brain + brain. v0.5.45's commit-attacker + W .fire gate were NOT in the demo (v0.5.44 banner in log; brain didn't reload). **Hard-won lesson logged for v0.5.46+**: Lua's 200-local-variables-per-function limit is a HARD constraint. Future module-level additions should bundle into state.* or named module-tables (mirror LB.items / LB.read / LB.write etc.) rather than separate locals. Hit limit at ~200 with v0.5.45.1 additions; refactored 8 new locals into 1 (the LB table). **Roadmap**: v0.5.46 = FC defensive refinements (Q2 + Q8) + category patches + composer-tier audit + type-aware composer + Items Manager override (likely a third subsystem like LB but separate menu path; investigate if v0.5.45.1 LB doesn't fully close framework collateral). Lina.lua 7489 -> 7630 lines (+141). Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified, source = runtime SHA verify post-deploy.")
+LOG:info("Lina brain v0.5.46 commit-attacker diagnostics + W pre-fire timing fix: two patches targeting the v0.5.45.1 demo Tests 5 + 7 failures. **Problem A (Test 5 commit-attacker silent classifier)**: v0.5.45.1 demo Test 5 (PA attacks Lina) produced ZERO committed_attacker_armed tlogs across the entire log despite PA confirmed attacking, while OTHER v0.5.45 features (framework override, W intent-pattern gate) WORKED. Root cause: the three commit-attacker helpers (sample_attacker_latches, is_committed_attacker_on_self, scan_and_arm_committed_attackers) emit NO diagnostic tlog unless they ACTUALLY arm, so the classifier was filtering silently and the gate (dist / NPC.IsAttacking / Target.IsKitingUs / attacking_seen_t latch window) responsible was undebuggable from the log. **Fix**: throttled (~5Hz via state.commit_attacker_diag_t) diagnostic emits in scan_and_arm_committed_attackers: aggregate commit_attacker_diag v=3 with in700 / attacking / kiting / committed / armed / latched / stamped counts, plus per-enemy commit_attacker_diag_h v=3 with dist / attacking / kiting / seen_age / committed verdict, plus commit_attacker_diag_latched v=3 when re-arm latch blocks. sample_attacker_latches now exposes state.attacker_latch_last_stamped for the aggregate emit. Next demo Test 5 re-run reveals which gate filters PA; targeted fix (kiting=true false-positive / IsAttacking nil / latch never stamping) follows in v0.5.46.1. **Problem B (Test 7 Tusk snowball W mis-timing)**: v0.5.45.1 Test 7 W fired on Tusk snowball at eta=0.51 via the dist gate (chain walker save_dist branch hit on d=613 < SAVE_FIRE_DISTANCE[lina_w_anti_gap]=800). W's 1.1s prep meant detonation 0.59s AFTER Tusk arrival, by which time Tusk's snowball had carried Lina away from the W AoE. W stunned nothing. Root cause: the 800u dist gate fundamentally mis-times W since 800u at typical Tusk-class speeds (1200 u/s) maps to eta=0.67s which is already BELOW W's 1.1s prep before the gate even triggers. **Fix**: SAVE_FIRE_DISTANCE entry for lina_w_anti_gap REMOVED; homing path now falls through to SAVE_ETA_TRIGGER[lina_w_anti_gap]=1.20 only, which precisely aligns W detonation (now+1.10s) with threat arrival (now+1.20s) so the 1.6s stun catches Tusk / Bara / MK on arrival. **Belt+suspenders**: state.cur_armed_eta stash in armed_post_fire (set to homing-entry eta; nil for cast_point entries) plus new w_defensive_skip_too_late v=3 gate inside SAVE_FIRE.lina_w_anti_gap.fire (skip if cur_armed_eta<1.0s). Covers the eta_critical (eta<=0.35) at-impact path and any future Dispatch entry points that could still arrive at .fire with low eta. The v0.5.45 intent-pattern + 100u-melee gates stay intact ahead of the new gate. **What was confirmed PASSing in v0.5.45.1 demo**: Test 1 (framework override dodger+linkbreaker emit cleanly at GAME_IN_PROGRESS), Test 2 (Bara items-ready single brain item fires), Test 3 (Bara items-spent W tail fires), Test 4 (PA blink gates W with sub_1_1s_arrival_pattern x4). **What is NOT in v0.5.46** (deferred): FC defensive refinements (Q2 5s pre-combo skip + Q8 fiery_soul_stacks>=5 + fc_offensive_inflight + fc_demote_filter drop + HasModifier early-return), category patches (targeted_disable / delayed_aoe / targeted_burst FC-to-tail), Q7 composer-tier audit, composer ship (cfg.compose_chain hook), Items Manager subsystem hunt. Tight test cycle: validate Test 5 diag + Test 7 W timing in isolation; refinements ride next release. **Hard constraint reinforced**: Lua's 200-local-vars-per-function limit was hit during v0.5.45.1 LB refactor and remains a HARD CONSTRAINT; v0.5.46 additions bundle into state.* (state.commit_attacker_diag_t / state.attacker_latch_last_stamped / state.cur_armed_eta) rather than file-level locals. **Lina.lua 7630 -> 7742 lines (+112)**. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
 
 return callbacks

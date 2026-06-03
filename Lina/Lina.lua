@@ -1556,30 +1556,35 @@ local SAVE_FIRE = {
             -- and chase-Lina (any moving committed attacker) uniformly.
             -- Falls back to Lina origin if caster handle is missing
             -- (proactive Dispatch with no armed entry, dead caster, etc.).
-            -- v0.5.47.2 aim resolution: per-mod policy via state.W_aim_at_
-            -- caster_mods allowlist. DEFAULT for all threats is Lina origin
-            -- (state.self_npc position) since the W AoE catches whoever
-            -- arrives at Lina (homing close-gap stops at Lina, carry-Lina
-            -- delivers Lina + caster to the same spot, instant blinks land
-            -- at Lina). The v0.5.46.3-v0.5.47.1 predict-aim was wrong for
-            -- Tusk snowball: predict_target_pos used Tusk's velocity to
-            -- extrapolate but the snowball's actual arrival point IS Lina
-            -- (the snowball PICKS UP Lina, doesn't deposit her past). User
-            -- spec v0.5.47.2: "It should be casted on self in the right
-            -- timing". ALLOWLIST exception: interruptible channels (WD
-            -- Death Ward currently) aim at the threat caster's CURRENT
-            -- position so W stuns the caster mid-channel before the channel
-            -- resolves. Tlog aim field: self_origin / caster_origin /
-            -- self_origin_fallback (no caster handle).
+            -- v0.5.48 Phase 2 aim resolution: per-mod policy from catalog
+            -- (lib/threat_data.lua THREAT_ARRIVAL_TIMING.impact_pos). The
+            -- catalog encodes "self" (defender position) vs "caster"
+            -- (caster position; channel-interrupt). For mods NOT in the
+            -- catalog, fall back to v0.5.47.2 W_aim_at_caster_mods
+            -- allowlist + Lina-origin default.
+            -- Tlog aim field: catalog_self / catalog_caster / self_origin /
+            -- caster_origin / self_origin_fallback.
             local pos
             local caster = threat_caster or state.cur_armed_caster
             local aim_via
-            if threat_mod and state.W_aim_at_caster_mods
-               and state.W_aim_at_caster_mods[threat_mod]
-               and caster and Entity.IsEntity(caster) and Target.IsAlive
-               and Target.IsAlive(caster) then
-                pos     = Entity.GetAbsOrigin and Entity.GetAbsOrigin(caster)
-                aim_via = "caster_origin"
+            if state.compute_arrival_time and threat_mod and caster then
+                local _, impact_pos, cat_entry =
+                    state.compute_arrival_time(threat_mod, caster, me)
+                if impact_pos then
+                    pos     = impact_pos
+                    aim_via = (cat_entry and cat_entry.impact_pos == "caster")
+                              and "catalog_caster" or "catalog_self"
+                end
+            end
+            -- v0.5.47.2 legacy fallback for mods not in catalog yet.
+            if not pos then
+                if threat_mod and state.W_aim_at_caster_mods
+                   and state.W_aim_at_caster_mods[threat_mod]
+                   and caster and Entity.IsEntity(caster) and Target.IsAlive
+                   and Target.IsAlive(caster) then
+                    pos     = Entity.GetAbsOrigin and Entity.GetAbsOrigin(caster)
+                    aim_via = "caster_origin"
+                end
             end
             if not pos then
                 pos     = Entity.GetAbsOrigin and Entity.GetAbsOrigin(me)
@@ -2425,17 +2430,38 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
             -- catalog in lib/threat_data.lua.
             if sn == "lina_w_anti_gap" then
                 local W_LEAD       = 1.12
+                -- v0.5.48 Phase 2: try the per-mod catalog first; if a
+                -- catalog entry exists, use its precise impact_t for the
+                -- in_window check. The catalog encodes KV-derived travel
+                -- speed (Tusk snowball uses snowball_movement_speed=1675)
+                -- + cast point + carry/aim distinction. Falls back to
+                -- v0.5.47.2 max(stamped, live) when no catalog entry.
+                if state.compute_arrival_time then
+                    local impact_t, impact_pos, _, cat_speed =
+                        state.compute_arrival_time(entry.threat_mod, entry.caster, state.self_npc)
+                    if impact_t then
+                        local in_window = impact_t >= (W_LEAD - 0.05)
+                                          and impact_t <= (W_LEAD + 0.20)
+                        tlog(3, "w_catalog_eta_gate", {
+                            d         = string.format("%.0f", d),
+                            speed     = string.format("%.0f", cat_speed or 0),
+                            impact_t  = string.format("%.2f", impact_t),
+                            in_window = in_window and "y" or "n",
+                            mod       = tostring(entry.threat_mod),
+                        })
+                        if in_window then
+                            entry._fire_dist_eff   = -3  -- sentinel: catalog path
+                            entry._fire_save_eff   = sn
+                            entry._catalog_aim_pos = impact_pos
+                            return true, "w_catalog_eta", eta_trigger_eff
+                        end
+                        -- Catalog hit but out of window: defer, block legacy.
+                        return false, nil, -1
+                    end
+                end
+                -- v0.5.47.2 fallback: no catalog entry, use max(stamped, live).
                 local live_speed   = NPC.GetMoveSpeed and NPC.GetMoveSpeed(entry.caster) or 0
                 local stamped_spd  = entry.eta_speed or 0
-                -- v0.5.47.2: use max(stamped, live) so threats where the
-                -- hero MS API returns the wrong number (Tusk snowball:
-                -- NPC.GetMoveSpeed returns Tusk's BASE MS ~310 but the
-                -- snowball entity travels at ~1200) fall back to the
-                -- stamped value. Bara charge: stamped=600 vs live=515 at
-                -- mid-charge -> max=600 keeps gate working with the more
-                -- conservative number (live charge speed ramps up so
-                -- subsequent frames re-evaluate). PA blink doesn't hit
-                -- this branch (instant_blink path).
                 local eff_speed    = math.max(live_speed, stamped_spd)
                 if eff_speed > 0 then
                     local real_eta  = d / eff_speed
@@ -3504,6 +3530,96 @@ state.item_kv = function(handle, key, fallback)
         if v and v ~= 0 then return v end
     end
     return fallback
+end
+
+-- v0.5.48 Phase 2: per-mod arrival-time computation. Consumes
+-- ThreatData.THREAT_ARRIVAL_TIMING catalog (lib/threat_data.lua) to
+-- derive (impact_t, impact_pos) for a threat. impact_t = "seconds from
+-- now until the threat actually lands on target". impact_pos = position
+-- where defensive AoE saves should be aimed (target origin for arrival-
+-- at-target threats; caster origin for channel-interrupt threats).
+--
+-- Returns nil for any threat without a catalog entry; callers MUST fall
+-- back to legacy logic (v0.5.47.x stamped eta_speed + W_aim_at_caster_
+-- mods allowlist). Catalog seeded with Bara / Tusk / PA / WD / Lion /
+-- Sniper Assassinate / Lina Laguna; future expansion in v0.5.48+.
+--
+-- Why catalog over stamped: user spec from v0.5.47.2 demo discussion --
+-- "We have to calculate W usage correctly when the skills is about to
+-- hit lina, get the right information from liquipedia. The skill takes
+-- 1.12s to land. For skills that charge, they have a charge timing and
+-- this should be on threat data." The catalog encodes the liquipedia-
+-- confirmed timing data per-mod; the compute helper reads live KV via
+-- state.item_kv when the entry asks for it.
+state.compute_arrival_time = function(threat_mod, caster, target, modifier_handle)
+    if not (threat_mod and caster and target) then return nil end
+    if not (TD.THREAT_ARRIVAL_TIMING and TD.THREAT_ARRIVAL_TIMING[threat_mod]) then
+        return nil
+    end
+    if not (Entity.IsEntity and Entity.IsEntity(caster) and Entity.IsEntity(target)) then
+        return nil
+    end
+    if not (Target.IsAlive and Target.IsAlive(caster) and Target.IsAlive(target)) then
+        return nil
+    end
+    local entry = TD.THREAT_ARRIVAL_TIMING[threat_mod]
+
+    -- Derive effective travel speed.
+    local speed = entry.speed_fallback or 0
+    if entry.speed_source == "live_or_fallback" then
+        local live = NPC.GetMoveSpeed and NPC.GetMoveSpeed(caster)
+        if live and live > 0 then speed = math.max(speed, live) end
+    elseif entry.speed_source == "kv_or_fallback" then
+        local abil
+        if modifier_handle and Modifier and Modifier.GetAbility then
+            local ok, a = pcall(Modifier.GetAbility, modifier_handle)
+            if ok then abil = a end
+        end
+        if abil and entry.kv_speed_key then
+            speed = state.item_kv(abil, entry.kv_speed_key, speed)
+        end
+    elseif entry.speed_source == "instant" then
+        speed = 0
+    end
+
+    -- Travel time = dist(caster, target) / speed (0 for instant kinds).
+    local travel_t = 0
+    if speed > 0 then
+        local cpos = Entity.GetAbsOrigin(caster)
+        local tpos = Entity.GetAbsOrigin(target)
+        if cpos and tpos then
+            local dx = (cpos.x or 0) - (tpos.x or 0)
+            local dy = (cpos.y or 0) - (tpos.y or 0)
+            local d  = math.sqrt(dx * dx + dy * dy)
+            travel_t = d / speed
+        end
+    end
+
+    -- Cast point (optionally KV-driven).
+    local cast_pt = entry.cast_point or 0
+    if entry.kv_cast_point_key then
+        local abil
+        if modifier_handle and Modifier and Modifier.GetAbility then
+            local ok, a = pcall(Modifier.GetAbility, modifier_handle)
+            if ok then abil = a end
+        end
+        if abil and Ability.GetCastPoint then
+            local ok, v = pcall(Ability.GetCastPoint, abil, true)
+            if ok and type(v) == "number" and v > 0 then cast_pt = v end
+        end
+    end
+
+    local impact_t = cast_pt + travel_t + (entry.post_cast_delay or 0)
+
+    -- Impact position.
+    local impact_pos
+    if entry.impact_pos == "self" then
+        impact_pos = Entity.GetAbsOrigin(target)
+    elseif entry.impact_pos == "caster" then
+        impact_pos = Entity.GetAbsOrigin(caster)
+    end
+
+    return impact_t, impact_pos, entry, speed
 end
 -- Q (Dragon Slave) is a traveling line wave (KV dragon_slave_speed = 1200 u/s,
 -- cast point 0.35). The wave reaches a target at distance d at cast_point +
@@ -8017,6 +8133,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.47.3 hotfix: fs_shard_window_active + record_save upvalue capture fix. Same class of bug as v0.5.46.3 defense_dispatcher. v0.5.47.2 demo log L5070-5076 caught a runtime error: `[Lua error] C:\\Umbrella\\scripts\\Lina.lua:982: attempt to call a nil value (global fs_shard_window_active)` inside the scan_and_arm_committed_attackers Dispatch call. Root cause: fs_shard_window_active local function is defined at L2090 + record_save at L2099 but state.scan_and_arm_committed_attackers (L797 area) references both inside its Dispatch invocation. At function-creation time the locals do not exist yet so Lua resolves both as nil GLOBALS; at call time the function CRASHES on `fs_shard_window_active()`. Every committed_attacker_armed log was immediately followed by `[Lua error] ... in field scan_and_arm_committed_attackers` then `[DEBUG] pre_face_skip reason=not_self_alive` -- the Dispatch crashed, the chain walker never ran, no save fired. User reported: 'Target that are commiting to attack lina have response only for skills, auto attacks no. Sniper have this feature. We need this'. ROOT CAUSE was the crashed Dispatch on every auto-attack commit, NOT a missing chain or arm-time gate. v0.5.45 originally introduced commit-attacker; v0.5.46.3 fixed the defense_dispatcher upvalue; v0.5.47.3 closes the final two upvalue captures in the same scan function. **Fix**: forward-declare `local fs_shard_window_active` + `local record_save` near the top of file (adjacent to the v0.5.46.3 defense_dispatcher forward declaration); drop the `local` keyword from the L2090 + L2099 assignments so they target the forward-declared upvalues. **Bug 2 (timing off; user spec 'Time is off, we should make the calculus to intercept the skills')**: not in v0.5.47.3 scope. The intercept calculation requires the Phase 2 catalog work (THREAT_ARRIVAL_TIMING table in lib/threat_data.lua per the Option C roadmap with cast_point + travel_speed + travel_distance_fn + post_cast_delay per modifier). Queued for v0.5.48. **Bug 4 (PA second blink no W response)**: probable side-effect of the runtime-error crash trashing dispatch state on subsequent ticks. With v0.5.47.3 the dispatch flow runs cleanly; subsequent PA blinks should fire saves. Re-verify on next demo. **Other v0.5.47.2 demo confirmation**: WD Death Ward PASSED (v0.5.47.1 Bug 1 fix held). Tusk W intercept timing not in scope (needs Bug 2 catalog work). **Verification on next demo**: scan_and_arm_committed_attackers should run cleanly with NO Lua error stack traces in the log; auto-attack commits (PA at melee, Bara walk-up after charge stun, Slark post-pounce auto chain, etc.) should now produce committed_attacker_armed FOLLOWED BY a chain walker save fire (Force / Pike / WW / etc. from _COMMITTED_ATTACKER_SAVES). PA second blink should get the same chain response. **Lina.lua 7991 -> 8020 lines (+29). SHA refreshed. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
+LOG:info("Lina brain v0.5.48 Phase 2 of Option C roadmap: per-mod threat-arrival-timing catalog in lib/threat_data.lua + state.compute_arrival_time helper. **Background**: v0.5.47.x demos drove the structural realization that 'time is off' is fundamentally a data problem -- the stamped eta_speed constants (600 for Bara, 1200 for Tusk) work as proxies for some threats but miss the actual mechanics (Tusk snowball travels at a fixed KV speed 1675 independent of Tusk's hero MS; Bara charge MS scales with level + Phase Boots + talents and can hit 1100+). v0.5.47.2 introduced max(stamped, live) as a stop-gap. v0.5.48 introduces the proper data-driven solution: a per-mod catalog in lib/threat_data.lua + a hero-side helper that derives precise (impact_t, impact_pos). **Catalog (lib/threat_data.lua THREAT_ARRIVAL_TIMING)**: seed entries for 7 high-priority mods: modifier_spirit_breaker_charge_of_darkness (homing_charge, speed_source=live_or_fallback fallback 1000, impact_pos=self), modifier_tusk_snowball_movement (homing_carry, speed_source=kv_or_fallback kv_ability=tusk_snowball kv_speed_key=snowball_movement_speed fallback 1675, impact_pos=self -- snowball PICKS UP target at target position), modifier_phantom_assassin_phantom_strike_target (instant_blink, impact_pos=self), modifier_witch_doctor_death_ward (channel_at_caster, cast_point 0.5, impact_pos=caster -- W aimed at WD to interrupt), modifier_lion_finger_of_death (cast_point_targeted 0.6, kv_cast_point_key=AbilityCastPoint, impact_pos=self), modifier_sniper_assassinate (cast_point_targeted 2.0, kv lookup, impact_pos=self), modifier_lina_laguna_blade (cast_point_targeted 0.45, kv lookup, impact_pos=self). Entry fields: kind / speed_source (live_or_fallback | kv_or_fallback | instant) / speed_fallback / kv_ability / kv_speed_key / cast_point / kv_cast_point_key / post_cast_delay / impact_pos (self | caster). **state.compute_arrival_time(threat_mod, caster, target, modifier_handle)**: consumes the catalog and returns (impact_t, impact_pos, entry, eff_speed). Derives speed by switching on speed_source: live_or_fallback uses max(NPC.GetMoveSpeed(caster), speed_fallback); kv_or_fallback reads Ability.GetLevelSpecialValueFor(modifier_ability, kv_speed_key) via state.item_kv (Sniper-port pattern); instant bypasses travel time. Computes travel_t = dist(caster, target) / speed. Combines cast_point (KV-driven if kv_cast_point_key set, falls back to entry value) + travel_t + post_cast_delay = impact_t. Returns nil for mods not in catalog (callers MUST fall back to legacy logic). **Wired into Lina W**: (a) armed_chain_peek for lina_w_anti_gap tries catalog FIRST; if entry exists, in_window check is impact_t in [W_LEAD - 0.05, W_LEAD + 0.20] where W_LEAD=1.12s. New tlog w_catalog_eta_gate v=3 with d / speed / impact_t / in_window / mod. Fire reason w_catalog_eta distinguishes from v0.5.47.2 w_live_eta. Catalog hit out-of-window blocks legacy via eta_trigger_eff=-1 sentinel (matches v0.5.47.1 pattern). (b) lina_w_anti_gap.fire tries catalog first for aim; uses impact_pos field. New tlog aim values: catalog_self / catalog_caster. Falls back to v0.5.47.2 W_aim_at_caster_mods + self_origin if no catalog entry. **Backward compat**: mods without catalog entries use v0.5.47.2 logic unchanged. Catalog is additive; opt-in via TD.THREAT_ARRIVAL_TIMING presence check. **Future Phase 3 (v0.5.49+)**: Defense.ResolveSaveOrder consumes catalog for fire_t computation across all prep-time saves (not just W). aim_resolver_fn extension for non-self/non-caster aim policies. **Future Phase 4 (v0.5.50+)**: expand catalog to ~50 mods covering all THREAT_CATEGORY entries; mirror to Sniper; publish to uczone-toolkit. **What's NOT in v0.5.48**: KV lookup currently requires Modifier.GetAbility(modifier_handle) which Lina's call sites don't yet thread through (state.compute_arrival_time accepts modifier_handle as optional 4th param; defaults to entry.cast_point / speed_fallback when nil). v0.5.49 will thread modifier_handle from armed_threats[key].modifier (need to stash it at arm time). **Verification on next demo**: Bara expects w_catalog_eta_gate stream with live NPC.GetMoveSpeed in 'speed' field; gate fires in_window=y when impact_t ~1.12. armed_threat_fire via=w_catalog_eta. Tusk expects speed=1675 (catalog fallback; KV lookup pending modifier_handle threading); impact_t = d/1675 + 0 cast point; gate fires when d ~ 1880. WD Death Ward expects aim=catalog_caster (was caster_origin via allowlist). PA blink expects catalog impact_t=0 (instant), gate fires immediately. **Lina.lua 8020 -> 8136 lines (+116). lib/threat_data.lua: +153 lines (first lib change since v0.5.42). SHA refreshed. luac clean both files, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy. Lib commit pending under PirucaxD identity.")
 
 return callbacks

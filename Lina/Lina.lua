@@ -795,27 +795,56 @@ end
 -- re-arm latch (LINA_COMMITTED_ATTACK_WINDOW_S) prevents spam if the
 -- dispatcher releases the lock before the attacker stops committing.
 state.scan_and_arm_committed_attackers = function()
+    -- v0.5.46.1 Problem Aaa: v0.5.46 placed the diag emit AFTER the
+    -- menu / self_npc / API / pcall gates, so all the silent early-
+    -- return paths v0.5.46 was supposed to surface are STILL invisible
+    -- (the v0.5.46 demo log had zero commit_attacker_diag emits across
+    -- the entire run). Hoist a throttled (~5Hz) diag emit ABOVE every
+    -- early return with an `exit` reason so the next test reveals which
+    -- gate is filtering. Reasons emitted: menu_off / no_self / no_api /
+    -- no_dispatcher / pcall_fail / list_nil / scanned.
+    local t = now()
+    local emit_diag = (t - (state.commit_attacker_diag_t or 0)) >= 0.20
+    local function diag_exit(reason)
+        if emit_diag then
+            state.commit_attacker_diag_t = t
+            tlog(3, "commit_attacker_diag", { exit = reason })
+        end
+    end
     if not (state.menu and state.menu.enable_commit_attacker
             and state.menu.enable_commit_attacker:Get()) then
+        diag_exit("menu_off")
         return
     end
     local me = state.self_npc
-    if not (me and Entity.IsEntity and Entity.IsEntity(me)) then return end
-    if not (Entity.GetHeroesInRadius and Enum and Enum.TeamType) then return end
-    if not defense_dispatcher then return end
+    if not (me and Entity.IsEntity and Entity.IsEntity(me)) then
+        diag_exit("no_self")
+        return
+    end
+    if not (Entity.GetHeroesInRadius and Enum and Enum.TeamType) then
+        diag_exit("no_api")
+        return
+    end
+    if not defense_dispatcher then
+        diag_exit("no_dispatcher")
+        return
+    end
     local ok, list = pcall(Entity.GetHeroesInRadius, me, LINA_ATTACK_ENGAGE_RADIUS,
                            Enum.TeamType.TEAM_ENEMY)
-    if not ok or type(list) ~= "table" then return end
-    local t = now()
-    -- v0.5.46 Problem A diag: v0.5.45.1 Test 5 produced zero
-    -- committed_attacker_armed despite PA attacking. The helpers above
-    -- filter silently (return early without any emit) so debugging the
-    -- which-gate-rejected-PA question required reading the code. Now
-    -- throttled aggregate + per-enemy breakdowns surface (a) the inner-
-    -- scan size, (b) per-enemy NPC.IsAttacking / Target.IsKitingUs /
-    -- latch-age / classifier verdict, (c) re-arm latch blocks. Throttle
-    -- at ~5Hz (200ms) to bound log volume during the typical 60s test.
-    local emit_diag = (t - (state.commit_attacker_diag_t or 0)) >= 0.20
+    if not ok then
+        diag_exit("pcall_fail")
+        return
+    end
+    if type(list) ~= "table" then
+        diag_exit("list_nil")
+        return
+    end
+    -- v0.5.46 Problem A diag (kept for in-scan aggregate + per-enemy
+    -- detail): v0.5.45.1 Test 5 produced zero committed_attacker_armed
+    -- despite PA attacking. Throttle vars (emit_diag / state.commit_
+    -- attacker_diag_t) are reused from the v0.5.46.1 hoisted block
+    -- above so the exit-reason and the scanned aggregate share one
+    -- throttle window (no double-fire per tick).
     local diag_in700      = 0
     local diag_attacking  = 0
     local diag_kiting     = 0
@@ -890,6 +919,7 @@ state.scan_and_arm_committed_attackers = function()
     if emit_diag then
         state.commit_attacker_diag_t = t
         tlog(3, "commit_attacker_diag", {
+            exit      = "scanned",
             in700     = tostring(diag_in700),
             attacking = tostring(diag_attacking),
             kiting    = tostring(diag_kiting),
@@ -2179,18 +2209,23 @@ local SAVE_FIRE_DISTANCE = {
     item_invis_sword        = 240,
     item_silver_edge        = 240,
     item_ethereal_blade_self = 480,
-    -- v0.5.46 Problem B: SAVE_FIRE_DISTANCE entry for lina_w_anti_gap
-    -- REMOVED. The 800u gate (v0.5.44) was fundamentally mistimed for
-    -- W's 1.1s prep window. v0.5.45.1 Test 7 demo: chain walker hit the
-    -- dist gate at d=613 (eta=0.51s) and fired W; W detonated at now+1.1s
-    -- = 0.59s AFTER Tusk snowball arrival, missing the threat at the
-    -- end-of-snowball position. With this entry absent, armed_chain_peek
-    -- skips the dist branch for W and falls through to SAVE_ETA_TRIGGER
-    -- [lina_w_anti_gap]=1.20 (above), which precisely aligns W detonation
-    -- (now+1.10s) with threat arrival (now+1.20s) so the 1.6s stun AoE
-    -- catches the threat at Lina's position. Combined with the .fire
-    -- too-late belt (state.cur_armed_eta < 1.0s skip) so the cast-point
-    -- and proactive Dispatch entry points are also covered.
+    -- v0.5.46.1 Problem B: restored to 800u. v0.5.46 removed the entry
+    -- to fix Tusk snowball mis-timing, but v0.5.46 demo confirmed the
+    -- removal regressed Bara charge: chain walker eta_trigger=1.20 fires
+    -- W at d=720 (bara_charge eta_speed=600 stamped) but Bara real
+    -- charge speed is ~700 u/s so real-eta at fire=1.03s. W detonates
+    -- at fire+1.10 = arrival+0.07 = Bara hits Lina BEFORE W detonates =
+    -- charge stun lands then W stuns Bara. v0.5.45.1 dist gate fired
+    -- W at d=800 (real-eta=1.14), W detonates 0.04s BEFORE Bara impact
+    -- = Bara stunned at/before contact = charge fails. Restored entry
+    -- delegates the Tusk vs Bara differentiation to the v0.5.46
+    -- too-late belt (state.cur_armed_eta < 1.0): Bara stamped
+    -- eta_speed=600 -> cur_armed_eta=800/600=1.33s -> belt passes -> W
+    -- fires (good); Tusk stamped eta_speed=1200 -> cur_armed_eta=
+    -- 800/1200=0.67s -> belt skips -> W not fired at dist gate (good,
+    -- W would miss snowball). Eta_trigger=1.20 path still applies to
+    -- Tusk at d=1440 (cur_armed_eta=1.20, belt passes, W fires).
+    lina_w_anti_gap         = 800,
 }
 -- v0.5.9 (E2): self-displacement saves refuse to fire below this radius --
 -- pushing Lina 600u in facing when the threat already crossed inside would
@@ -7739,6 +7774,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.46 commit-attacker diagnostics + W pre-fire timing fix: two patches targeting the v0.5.45.1 demo Tests 5 + 7 failures. **Problem A (Test 5 commit-attacker silent classifier)**: v0.5.45.1 demo Test 5 (PA attacks Lina) produced ZERO committed_attacker_armed tlogs across the entire log despite PA confirmed attacking, while OTHER v0.5.45 features (framework override, W intent-pattern gate) WORKED. Root cause: the three commit-attacker helpers (sample_attacker_latches, is_committed_attacker_on_self, scan_and_arm_committed_attackers) emit NO diagnostic tlog unless they ACTUALLY arm, so the classifier was filtering silently and the gate (dist / NPC.IsAttacking / Target.IsKitingUs / attacking_seen_t latch window) responsible was undebuggable from the log. **Fix**: throttled (~5Hz via state.commit_attacker_diag_t) diagnostic emits in scan_and_arm_committed_attackers: aggregate commit_attacker_diag v=3 with in700 / attacking / kiting / committed / armed / latched / stamped counts, plus per-enemy commit_attacker_diag_h v=3 with dist / attacking / kiting / seen_age / committed verdict, plus commit_attacker_diag_latched v=3 when re-arm latch blocks. sample_attacker_latches now exposes state.attacker_latch_last_stamped for the aggregate emit. Next demo Test 5 re-run reveals which gate filters PA; targeted fix (kiting=true false-positive / IsAttacking nil / latch never stamping) follows in v0.5.46.1. **Problem B (Test 7 Tusk snowball W mis-timing)**: v0.5.45.1 Test 7 W fired on Tusk snowball at eta=0.51 via the dist gate (chain walker save_dist branch hit on d=613 < SAVE_FIRE_DISTANCE[lina_w_anti_gap]=800). W's 1.1s prep meant detonation 0.59s AFTER Tusk arrival, by which time Tusk's snowball had carried Lina away from the W AoE. W stunned nothing. Root cause: the 800u dist gate fundamentally mis-times W since 800u at typical Tusk-class speeds (1200 u/s) maps to eta=0.67s which is already BELOW W's 1.1s prep before the gate even triggers. **Fix**: SAVE_FIRE_DISTANCE entry for lina_w_anti_gap REMOVED; homing path now falls through to SAVE_ETA_TRIGGER[lina_w_anti_gap]=1.20 only, which precisely aligns W detonation (now+1.10s) with threat arrival (now+1.20s) so the 1.6s stun catches Tusk / Bara / MK on arrival. **Belt+suspenders**: state.cur_armed_eta stash in armed_post_fire (set to homing-entry eta; nil for cast_point entries) plus new w_defensive_skip_too_late v=3 gate inside SAVE_FIRE.lina_w_anti_gap.fire (skip if cur_armed_eta<1.0s). Covers the eta_critical (eta<=0.35) at-impact path and any future Dispatch entry points that could still arrive at .fire with low eta. The v0.5.45 intent-pattern + 100u-melee gates stay intact ahead of the new gate. **What was confirmed PASSing in v0.5.45.1 demo**: Test 1 (framework override dodger+linkbreaker emit cleanly at GAME_IN_PROGRESS), Test 2 (Bara items-ready single brain item fires), Test 3 (Bara items-spent W tail fires), Test 4 (PA blink gates W with sub_1_1s_arrival_pattern x4). **What is NOT in v0.5.46** (deferred): FC defensive refinements (Q2 5s pre-combo skip + Q8 fiery_soul_stacks>=5 + fc_offensive_inflight + fc_demote_filter drop + HasModifier early-return), category patches (targeted_disable / delayed_aoe / targeted_burst FC-to-tail), Q7 composer-tier audit, composer ship (cfg.compose_chain hook), Items Manager subsystem hunt. Tight test cycle: validate Test 5 diag + Test 7 W timing in isolation; refinements ride next release. **Hard constraint reinforced**: Lua's 200-local-vars-per-function limit was hit during v0.5.45.1 LB refactor and remains a HARD CONSTRAINT; v0.5.46 additions bundle into state.* (state.commit_attacker_diag_t / state.attacker_latch_last_stamped / state.cur_armed_eta) rather than file-level locals. **Lina.lua 7630 -> 7742 lines (+112)**. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
+LOG:info("Lina brain v0.5.46.1 hotfix: commit-attacker diag always-reach + W SAVE_FIRE_DISTANCE=800 restore for Bara. v0.5.46 demo log surfaced two regressions. **Problem Aaa (commit-attacker silent gates STILL silent)**: v0.5.46 added throttled diag emits but placed them AFTER the menu / self_npc / API / pcall early-return gates inside scan_and_arm_committed_attackers, so the entire v0.5.46 demo logged ZERO commit_attacker_diag events despite the user testing an enemy auto-attacking Lina. The diagnostic was nominally added but practically invisible. **Fix**: hoist a throttled (~5Hz) diag emit ABOVE every early-return path with an `exit` reason: menu_off / no_self / no_api / no_dispatcher / pcall_fail / list_nil / scanned. The aggregate scanned emit retains v0.5.46 per-enemy commit_attacker_diag_h + commit_attacker_diag_latched breakdown. Next demo Test 5 re-run reveals whether menu toggle is on (default true, expected `scanned`) or some other gate filters. If `scanned` fires with attacking=N committed=0, the gate is internal to the classifier (dist / IsKitingUs / latch window) per v0.5.46 plan. **Problem B (Bara W timing regression)**: v0.5.46 removed SAVE_FIRE_DISTANCE[lina_w_anti_gap]=800 to fix Tusk snowball mis-timing (W detonated AFTER Tusk arrival). v0.5.46 demo confirmed Tusk fix worked (belt skipped W at cur_armed_eta=0.66-0.97 < 1.0 for fast snowball), but the dist-gate removal regressed Bara charge: chain walker eta_trigger=1.20 fires W at d=720 (bara_charge eta_speed=600 stamped) but Bara real charge speed is ~700 u/s so real-eta at fire=1.03s; W detonates at fire+1.10 = 0.07s AFTER Bara impact = Bara charge stun lands first then W stuns Bara. v0.5.45.1 with SAVE_FIRE_DISTANCE=800 fired W at d=800 (real-eta=1.14), W detonated 0.04s BEFORE Bara impact = Bara stunned before contact = charge fails cleanly. User explicitly reported v0.5.46 demo: 'the old methodology for bara charge using W was better since it was a cast on self on the right time not letting bara hit'. **Fix**: restore SAVE_FIRE_DISTANCE[lina_w_anti_gap]=800. Tusk vs Bara differentiation now lives in the v0.5.46 too-late belt (state.cur_armed_eta < 1.0): Bara stamped eta_speed=600 -> cur_armed_eta=800/600=1.33s -> belt passes -> W fires (matches v0.5.45.1 timing); Tusk stamped eta_speed=1200 -> cur_armed_eta=800/1200=0.67s -> belt skips -> W not fired at dist gate (good, W would miss snowball). Eta_trigger=1.20 path still applies to Tusk at d=1440 (cur_armed_eta=1.20, belt passes). Belt acts as the hit-and-stop (Bara) vs snowball-carry (Tusk) dispatcher via stamped eta_speed differential. **Other demo findings (queued for v0.5.46.2+)**: framework Pike collateral (debug.log L9148 shows modifier_item_hurricane_pike_active_alternate caster=lina after brain emitted no_effective_save_for_threat at L9135; Linkbreaker override may not cover ALL paths OR Items Manager subsystem is the source per Sniper L7814 third-subsystem note), Bara chain walker save_eff field showing item_hurricane_pike with via=save_dist when Pike returned fire_returned_false (cosmetic; save_eff is set before .fire is called in armed_chain_peek). **Lina.lua 7742 -> 7777 lines (+35)**. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
 
 return callbacks

@@ -687,6 +687,48 @@ state.lina_chains = {
     pugna_drain     = _CHAIN_PUGNA_DRAIN,
     legion_duel     = _CHAIN_LEGION_DUEL,
     disruptor_kfr   = _CHAIN_DISRUPTOR_KFR,
+    wd_death_ward   = _CHAIN_WD_DEATH_WARD,    -- v0.5.47
+    underlord_pit   = _CHAIN_UNDERLORD_PIT,    -- v0.5.47
+}
+
+-- v0.5.47 Phase 1: WD Death Ward + Underlord Pit of Malice chains. Both
+-- threats were missing from LINA_SAVE_OVERRIDES so the lib's generic
+-- category chains (channel_on_self / trap) ran with item slots Lina
+-- doesn't fill (Sniper's grenade_self / grenade_at_caster heads). Adapted
+-- from Sniper.lua L6568-6573 (WD) and L6600-6603 (Pit) for Lina's item set
+-- and ability mix (no grenade; W as tail interrupter).
+--
+-- WD Death Ward (8s channel; ward auto-attacks Lina with magical damage):
+-- displace WD out of the 700-cast-range bubble OR survive the channel via
+-- magic immunity / cyclone-airborne. Pike-on-WD is the cleanest interrupt
+-- (push 425u + cancels channel through forced movement); Cyclone-on-WD
+-- bottles WD for 2.5s; W stuns WD on summon-then-channel sites.
+local _CHAIN_WD_DEATH_WARD = {
+    "item_hurricane_pike",
+    "item_force_staff",
+    "item_cyclone",
+    "item_glimmer_cape",
+    "item_wind_waker",
+    "item_black_king_bar",
+    "lina_flame_cloak",
+    "lina_w_anti_gap",
+}
+-- Underlord Pit of Malice (400u radius ensare; 1.5-1.8s root per tick;
+-- re-snares every 3.6s for 12s; undispellable basic). Forced-movement
+-- saves break the ensnare (Force / Pike push Lina out of the 400u radius);
+-- cyclone-self goes airborne (immune to ensare while flying); BKB does
+-- NOT break ensare but lets Lina ignore the followup damage; W stuns
+-- Underlord interrupting the channel of subsequent abilities. Same posture
+-- as Disruptor Kinetic Field (_CHAIN_DISRUPTOR_KFR) but the pit's
+-- per-tick re-snare means a single successful escape covers the rest of
+-- the duration as long as Lina stays out.
+local _CHAIN_UNDERLORD_PIT = {
+    "item_wind_waker",
+    "item_cyclone",
+    "item_force_staff",
+    "item_hurricane_pike",
+    "item_black_king_bar",
+    "lina_w_anti_gap",
 }
 
 -- Modifier-keyed (self path, threat detected via OnModifierCreate).
@@ -695,6 +737,8 @@ LINA_SAVE_OVERRIDES["modifier_bane_fiends_grip"]                = _CHAIN_BANE_GR
 LINA_SAVE_OVERRIDES["modifier_pugna_life_drain"]                = _CHAIN_PUGNA_DRAIN
 LINA_SAVE_OVERRIDES["modifier_legion_commander_duel"]           = _CHAIN_LEGION_DUEL
 LINA_SAVE_OVERRIDES["modifier_disruptor_kinetic_field_remnant"] = _CHAIN_DISRUPTOR_KFR
+LINA_SAVE_OVERRIDES["modifier_witch_doctor_death_ward"]         = _CHAIN_WD_DEATH_WARD  -- v0.5.47
+LINA_SAVE_OVERRIDES["modifier_abyssal_underlord_pit_of_malice_ensare"] = _CHAIN_UNDERLORD_PIT  -- v0.5.47
 
 ----------------------------------------------- commit-attacker close-gap ---
 -- v0.5.45 CA (DEFENSE_PLAN.md sec 4.2 commit-attacker track): port of
@@ -2276,6 +2320,57 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
             reserved = penalty < RESERVE_SKIP_FLOOR
         end
         if ready and not reserved then
+            -- v0.5.47 Phase 1: live-MS precision gate for W. Replaces the
+            -- static SAVE_FIRE_DISTANCE / stamped-eta_speed gates for
+            -- lina_w_anti_gap with a real-eta computation using live
+            -- caster MS via NPC.GetMoveSpeed. Stamped eta_speed=600 for
+            -- Bara was conservative (real charge MS with talents + Phase
+            -- Boots hits 900-1100); the v0.5.46.3 SAVE_FIRE_DISTANCE=1200
+            -- bump papered over the static-speed mismatch but still misses
+            -- the moving target on edge cases. Live MS fires W at the
+            -- exact moment real_eta crosses W_LEAD=1.12s (Lina's W prep:
+            -- 0.6 cast point + 0.5 delay + ~0.02 cast animation). Window:
+            -- real_eta in [W_LEAD - 0.05, W_LEAD + 0.20] = W detonates
+            -- 0.05s BEFORE to 0.20s AFTER impact (the 1.6s stun radius
+            -- covers the 0.20s slack for hit-and-stop threats like Bara;
+            -- for carry-Lina the v0.5.46.3 predict-aim covers the snowball
+            -- endpoint regardless of when W lands). Falls back to the
+            -- existing dist gate if NPC.GetMoveSpeed is unavailable or
+            -- returns 0 (caster stationary). Phase 2 (v0.5.48) extends
+            -- the per-save live-eta gate to a per-mod arrival-timing
+            -- catalog in lib/threat_data.lua.
+            if sn == "lina_w_anti_gap" then
+                local W_LEAD     = 1.12
+                local live_speed = NPC.GetMoveSpeed and NPC.GetMoveSpeed(entry.caster) or 0
+                if live_speed > 0 then
+                    local real_eta  = d / live_speed
+                    local stamped_e = entry.eta_speed and (d / entry.eta_speed) or -1
+                    local in_window = real_eta >= (W_LEAD - 0.05)
+                                      and real_eta <= (W_LEAD + 0.20)
+                    tlog(3, "w_live_eta_gate", {
+                        d         = string.format("%.0f", d),
+                        speed     = string.format("%.0f", live_speed),
+                        real_eta  = string.format("%.2f", real_eta),
+                        stamped_e = string.format("%.2f", stamped_e),
+                        in_window = in_window and "y" or "n",
+                    })
+                    if in_window then
+                        entry._fire_dist_eff = -2  -- sentinel: live-eta path
+                        entry._fire_save_eff = sn
+                        return true, "w_live_eta", eta_trigger_eff
+                    end
+                    -- Out of live-eta window: skip W this iteration.
+                    -- Don't fall through to the static dist gate -- it
+                    -- would fire with stamped 600 timing that disagrees
+                    -- with the live measurement we just rejected.
+                    local ov = SAVE_ETA_TRIGGER[sn]
+                    if ov then eta_trigger_eff = ov end
+                    return false, nil, eta_trigger_eff
+                end
+                -- live_speed unavailable or zero: fall through to the
+                -- standard dist + eta_trigger gates below (stamped path,
+                -- pre-v0.5.47 behavior).
+            end
             -- v0.5.10: PROXIMITY GATE first. User design
             -- principle: fire defense when the threat is almost
             -- hitting, not when it starts/charging. Spatial
@@ -3290,6 +3385,21 @@ end
 state.predict_target_pos = function(target, lead_s)
     return Geometry.PredictPos(target, lead_s)
         or (target and Entity.IsEntity(target) and Entity.GetAbsOrigin(target)) or nil
+end
+-- v0.5.47 Phase 1 (port of Sniper.lua L2466-2472 state.item_kv):
+-- generic reusable wrapper for Ability.GetLevelSpecialValueFor with a
+-- fallback. Used to read live KV special values off an ability or item
+-- handle so Lina's numeric model tracks Valve's tuning instead of rotting
+-- on hardcoded constants. A returned 0 counts as unresolved (legitimate
+-- 0 values are vanishingly rare for the KV keys we read). Migration plan:
+-- replace inline pcall(Ability.GetLevelSpecialValueFor, ...) call sites
+-- with state.item_kv across subsequent releases (v0.5.48+).
+state.item_kv = function(handle, key, fallback)
+    if handle and Ability.GetLevelSpecialValueFor then
+        local v = Ability.GetLevelSpecialValueFor(handle, key)
+        if v and v ~= 0 then return v end
+    end
+    return fallback
 end
 -- Q (Dragon Slave) is a traveling line wave (KV dragon_slave_speed = 1200 u/s,
 -- cast point 0.35). The wave reaches a target at distance d at cast_point +
@@ -7796,6 +7906,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.46.3 hotfix: defense_dispatcher upvalue fix + W predict-aim + Tusk drop from skip allowlist + Bara dist gate bumped 800->1200. Three patches addressing the v0.5.46.2 demo log. **Problem Aaa-2 (commit-attacker DEAD via exit=no_dispatcher)**: v0.5.46.1 hoisted diag emit revealed the smoking gun: commit_attacker_diag tlogs every 200ms across the entire demo with exit=no_dispatcher. Root cause: `local defense_dispatcher = Defense.New { ... }` at L1853 is declared AFTER state.scan_and_arm_committed_attackers at L797. The function captures `defense_dispatcher` as an UPVALUE, but at function-creation time the local does not exist yet so Lua resolves it as a GLOBAL (nil), and the global reference never picks up the later local assignment. PA blink path works because its dispatch goes through callbacks.OnModifierCreate -> handle_threat_on_self -> a code path declared AFTER L1853 where defense_dispatcher resolves to the live local. Fix: forward-declare `local defense_dispatcher` at top-of-file near the require statements; drop the `local` keyword from the L1853 assignment so it assigns to the forward-declared upvalue. Now commit-attacker scan can actually dispatch. **Problem B (Bara W still missing by little time)**: v0.5.46.1 SAVE_FIRE_DISTANCE=800 assumed Bara real charge speed ~700 u/s but the v0.5.46.2 demo log confirmed W still misses at d=797 fire moments. Real Bara charge speed scales with level + Phase Boots + talents; at level 6+ can hit 900-1000 u/s. At d=800 with real speed 1000 the real-eta is 0.80s and W 1.12s prep lands 0.32s AFTER impact = miss. **Fix**: bump SAVE_FIRE_DISTANCE[lina_w_anti_gap] 800 -> 1200. At d=1200 with real speed 1000, real-eta=1.20s and W lands 0.08s BEFORE impact = clean stun before Bara connects. **W predict-aim** (Tusk + general accuracy): v0.5.46.2 aimed W at Entity.GetAbsOrigin(state.self_npc) = Lina current position. This is correct for stationary-target threats (Bara stops at Lina) but wrong for Tusk snowball (Lina is carried away from her old spot by detonation time = W misses both Lina and Tusk). v0.5.46.3 changes aim resolution to state.predict_target_pos(threat_caster, W_LEAD=1.12) - smoothed-velocity prediction of where the caster will be when W detonates. Single change handles all three cases uniformly: (a) homing stop-at-Lina (Bara stops, predicted pos = current pos = Lina origin since Bara is at Lina), (b) carry-Lina (Tusk snowball endpoint past Lina pre-snowball position = where the snowball lets Lina go), (c) chase-Lina (committed attackers tracking Lina movement). Falls back to Lina origin for fog / no-caster cases. New tlog field: aim=predict | self_origin distinguishes the path. **Tusk dropped from W_skip_too_late_mods** allowlist (table is now empty by default; extensible for future regressions). User spec: 'Tusk not using W, even if we cant stop tusk W we can stun him right after skills is made by applying correctly our skill'. With predict-aim, W detonates at Tusk snowball endpoint where Lina is dropped = 1.6s AoE catches Tusk just as the snowball ends = Tusk stunned, no followup. **State additions** (state.* per 200-locals constraint): state.cur_armed_caster stashed in armed_post_fire alongside cur_armed_eta + cur_armed_threat_mod; cleared on function exit. **Forward-declared local**: defense_dispatcher (line 33 area; assignment at L1853 drops the `local` keyword). **Verification on next demo**: commit-attacker diag should show exit=scanned with attacking>0 + committed>0 + armed>0, then committed_attacker_armed tlog, then chain walker pick (Force Staff at d=500 then Pike at d=500 then W tail). Bara expects armed_threat_fire dist~1200 (NOT 800), then w_defensive_fire aim=predict. Tusk expects W to fire with aim=predict; visually W stuns Tusk at snowball endpoint. PA blink still works (was already in v0.5.46.2). **What is NOT in v0.5.46.3**: precise per-mod ETA using runtime NPC.GetMoveSpeed (user spec for future: 'It might be a way to get this info live through API, after getting this information it is possible to make a perfect ETA and skill landing time'). Threat-arrival-time catalog in threat_data.lua. KV ability data lookup for cast points + skill landing times. Sniper grenade-on-Bara reference (Sniper.lua L9598 stamps eta_speed=600 eta_trigger=0.8 + grenade cast point 0.1s + knockback 0.4s = 0.5s total; Sniper handles short-prep saves so the timing differs from Lina W 1.12s). All queued for v0.5.47+. **Lina.lua 7754 -> 7799 lines (+45). SHA refreshed. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
+LOG:info("Lina brain v0.5.47 Phase 1 of Option C (Full threat-arrival catalog roadmap): foundation slice with state.item_kv wrapper + 2 missing threat chains + live-MS precision gate for W. **Background**: post-v0.5.46.3 demo discussion led to a feasibility study (Explore agent) comparing Sniper threat handling to Lina. Findings: (a) Sniper has 14 SAVE_OVERRIDES vs Lina 13 (comparable), (b) both stamp eta_speed constants at arm-time without live MS re-read for Bara/Tusk, (c) Sniper has state.item_kv(handle,key,fallback) wrapper at L2466-2472 reused at 13 KV sites that Lina inlines, (d) Lina lacks per-mod chains for modifier_witch_doctor_death_ward + modifier_abyssal_underlord_pit_of_malice_ensare (Sniper has both at L6568-6603). The Lina W precise-timing concern (user spec 'perfect ETA + skill landing time') is NEW capability not present in either hero today; Sniper falls back to per-tick distance re-eval against stamped 600/1200 just like Lina. Phase 1 builds the foundation; Phase 2 (v0.5.48) adds the lib catalog; Phase 3 (v0.5.49) integrates with Defense dispatcher; Phase 4 (v0.5.50+) expands coverage and mirrors to Sniper. **Patch 1 (state.item_kv wrapper)**: ported verbatim from Sniper L2466-2472 to Lina near state.predict_target_pos. 7 lines + docstring. Function signature: state.item_kv(handle, key, fallback) returns Ability.GetLevelSpecialValueFor(handle,key) if non-zero else fallback. Migration plan: replace inline pcall sites with state.item_kv across subsequent releases (v0.5.48+). Backward compatible (additive only). **Patch 2 (WD Death Ward chain)**: new _CHAIN_WD_DEATH_WARD = {item_hurricane_pike, item_force_staff, item_cyclone, item_glimmer_cape, item_wind_waker, item_black_king_bar, lina_flame_cloak, lina_w_anti_gap}. Adapted from Sniper L6568-6573 for Lina item set (no grenade). Pike-on-WD is the cleanest interrupt (425u push + cancels channel via forced-movement state); Cyclone-on-WD bottles WD for 2.5s; FC reduces magical Death Ward DPS via +35% MR; W stuns WD interrupting channel. Closes a real coverage gap that previously fell through to libs generic channel_on_self chain. **Patch 3 (Underlord Pit of Malice chain)**: new _CHAIN_UNDERLORD_PIT = {item_wind_waker, item_cyclone, item_force_staff, item_hurricane_pike, item_black_king_bar, lina_w_anti_gap}. Adapted from Sniper L6600-6603. Forced-movement saves (Force/Pike push out of 400u pit radius) + cyclone-self (airborne immune to ensare) + W (stun Underlord interrupting followup). Same trap-escape posture as _CHAIN_DISRUPTOR_KFR. Closes another coverage gap from lib trap category default. **Patch 4 (live-MS precision gate for W)**: inside armed_chain_peek, when iterated save is lina_w_anti_gap, read NPC.GetMoveSpeed(entry.caster) live and compute real_eta = d / live_speed. Fire W precisely when real_eta in [W_LEAD - 0.05, W_LEAD + 0.20] where W_LEAD = 1.12s (Lina W prep: 0.6 cast point + 0.5 delay + ~0.02 cast animation per user-confirmed liquipedia value). Window means W detonates 0.05s BEFORE to 0.20s AFTER impact - tight enough that the 225u stun radius catches the caster at arrival. Falls back to existing static dist + eta_trigger gates if NPC.GetMoveSpeed unavailable or zero (live_speed=0 means caster stationary; defer to standard gates). New diagnostic tlog w_live_eta_gate v=3 emits per W chain-peek iteration with d, speed, real_eta, stamped_e (stamped-comparison reference), in_window (y/n). Stamped vs real comparison will inform v0.5.48 catalog tuning (does the divergence justify per-mod catalog or is stamped good enough for most threats). Fire reason w_live_eta on the chain-peek return value distinguishes from the legacy save_dist / eta_trigger / eta_critical paths. **v0.5.47 NOT in scope (queued for v0.5.48 Phase 2)**: per-mod arrival-timing catalog in lib/threat_data.lua (THREAT_ARRIVAL_TIMING table with cast_point + travel_speed + travel_distance_fn + post_cast_delay + carry_lina + aim_resolver_fn per modifier), ThreatData.GetArrivalTime(threat_mod, caster, target) API. Phase 3 (v0.5.49) Defense dispatcher consumes catalog; Phase 4 (v0.5.50+) catalog expansion + Sniper mirror + uczone-toolkit publish. **Verification on next demo**: WD Death Ward scenarios expect Pike-then-Force-then-Cyclone chain (was generic lib chain). Underlord Pit expects WW-then-Cyclone-then-Force chain (was lib trap default). Bara/Tusk W timing should be more precise: armed_threat_fire via=w_live_eta (instead of via=save_dist) with real_eta close to 1.12s. The w_live_eta_gate v=3 tlog stream lets the user tune the window if needed. PA blink unchanged (instant_blink path uses blink_arrived branch, not chain peek). **Lina.lua 7799 -> 7909 lines (+110). SHA refreshed. Lib unchanged from v0.5.42 (Phase 1 is hero-side only; Phase 2 touches lib/threat_data.lua). luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
 
 return callbacks

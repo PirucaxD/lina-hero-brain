@@ -3586,20 +3586,29 @@ state.compute_arrival_time = function(threat_mod, caster, target, modifier_handl
         -- if live API failed.
         local live = NPC.GetMoveSpeed and NPC.GetMoveSpeed(caster)
         if live and live > 0 then speed = live end
-        -- v0.5.49.2: acceleration_buffer for charging threats. Live
-        -- NPC.GetMoveSpeed is the CURRENT speed but Bara accelerates
-        -- ~220 u/s^2 during charge; the average speed during W's 1.12s
-        -- prep window is +100-200 u/s higher than the fire-moment live
-        -- reading. Without buffer, catalog impact_t = d/live_now
-        -- underestimates Bara's progress -> Bara hits Lina BEFORE W
-        -- detonates (post-impact stun per v0.5.49.1 demo). Buffer
-        -- inflates the speed estimate so W fires further out; the
-        -- catalog impact_t represents real arrival under the assumption
-        -- of continued acceleration. Tusk fixed-speed snowball etc
-        -- leave the field unset (defaults to 0 = no buffer).
-        if entry.acceleration_buffer and entry.acceleration_buffer > 0
-           and speed > 0 then
-            speed = speed + entry.acceleration_buffer
+    elseif entry.speed_source == "live_with_ramp" then
+        -- v0.5.50: ramp model for accelerating threats (Bara Charge of
+        -- Darkness per Liquipedia: 1.5s linear wind-up from min MS
+        -- bonus to max MS bonus). NPC.GetMoveSpeed at fire moment is
+        -- the CURRENT ramped speed; the threat continues ramping during
+        -- W's 1.12s prep window. Predict the average speed during prep:
+        --   predicted_end = min(peak_speed_cap, live + ramp_accel * W_LEAD)
+        --   avg           = (live + predicted_end) / 2
+        -- Catalog provides ramp_accel (u/s^2) and peak_speed_cap (u/s).
+        -- Handles BOTH early-charge (still ramping; predicted_end < peak,
+        -- avg captures the ramp) AND late-charge (already at peak;
+        -- predicted_end clamps to peak_speed_cap, avg approaches live).
+        -- Replaces v0.5.49.x flat acceleration_buffer which over-
+        -- corrected for low-live and didn't adapt for high-live. Per-
+        -- level KV-driven accel + cap queued for v0.5.50.1 (needs
+        -- modifier_handle threading).
+        local W_LEAD = 1.12
+        local live   = NPC.GetMoveSpeed and NPC.GetMoveSpeed(caster) or 0
+        if live and live > 0 then
+            local accel = entry.ramp_accel or 0
+            local cap   = math.max(live, entry.peak_speed_cap or 0)
+            local predicted_end = math.min(cap, live + accel * W_LEAD)
+            speed = (live + predicted_end) / 2
         end
     elseif entry.speed_source == "kv_or_fallback" then
         local abil
@@ -8219,6 +8228,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.49.3 tuning: acceleration_buffer 200 -> 100 for modifier_spirit_breaker_charge_of_darkness. v0.5.49.2 added +200 buffer to live NPC.GetMoveSpeed in compute_arrival_time so the catalog impact_t accounts for Bara accelerating during W's 1.12s prep window. User feedback: 'Now it was too earlier, change the constant to 100' -- v0.5.49.2 over-corrected, W fired too far out. v0.5.49.3 halves the buffer: 100 u/s acceleration buffer. **Math** at Bara live=522 buffered=622 (was 722): impact_t = d/622. Fire at d > 1.12*622 = 697 (was 809). Real arrival from d=697 with avg ~600 = 1.16s. W detonates at fire+1.12 = 0.04s before arrival. Bara at 0.04 * peak_speed ~700 = 28u from Lina at W detonation. INSIDE 225 AoE but much closer to Lina than v0.5.49.2's 126u. Tighter stun, less wasted lead distance. **Other entries unchanged**: Tusk snowball kv_or_fallback no buffer; PA / WD / Lion no buffer. Bara-specific buffer can be re-tuned in subsequent demos if 100 is still off (likely small adjustments 80-150 range). **Lina.lua 8222 lines (unchanged from v0.5.49.2; only lib threat_data.lua changed). SHA refreshed only for the banner string swap. lib/threat_data.lua: 1-line change (200 -> 100). luac clean both, no BOM, lesson 15 verified.")
+LOG:info("Lina brain v0.5.50 ramp model for homing_charge (Liquipedia-driven). User spec: 'We might be going on the wrong aproach here. Check liquipedia of spirit breaker. It has different velocities for diferent skill lvl and a ramp up. Liquipedia also have status effects'. Researched Liquipedia Bara Charge of Darkness: **Min MS bonus** 68.75 / 81.25 / 93.75 / 106.25 per level. **Max MS bonus** 275 / 325 / 375 / 425 per level. **Wind-up** 1.5s linear ramp from min to max. **Status effects** flat MS bonus (ramping) + remove MS cap + no unit collision. NPC.GetMoveSpeed at fire moment correctly reports the current ramped speed. The bug was assuming CURRENT speed = AVERAGE speed during the 1.12s W prep window. **Fix (v0.5.50)**: replace v0.5.49.x flat acceleration_buffer (constant +100 across all live values) with a proper ramp model. New speed_source 'live_with_ramp' with two fields: ramp_accel (u/s^2 = (max_bonus - min_bonus) / wind_up; lvl 4 = (425-106)/1.5 = 213) and peak_speed_cap (absolute ceiling for the ramp; 800 for Bara lvl 4 + Phase Boots + talent buffer). compute_arrival_time math: predicted_end_speed = min(peak_speed_cap, live + ramp_accel * W_LEAD); avg_during_prep = (live + predicted_end_speed) / 2; speed = avg_during_prep (used for impact_t calculation). **Handles both phases**: (1) Early-charge: live=522, predicted_end=min(800, 522+239)=761, avg=(522+761)/2=641. Fire at d > 1.12*641 = 718. Real arrival ~1.20s. W detonates 0.08s before arrival. Bara at ~50u from Lina. Tight stun before impact. (2) Late-charge: live=750 (near peak), predicted_end=min(800, 989)=800, avg=(750+800)/2=775. Fire at d > 868. Real arrival ~1.12s. W detonates ~0s from arrival. Perfect timing. (3) Past-peak (talents): live=900, cap raised to 900 by math.max(live, cap), predicted_end=min(900, 1139)=900, avg=900. No artificial inflation. Fire at d>1008. **Fields removed**: acceleration_buffer (v0.5.49.x flat buffer). Field changed: speed_source from live_or_fallback to live_with_ramp. **Tusk Snowball unchanged**: kv_or_fallback speed_source uses canonical snowball_movement_speed KV (1675 fallback) - snowball doesn't accelerate during roll. **Per-level adaptation queued for v0.5.50.1**: KV-driven ramp_accel and peak_speed_cap per skill level (lvl 1 accel=137 vs lvl 4 accel=213) needs modifier_handle threading from armed_threats. Current v0.5.50 hardcodes lvl 4 defaults. **Lib first change since v0.5.49.3 was the buffer tuning**: now structural ramp model. **Lina.lua 8222 -> 8231 lines (+9). lib/threat_data.lua: -1 field +2 fields (-acceleration_buffer +ramp_accel +peak_speed_cap). luac clean both, no BOM, lesson 15 verified.")
 
 return callbacks

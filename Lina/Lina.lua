@@ -5605,6 +5605,117 @@ local function dodger_chain_restore()
     })
 end
 
+----------------------------------------------- linkbreaker chain-item override ---
+-- v0.5.45.1 LB (DEFENSE_PLAN.md sec 4.X: Linkbreaker subsystem override).
+-- v0.5.45 demo log showed Bara "double-fire" pattern: chain walker fired W
+-- (Pike fire_returned_false in chain), then 33ms later framework SafeSend
+-- pipeline cast Pike on Bara (caster=lina, no brain `issued` event). Same
+-- pattern as v0.5.42 Eul/WW from Dodger but the source is the per-hero
+-- Linkbreaker subsystem at Heroes/Hero List/Lina/Main Settings/Items
+-- Settings/Linkbreaker Items in gui.json (L16888 in user's deployed gui).
+-- That list has 5 chain-overlap items at true: item_cyclone /
+-- item_ethereal_blade / item_force_staff / item_hurricane_pike /
+-- item_wind_waker. Linkbreaker is a separate framework subsystem from
+-- Dodger (the v0.5.43 override covers Dodger's Защитные предметы only).
+-- This override mirrors the v0.5.43 pattern: capture+zero at GAME_IN_PROGRESS,
+-- restore at POST_GAME, per-match scoping so other heroes' Linkbreaker
+-- config is not permanently mutated.
+-- v0.5.45.1 LB: bundle ALL Linkbreaker state + helpers into a single
+-- module-level table to stay under Lua's 200-local-variables-per-function
+-- limit (hit at v0.5.45 + commit-attacker + W-gate additions).
+local LB = {
+    items = {
+        "item_cyclone", "item_ethereal_blade", "item_force_staff",
+        "item_hurricane_pike", "item_wind_waker",
+    },
+    path = {
+        "Heroes", "Hero List", "Lina", "Main Settings",
+        "Items Settings", "Linkbreaker Items",
+    },
+}
+LB.container = function()
+    if not (Menu and Menu.Find) then return nil end
+    local p = LB.path
+    local ok, h = pcall(Menu.Find, p[1], p[2], p[3], p[4], p[5], p[6])
+    return ok and h or nil
+end
+LB.item_nested = function(item)
+    if not (Menu and Menu.Find) then return nil end
+    local p = LB.path
+    local ok, h = pcall(Menu.Find, p[1], p[2], p[3], p[4], p[5], p[6], item)
+    return ok and h or nil
+end
+LB.read = function(item)
+    local h = LB.item_nested(item)
+    if h and h.Get then
+        local ok, v = pcall(h.Get, h)
+        if ok and type(v) == "boolean" then return v, "nested" end
+    end
+    local c = LB.container()
+    if c and c.Get then
+        local ok, v = pcall(c.Get, c, item)
+        if ok and type(v) == "boolean" then return v, "container" end
+    end
+    return nil, "unknown"
+end
+LB.write = function(item, value)
+    local h = LB.item_nested(item)
+    if h and h.Set then
+        local ok = pcall(h.Set, h, value)
+        if ok then return true, "nested" end
+    end
+    local c = LB.container()
+    if c and c.Set then
+        local ok = pcall(c.Set, c, item, value)
+        if ok then return true, "container" end
+    end
+    return false, "unknown"
+end
+LB.disable = function()
+    if state.linkbreaker_disabled then return end
+    local saved, read_shape = {}, nil
+    for _, item in ipairs(LB.items) do
+        local v, shape = LB.read(item)
+        saved[item] = v
+        read_shape = read_shape or shape
+    end
+    local n_set, write_shape = 0, nil
+    for _, item in ipairs(LB.items) do
+        local ok, shape = LB.write(item, false)
+        if ok then n_set = n_set + 1 end
+        write_shape = write_shape or shape
+    end
+    state.linkbreaker_saved = saved
+    state.linkbreaker_disabled = true
+    tlog(1, "linkbreaker_chain_disabled", {
+        items       = tostring(#LB.items),
+        set_ok      = tostring(n_set),
+        read_shape  = tostring(read_shape or "nil"),
+        write_shape = tostring(write_shape or "nil"),
+    })
+end
+LB.restore = function()
+    if not state.linkbreaker_disabled then return end
+    local saved = state.linkbreaker_saved or {}
+    local any_true = false
+    for _, v in pairs(saved) do if v then any_true = true; break end end
+    local default_to_true = (not any_true)
+    local n_set = 0
+    for _, item in ipairs(LB.items) do
+        local v = default_to_true and true or saved[item]
+        if v == nil then v = true end
+        local ok = LB.write(item, v)
+        if ok then n_set = n_set + 1 end
+    end
+    state.linkbreaker_saved = nil
+    state.linkbreaker_disabled = false
+    tlog(1, "linkbreaker_chain_restored", {
+        items           = tostring(#LB.items),
+        set_ok          = tostring(n_set),
+        default_to_true = default_to_true and "y" or "n",
+    })
+end
+
 ------------------------------------------------------------------ menu ------
 local function setup_menu()
     local m = {}
@@ -5778,6 +5889,21 @@ local function setup_menu()
         .. "slow-arrival gap-closer (Bara, Tusk, MK Primal Spring). Mana "
         .. "floor reserves 450 for R combo so defensive W cannot starve "
         .. "the kill commit. Off = W stays offensive-only.")
+    -- v0.5.45.1 LB: Linkbreaker subsystem override. The framework's per-hero
+    -- Linkbreaker (gui.json Heroes/Hero List/Lina/Main Settings/Items Settings/
+    -- Linkbreaker Items) auto-fires Pike/Force/Eul/Ether/WW on enemies which
+    -- the brain's defense chain ALSO controls, causing double-fires (v0.5.45
+    -- demo: Bara charge fired brain W + framework Pike together; W landed on
+    -- empty position because Pike pushed Bara out of W's 225u AoE). Same
+    -- match-scoped capture+restore pattern as v0.5.43 Dodger override.
+    m.override_linkbreaker = gDef:Switch('Override Linkbreaker defense items', true)
+    m.override_linkbreaker:ToolTip("On match start (GAME_IN_PROGRESS), "
+        .. "capture and zero the 5 chain-overlap items in the per-hero "
+        .. "Linkbreaker subsystem (Eul / Ether / Force / Pike / WW). "
+        .. "Restored at POST_GAME so the change is scoped to one match. "
+        .. "Off = Linkbreaker and brain both fire (causes the Bara double-"
+        .. "fire pattern observed in v0.5.45 demo where W missed because "
+        .. "framework Pike already pushed Bara out of W's AoE).")
     m.override_dodger = gDef:Switch('Override Dodger defense items', true)
     m.override_dodger:ToolTip("On match start (GAME_IN_PROGRESS), capture "
         .. "and zero the 7 self-defense items in the Umbrella Dodger that "
@@ -6540,6 +6666,23 @@ function callbacks.OnUpdateEx()
         elseif gs_d == Enum.GameState.DOTA_GAMERULES_STATE_POST_GAME
            and state.dodger_disabled then
             dodger_chain_restore()
+        end
+    end
+
+    -- v0.5.45.1 LB: Linkbreaker override. Same transition hook + idempotent
+    -- latch pattern as the Dodger override above. Separate menu toggle so
+    -- owner can disable one without the other.
+    if state.menu and state.menu.override_linkbreaker
+       and state.menu.override_linkbreaker:Get()
+       and GameRules and GameRules.GetGameState
+       and Enum and Enum.GameState then
+        local gs_lb = GameRules.GetGameState()
+        if gs_lb == Enum.GameState.DOTA_GAMERULES_STATE_GAME_IN_PROGRESS
+           and not state.linkbreaker_disabled then
+            LB.disable()
+        elseif gs_lb == Enum.GameState.DOTA_GAMERULES_STATE_POST_GAME
+           and state.linkbreaker_disabled then
+            LB.restore()
         end
     end
 
@@ -7484,6 +7627,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.45 W .fire sub-1.1s gate + Sniper commit-attacker port: two defense-layer additions driven by v0.5.44 demo feedback. **W .fire gate** (DEFENSE_PLAN.md sec 4.2 W refinement track): v0.5.44 demo log showed W firing on PA Phantom Strike at eta=0.04s via the at-impact armed_threats_tick path (which bypasses SAVE_ETA_TRIGGER=1.20). Stun lands 1.1s late which still interrupts PA 4s attack-speed window but is outside spec. Two new gates inside SAVE_FIRE.lina_w_anti_gap.fire: (a) intent-pattern skip for 10 known sub-1.1s arrivals (phantom_assassin_phantom_strike / antimage_blink / queenofpain_blink / riki_blink_strike / slark_pounce / pangolier_swashbuckle / nyx_assassin_vendetta / mirana_leap / weaver_shukuchi / void_spirit_astral_step); (b) belt+suspenders dist gate: skip if any enemy hero within 300u is < 100u from Lina (caster already at melee, W stun 1.1s later is post-fact). Emit w_defensive_skip_too_fast v=3 tlog with reason. Bara/Tusk/MK still pass (caster en-route 1.1s out). **Sniper commit-attacker port** (DEFENSE_PLAN.md sec 4.2 commit-attacker track): port of Sniper.lua state.is_committed_attacker (S3 L4318) + state.sample_velocities attacker-latch (S3 L3921-3940). Sniper uses this OFFENSIVELY (gates D-peel combo); Lina uses DEFENSIVELY (synthesizes virtual threat routing through v0.5.40 dispatcher to fire close-gap saves when melee attacker commits on Lina even without spell threat to react to). New module-level constants: LINA_COMMITTED_ATTACK_WINDOW_S=1.6, LINA_ATTACK_ENGAGE_RADIUS=700, LINA_COMMITTED_ATTACKER_RETREAT_BUFFER=200. New chain table _COMMITTED_ATTACKER_SAVES = item_force_staff / item_hurricane_pike / item_wind_waker / item_cyclone / item_glimmer_cape / lina_w_anti_gap (slim per user Q: displacement + escape + W tail; no BKB/Lotus/Aeon/FC since attackers mostly physical not magical). LINA_SAVE_OVERRIDES['lina_committed_attacker'] = _COMMITTED_ATTACKER_SAVES so dispatcher ResolveSaveOrder finds the chain. New state.attacking_seen_t per-caster latch table + state.committed_attacker_armed_t per-caster re-arm latch. Three helpers: state.sample_attacker_latches (per-tick scan; stamp attacking_seen_t when NPC.IsAttacking true; API-guarded), state.is_committed_attacker_on_self (dist <=700 AND attacking-now-or-recently AND not Target.IsKitingUs), state.scan_and_arm_committed_attackers (per-tick scan of enemies in 700u; if committed AND re-arm latch clear AND menu toggle on, call defense_dispatcher:Dispatch with intent='committed_attacker_<idx>', threat_mod='lina_committed_attacker', threat_caster=h, category_hint='close_gap', record_save callback, fs_shard_window ctx). Per-tick calls wired in OnUpdateEx after armed_threats_tick before pre_face_tick / Layer-1 offense so close-gap save fires before the brain reissues attacks toward the attacker. New Defense menu toggle 'Enable commit-attacker close-gap' default true. Diagnostic tlog committed_attacker_armed v=1 with caster + dist + mvspeed payload (per-arm); chain walker emits its usual resolve_save_order_pick + save_chain_skip + dispatch_blocked telemetry for the synthetic mod, no special wrapping needed. **Verification on next demo**: enemy melee carry walks up to Lina and starts attacking. Expect within ~1.6s: committed_attacker_armed | caster=<hero> | dist=X | mvspeed=Y tlog at v=1, followed by chain walker resolve_save_order_pick head=item_force_staff or similar, followed by issued ability=item_force_staff layer=def (Lina pushed away). For Slark/Naga post-spell auto-attack windows: same trigger; brain now reacts to the AUTO-ATTACK CHAIN itself instead of just the spell. Pre-v0.5.45 baseline = brain ignores auto-attacks unless they're animated as a recognized spell threat. **What's NOT in this release** (deferred to v0.5.45.1 or v0.5.46): FC defensive refinements (Q2 5s pre-combo skip gate + Q8 fiery_soul_stacks>=5 high-stacks gate + fc_offensive_inflight flag + fc_demote_filter drop + HasModifier early-return) and category patches (targeted_disable / delayed_aoe / targeted_burst FC-to-tail). Reason: tight test cycle: shipping commit-attacker isolated lets owner validate without FC noise. **What was confirmed working in v0.5.44 demo log**: W as tail-fallback works exactly per Q1 spec (all 9 fires were chain-walker-tail with every item ahead reporting not_ready). Only edge case was PA blink at-impact which v0.5.45 W .fire gate now closes. Lina.lua 7269 -> 7487 lines (+218: W gate +49 + commit-attacker block +145 + per-tick call +12 + menu toggle +12). Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified, source = runtime SHA verify post-deploy. **Roadmap context** (DEFENSE_PLAN.md sec 4): v0.5.45.1 or v0.5.46 = FC refinements + category patches. v0.5.46 then ships type-aware chain composer (lib-side, opt-in). v0.5.47+ Sniper + toolkit mirror.")
+LOG:info("Lina brain v0.5.45.1 LB Linkbreaker chain-item override: hotfix for the v0.5.45 Bara double-fire (brain W + framework Pike). v0.5.45 demo log trace at game-time 78.77s showed brain chain walker correctly fired W as tail (Pike fire_returned_false from chain), then 33ms later framework SafeSend pipeline cast Pike on Bara (caster=lina, no brain `issued` event). Pike modifier landed at 78.87s, pushing Bara 425u in his facing. Brain W's 1.1s prep meant W detonated at Lina's old position 1.1s later, by which time Bara was 425u away outside W's 225u AoE. W missed. Source identified: the Lina-specific Linkbreaker subsystem at gui.json Heroes/Hero List/Lina/Main Settings/Items Settings/Linkbreaker Items (L16888 in user gui) has 5 chain-overlap items at true (item_cyclone / item_ethereal_blade / item_force_staff / item_hurricane_pike / item_wind_waker). Linkbreaker is a SEPARATE framework subsystem from the Dodger (v0.5.43 override covers Dodger's Защитные предметы only). Per Sniper.lua L7814 comment 'subsystems: Dodger, Items Manager, Linkbreaker' the three are independent auto-cast layers; we now know two of three. **Fix**: mirror the v0.5.43 Dodger override pattern. New module-level LB table bundling chain items / menu path / read+write Menu API helpers (both nested + container shapes tried, pcall-guarded) / disable + restore functions. Bundled into ONE local table to stay under Lua's 200-local-vars-per-function limit (hit during v0.5.45 + W gate + commit-attacker additions; v0.5.45.1 hotfix had to refactor as a side-task). New Defense menu toggle 'Override Linkbreaker defense items' default true. Hook into the existing GameRules.GetGameState transition block in OnUpdateEx adjacent to the Dodger override hook: capture+zero 5 LB items at GAME_IN_PROGRESS, restore at POST_GAME. Match-scoped per user spec. Idempotent via state.linkbreaker_disabled latch. Safety: if restore captured state is all-false (mid-match brain reload captured already-zeroed state), default to all-true on restore. Diagnostic tlog linkbreaker_chain_disabled / _restored at v=1 with set_ok + read_shape + write_shape so user can verify which Menu API shape resolved. **Verification on next demo**: at match start expect 'linkbreaker_chain_disabled items=5 set_ok=5 read_shape=nested write_shape=nested' (or container). Bara charge with WW/Pike/Force ready: expect brain WW fires alone (no framework Pike collateral); chain walker's normal save_chain_skip+layer2_save sequence, no extra modseen | mod=modifier_item_hurricane_pike_active_alternate | caster=lina events at framework SafeSend timing. If set_ok=0 the Menu API didn't resolve, falls back to manual UI uncheck of the 5 items in Linkbreaker menu. **What was confirmed in v0.5.45 demo log** (despite the framework Pike issue): chain walker fired exactly one save per dispatch (W in tail position when Pike fire_returned_false), v0.5.40 dispatcher lock working correctly (each lock_acquired matched with exactly one save), v0.5.44 W tail behavior per Q1 spec. The 'double fire' was framework + brain, not brain + brain. v0.5.45's commit-attacker + W .fire gate were NOT in the demo (v0.5.44 banner in log; brain didn't reload). **Hard-won lesson logged for v0.5.46+**: Lua's 200-local-variables-per-function limit is a HARD constraint. Future module-level additions should bundle into state.* or named module-tables (mirror LB.items / LB.read / LB.write etc.) rather than separate locals. Hit limit at ~200 with v0.5.45.1 additions; refactored 8 new locals into 1 (the LB table). **Roadmap**: v0.5.46 = FC defensive refinements (Q2 + Q8) + category patches + composer-tier audit + type-aware composer + Items Manager override (likely a third subsystem like LB but separate menu path; investigate if v0.5.45.1 LB doesn't fully close framework collateral). Lina.lua 7489 -> 7630 lines (+141). Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified, source = runtime SHA verify post-deploy.")
 
 return callbacks

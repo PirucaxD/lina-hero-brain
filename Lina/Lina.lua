@@ -5236,6 +5236,120 @@ for _, it in ipairs(_G4_TESTS) do
     }
 end
 
+----------------------------------------------- dodger chain-item override ---
+-- v0.5.43 D1: items in the brain's defense chain that overlap the Umbrella
+-- Dodger's "Защитные предметы" self-defense list at gui.json
+-- General/Main/Dodger/Дополнительные функции 2.0/Предметы/Защитные предметы.
+-- Pre-v0.5.43 the Dodger auto-fired these on threat detection BYPASSING the
+-- brain entirely (confirmed in v0.5.42 Bara test debug.log: item_wind_waker /
+-- item_cyclone modifiers appeared with caster=lina without any corresponding
+-- brain `issued` tlog, breaking the dispatcher's single-spend invariant).
+-- The disable+restore cycle scopes the override to one match so other heroes'
+-- Dodger config is unaffected. Opt-in via menu (default ON).
+-- NOTE: item_hurricane_pike is NOT in the Dodger list but may be auto-fired
+-- by the Items Manager subsystem; tracked as v0.5.43 D2 follow-up.
+local DODGER_CHAIN_ITEMS = {
+    "item_cyclone", "item_ethereal_blade", "item_glimmer_cape",
+    "item_invis_sword", "item_lotus_orb", "item_silver_edge",
+    "item_wind_waker",
+}
+local DODGER_MENU_PATH = {
+    "General", "Main", "Dodger",
+    "Дополнительные функции 2.0", "Предметы", "Защитные предметы",
+}
+
+-- The framework's multi-select Menu API for checkbox-list widgets is not
+-- documented in our source; try both common shapes (nested per-item handle
+-- vs container with per-item Get/Set) and emit a diag tlog so we can iterate
+-- if the actual API doesn't match either guess.
+local function _dodger_container()
+    if not (Menu and Menu.Find) then return nil end
+    local p = DODGER_MENU_PATH
+    local ok, h = pcall(Menu.Find, p[1], p[2], p[3], p[4], p[5], p[6])
+    return ok and h or nil
+end
+local function _dodger_item_nested(item)
+    if not (Menu and Menu.Find) then return nil end
+    local p = DODGER_MENU_PATH
+    local ok, h = pcall(Menu.Find, p[1], p[2], p[3], p[4], p[5], p[6], item)
+    return ok and h or nil
+end
+local function _dodger_read(item)
+    local h = _dodger_item_nested(item)
+    if h and h.Get then
+        local ok, v = pcall(h.Get, h)
+        if ok and type(v) == "boolean" then return v, "nested" end
+    end
+    local c = _dodger_container()
+    if c and c.Get then
+        local ok, v = pcall(c.Get, c, item)
+        if ok and type(v) == "boolean" then return v, "container" end
+    end
+    return nil, "unknown"
+end
+local function _dodger_write(item, value)
+    local h = _dodger_item_nested(item)
+    if h and h.Set then
+        local ok = pcall(h.Set, h, value)
+        if ok then return true, "nested" end
+    end
+    local c = _dodger_container()
+    if c and c.Set then
+        local ok = pcall(c.Set, c, item, value)
+        if ok then return true, "container" end
+    end
+    return false, "unknown"
+end
+
+local function dodger_chain_disable()
+    if state.dodger_disabled then return end
+    local saved, read_shape = {}, nil
+    for _, item in ipairs(DODGER_CHAIN_ITEMS) do
+        local v, shape = _dodger_read(item)
+        saved[item] = v
+        read_shape = read_shape or shape
+    end
+    local n_set, write_shape = 0, nil
+    for _, item in ipairs(DODGER_CHAIN_ITEMS) do
+        local ok, shape = _dodger_write(item, false)
+        if ok then n_set = n_set + 1 end
+        write_shape = write_shape or shape
+    end
+    state.dodger_saved = saved
+    state.dodger_disabled = true
+    tlog(1, "dodger_chain_disabled", {
+        items      = tostring(#DODGER_CHAIN_ITEMS),
+        set_ok     = tostring(n_set),
+        read_shape = tostring(read_shape or "nil"),
+        write_shape = tostring(write_shape or "nil"),
+    })
+end
+
+local function dodger_chain_restore()
+    if not state.dodger_disabled then return end
+    local saved = state.dodger_saved or {}
+    -- Safety: if all captured values were false / nil (likely we reloaded
+    -- mid-match and captured the already-disabled state), restore to the
+    -- framework default (all true) instead of leaving everything disabled.
+    local any_true = false
+    for _, v in pairs(saved) do if v then any_true = true; break end end
+    local default_to_true = (not any_true)
+    local n_set = 0
+    for _, item in ipairs(DODGER_CHAIN_ITEMS) do
+        local v = default_to_true and true or saved[item]
+        if v == nil then v = true end
+        local ok = _dodger_write(item, v)
+        if ok then n_set = n_set + 1 end
+    end
+    state.dodger_saved = nil
+    state.dodger_disabled = false
+    tlog(1, "dodger_chain_restored", {
+        items           = tostring(#DODGER_CHAIN_ITEMS),
+        set_ok          = tostring(n_set),
+        default_to_true = default_to_true and "y" or "n",
+    })
+end
+
 ------------------------------------------------------------------ menu ------
 local function setup_menu()
     local m = {}
@@ -5377,6 +5491,20 @@ local function setup_menu()
         .. "(LC Duel, Doom, Hex, etc.), try Lotus Orb FIRST to reflect the "
         .. "cast before falling back through the normal save ladder. Disable "
         .. "to skip the Lotus-first branch and use the default save order.")
+    -- v0.5.43 D1: override Umbrella Dodger's self-defense item list at match
+    -- start so the brain becomes sole controller of the 7 chain items that
+    -- overlap (Eul / Glimmer / Lotus / Shadow Blade / Silver Edge / Ether /
+    -- Wind Waker). Restored at POST_GAME so other heroes are unaffected.
+    -- See DODGER_CHAIN_ITEMS module-local + dodger_chain_disable/restore
+    -- helpers earlier in this file. Off = Dodger and brain both fire and
+    -- a double-fire pattern is observable (Bara WW+Pike v0.5.42 demo).
+    m.override_dodger = gDef:Switch('Override Dodger defense items', true)
+    m.override_dodger:ToolTip("On match start (GAME_IN_PROGRESS), capture "
+        .. "and zero the 7 self-defense items in the Umbrella Dodger that "
+        .. "overlap the brain's chain (Eul/Glimmer/Lotus/Shadow Blade/Silver "
+        .. "Edge/Ether/Wind Waker). Restored at POST_GAME so the change is "
+        .. "scoped to one match. Off = Dodger and brain both fire (causes "
+        .. "double-fires on Bara WW+Pike etc. observed in v0.5.42 demo).")
     m.preface_enable = gDef:Switch("Pre-face incoming threats", false)
     m.preface_enable:ToolTip("Turn to face an approaching enemy that has a "
         .. "ready targeted threat, so Lina's 0.6 turn rate does not delay her "
@@ -6114,6 +6242,27 @@ function callbacks.OnUpdateEx()
     -- degrades to silent no-op. Sort by count desc, cap at top 30. Lives
     -- OUTSIDE the self_npc gate so the dump still fires if Lina is dead when
     -- POST_GAME transitions.
+    -- v0.5.43 D1: Dodger chain-item override (match-scoped). On transition
+    -- into GAME_IN_PROGRESS capture+zero the 7 chain items in the Dodger's
+    -- self-defense list; on POST_GAME restore. Opt-in via state.menu.
+    -- override_dodger (default on). Idempotent via state.dodger_disabled
+    -- latch. Lives OUTSIDE the self_npc gate so capture happens once the
+    -- game state transitions even if Lina isn't acquired yet (the framework
+    -- Dodger doesn't care; toggles are global widgets).
+    if state.menu and state.menu.override_dodger
+       and state.menu.override_dodger:Get()
+       and GameRules and GameRules.GetGameState
+       and Enum and Enum.GameState then
+        local gs_d = GameRules.GetGameState()
+        if gs_d == Enum.GameState.DOTA_GAMERULES_STATE_GAME_IN_PROGRESS
+           and not state.dodger_disabled then
+            dodger_chain_disable()
+        elseif gs_d == Enum.GameState.DOTA_GAMERULES_STATE_POST_GAME
+           and state.dodger_disabled then
+            dodger_chain_restore()
+        end
+    end
+
     if not state.seen_modifiers_dumped and state.seen_modifiers
        and GameRules and GameRules.GetGameState then
         local gs = GameRules.GetGameState()
@@ -7044,6 +7193,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.42 bug-hunt-driven fixes: 14-dimension workflow surfaced 4 real bugs (1 high + 3 med, 0 critical), all in legacy code untouched by v0.5.40-v0.5.41. **P1 Sand King Epicenter** (was high) -- VPK verify caught a second bug the hunt missed: brain's modifier_sandking_epicenter was wrong project-wide (0 VPK hits) vs canonical modifier_sand_king_epicenter (375 hits). lib/threat_data.lua 5 renames (RECOMMENDED_SAVES L432, ABILITY_TO_THREAT value L775, THREAT_TIMING L1400, THREAT_CATEGORY L1539, THREAT_RISK L1775) + new CAST_POINT_THREATS entry (cp_default=2.0, category=delayed_aoe, max_dist=1900). Closes: anim path now arms cast-point-aligned save at impact (was firing at t=0, ~2s early, wasting BKB 10s window and burning Cyclone/WW spin before any Epicenter pulse landed). Plus: OnModifierCreate catch-up now actually matches when the canonical modifier lands (pre-v0.5.42 it never matched because the brain looked for the wrong name). Lesson 13 reinforced: always VPK-verify modifier names before catalog edits. **P2 PERSISTENT_LOCK_CAP_S off-by-one** (med) -- Lina.lua L1322 changed from 1.9 to 1.7. The v0.5.40 math had the 0.1s safety-margin term with the wrong sign: 2.1 + 0.1 - 0.3 = 1.9 yielded TTL=2.2s which EXCEEDS the 2.1s tick interval, blocking every other persistent re-fire (Duel, Static Storm, Naga Ensnare, Bane Nightmare) with dispatch_blocked. Correct: 2.1 - 0.1 - 0.3 = 1.7s -> TTL=2.0s with 0.1s headroom under tick interval. Comment updated. **P3 cast_verify_double_fail stamp leak at 4 sites** (med) -- v0.5.22 demo finding's actual root cause, partial v0.5.26 IMP-A4 fix only covered no_land. Lina.lua adds recently_aborted_intents stamp at: r_abort_tick STOP path (L4609), pending_steps_tick target_invalid (L3121), self_not_ok (L3124), cond_fn skip (L3138). Each uses the existing v0.5.26 key format (combo_name .. _ .. short for pending_steps paths; last_r_combo_name .. _r for r_abort). cast_verify_tick's existing L443 prefix lookup now suppresses the matching pcv entries before they emit level-1 noise. r_kill_steal target-BKBs-mid-cast scenario fully closed. **P4 OnModifierDestroy restored** (med) -- v0.5.36 MAINT-07 deleted an empty stub but the homing-armed-entry pattern needed it; bara_charge / tusk_snowball entries leaked when the modifier was destroyed without armed_post_fire firing (charge dispelled, charge target dies separately, snowball expires on terrain). Stale entry survived on still-alive caster; arm-site guards refused same-caster overwrites; next walkup within 480u/600u wrongly fired WW/Pike on a normal approach. Mirrors Sniper.lua L9644-9658 verbatim. **Workflow stats**: 14 dimensions, 29 agents, ~13min wall clock, 1.6M subagent tokens. 10 of 14 dimensions came back clean: dedup-race-post-v0541, a3-2-sibling-asymmetry (the deferred v0.5.41 pair was a false alarm; drops from v0.5.42 Tier 1), fc-pre-amp-regressions, ally-lock-isolation, canonical-mod-aliases-missed, channel-on-self-footgun, panic-key-edge-cases, hp-gate-fc-defensive, mana-cover-arithmetic, shard-window-predicate-agree. v0.5.40-v0.5.41 structural work confirmed sound. Lina.lua 6999 -> 7049 (+50). lib/threat_data.lua +1 catalog entry + 5 modifier-name renames (text-replace; no line delta beyond the +1). luac clean both files, no BOM, lesson 15 verified, source=runtime SHA verify post-deploy. Lib commit pending for threat_data.lua; uczone-toolkit mirror + public lina-hero-brain repo sync pending.")
+LOG:info("Lina brain v0.5.43 Dodger chain-item override: brain-side, match-scoped fix for the v0.5.42 Bara WW+Pike double-fire root cause. **Diagnosis**: v0.5.42 demo log showed brain emitted ZERO defensive `issued` tlogs across 4 Bara charges (chain reported all 9 items not_ready on the one Dispatch attempt, modifier ended before fire on 3 others), yet item_wind_waker / item_cyclone modifiers appeared in modseen with caster=lina via the framework's SafeSend queue. The Umbrella Dodger has a hidden Russian-named config at gui.json General/Main/Dodger/Дополнительные функции 2.0/Предметы/Защитные предметы that auto-fires 9 self-defense items on threat detection, BYPASSING the brain entirely. 7 of those overlap Lina's defense chain (item_cyclone / item_ethereal_blade / item_glimmer_cape / item_invis_sword / item_lotus_orb / item_silver_edge / item_wind_waker); item_hurricane_pike is NOT in that list and likely fires via the Items Manager subsystem (tracked as v0.5.43 D2 follow-up). **D1 fix**: new module-level DODGER_CHAIN_ITEMS table + DODGER_MENU_PATH + dodger_chain_disable() / dodger_chain_restore() helpers wired into the existing GameRules.GetGameState transition hook in OnUpdateEx. On GAME_IN_PROGRESS the brain captures the 7 items' current values into state.dodger_saved + sets each to false (idempotent via state.dodger_disabled latch); on POST_GAME restores from captured state (with safety fallback to all-true if captured state was all-false from a mid-match brain reload). Multi-select Menu API for the Dodger checkbox-list is undocumented in source: code tries BOTH common shapes (nested Menu.Find(path..., item):Set(value) AND container Menu.Find(path...):Set(item, value)) with pcall guards + a dodger_chain_disabled / dodger_chain_restored tlog at v=1 reporting which shape resolved (read_shape / write_shape fields) and how many of 7 sets succeeded (set_ok field). If both shapes fail, helpers degrade to silent no-op and the user can fall back to manually unchecking the items in the Dodger UI. Opt-in via new Defense menu toggle 'Override Dodger defense items' (default ON); off = pre-v0.5.43 behavior where Dodger and brain both fire and the double-fire pattern is observable. Scope is per-match (capture+set at start, restore at end) so other heroes' Dodger config is NOT permanently mutated. **Verification on next demo**: after match starts, expect `dodger_chain_disabled items=7 set_ok=7 read_shape=nested write_shape=nested` (or container) tlog. Then Bara charge test: brain's chain walker should successfully fire WW or another save (no all-not-ready situation) and the framework should NOT fire any of the 7 items independently (only the brain's `issued` tlog should appear for the save). At match end expect `dodger_chain_restored items=7 set_ok=7 default_to_true=n` (or y if reloaded mid-match). If `set_ok=0` in either tlog the Menu API didn't resolve and we iterate. **Workflow notes**: investigation was hybrid log-trace + Umbrella gui.json forensic dive; the Russian section is the hidden config user flagged. v0.5.40 dispatcher work + v0.5.41 Dedup-cleanup + v0.5.42 P4 OnModifierDestroy all CONFIRMED working in the v0.5.42 log (lock_acquired=1 + bara_charge_cleared=3 visible); the double-fire was never a brain-side bug, it was the Dodger subsystem racing the brain. Lina.lua 7049 -> 7198 lines (+149). lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified, source = runtime SHA verify post-deploy.")
 
 return callbacks

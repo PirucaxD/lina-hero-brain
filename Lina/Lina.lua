@@ -2437,17 +2437,32 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
                 -- + cast point + carry/aim distinction. Falls back to
                 -- v0.5.47.2 max(stamped, live) when no catalog entry.
                 if state.compute_arrival_time then
-                    local impact_t, impact_pos, _, cat_speed =
+                    local impact_t, impact_pos, cat_entry, cat_speed =
                         state.compute_arrival_time(entry.threat_mod, entry.caster, state.self_npc)
                     if impact_t then
-                        local in_window = impact_t >= (W_LEAD - 0.05)
-                                          and impact_t <= (W_LEAD + 0.20)
+                        -- v0.5.49: per-mod fire window from catalog kind +
+                        -- speed (replaces hardcoded [1.07, 1.32]). Carry-
+                        -- Lina is tight symmetric ±225/speed; hit-and-stop
+                        -- is wide lower bound = cast_point_floor 0.6s.
+                        -- Lua multi-return gotcha: `a and f() or x, y` does NOT
+                        -- assign both returns from f() to both targets. Use
+                        -- explicit if/else so the second return value lands in `upper`.
+                        local lower, upper
+                        if state.compute_w_fire_window then
+                            lower, upper = state.compute_w_fire_window(cat_entry, cat_speed)
+                        else
+                            lower, upper = W_LEAD - 0.05, W_LEAD + 0.20
+                        end
+                        local in_window = impact_t >= lower and impact_t <= upper
                         tlog(3, "w_catalog_eta_gate", {
                             d         = string.format("%.0f", d),
                             speed     = string.format("%.0f", cat_speed or 0),
                             impact_t  = string.format("%.2f", impact_t),
+                            lower     = string.format("%.2f", lower),
+                            upper     = (upper == math.huge) and "inf" or string.format("%.2f", upper),
                             in_window = in_window and "y" or "n",
                             mod       = tostring(entry.threat_mod),
+                            kind      = tostring(cat_entry and cat_entry.kind or "-"),
                         })
                         if in_window then
                             entry._fire_dist_eff   = -3  -- sentinel: catalog path
@@ -3628,6 +3643,50 @@ state.compute_arrival_time = function(threat_mod, caster, target, modifier_handl
 
     return impact_t, impact_pos, entry, speed
 end
+
+-- v0.5.49 math review: per-mod W fire window based on catalog kind and
+-- speed. Replaces the hardcoded [W_LEAD - 0.05, W_LEAD + 0.20] window
+-- from v0.5.48 which mis-treated all kinds the same.
+--
+-- Constants:
+--   W_LEAD            = 1.12s (W cast point 0.6 + delay 0.5 + anim 0.02)
+--   W_AOE_RADIUS      = 225u (light_strike_array radius)
+--   CAST_POINT_FLOOR  = 0.6s (Lina W cast point; mid-cast stun fizzles W)
+--
+-- Per-kind windows:
+--   homing_carry (Tusk snowball; caster continues past target):
+--     window = [max(CAST_POINT_FLOOR, W_LEAD - W_AOE_RADIUS/speed),
+--               W_LEAD + W_AOE_RADIUS/speed]
+--     TIGHT symmetric. At speed=1675, ~ [0.99, 1.25].
+--
+--   homing_charge / instant_blink (Bara, PA; caster stops at target):
+--     window = [CAST_POINT_FLOOR, W_LEAD + W_AOE_RADIUS/speed]
+--     WIDE lower (W can detonate after threat already arrived; caster
+--     stationary at Lina). Upper caps fast Bara (speed=1200 -> 1.31).
+--
+--   channel_at_caster / cast_point_targeted (WD, Lion; stationary
+--   caster; fire-timing handled by other paths):
+--     window = [0, infty] (always passes; aim still applies).
+state.compute_w_fire_window = function(entry, speed)
+    if not entry then return 1.07, 1.32 end
+    local W_LEAD           = 1.12
+    local W_AOE_RADIUS     = 225
+    local CAST_POINT_FLOOR = 0.6
+    local k = entry.kind or ""
+    if k == "channel_at_caster" or k == "cast_point_targeted" then
+        return 0, math.huge
+    end
+    local margin = (speed and speed > 0) and (W_AOE_RADIUS / speed) or 0.20
+    local upper  = W_LEAD + margin
+    local lower
+    if k == "homing_carry" then
+        lower = math.max(CAST_POINT_FLOOR, W_LEAD - margin)
+    else
+        lower = CAST_POINT_FLOOR
+    end
+    return lower, upper
+end
+
 -- Q (Dragon Slave) is a traveling line wave (KV dragon_slave_speed = 1200 u/s,
 -- cast point 0.35). The wave reaches a target at distance d at cast_point +
 -- d/speed seconds, so the lead must be distance-aware (a fixed lead undershoots
@@ -8140,6 +8199,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.48.1 hotfix: live_or_fallback uses live EXCLUSIVELY (not max) for catalog speed source. v0.5.48 demo log L1764 caught Bara catalog gate firing at impact_t=1.32 d=1319 with speed=1000 (the catalog speed_fallback). Real Bara charge speed was ~500 at fire moment (live NPC.GetMoveSpeed reading from the same demo confirmed mid-charge ramp is 500-580 not 1000). v0.5.48 used max(live, fallback) which OVERESTIMATED the speed -- catalog said 'arriving in 1.32s' but real arrival was 1319/500=2.64s. W detonated 1.5s BEFORE Bara arrived, miss by 535u (user spec 'Lina W was casted way off'). **Root cause**: v0.5.48 max(live, fallback) was a residual v0.5.47.2 pattern that no longer applies once the catalog has correct semantics. The catalog says 'use live measurement when available; fallback only if live API failed' but the code used max() which always picks fallback when fallback > live. **Fix**: in state.compute_arrival_time, live_or_fallback now uses live exclusively when live > 0; fallback only when live API failed (returned nil / 0). For Bara at d=720 live=550, impact_t=1.31 (in window) -> fire; W detonates 0.08s before Bara arrives, Bara 44u from Lina at W detonation = INSIDE 225r AoE = STUN. For Bara EARLY charge at d=1319 live=500, impact_t=2.64 (out of window upper bound) -> wait; gate re-evaluates per-frame as Bara closes. **Other v0.5.48 demo confirmation**: Tusk OK (catalog kv_or_fallback speed=1675 + aim=catalog_self correct), WD Death Ward 'perfect' (aim=catalog_caster), PA blink 'OK' (instant_blink path bypasses catalog gate; commit-attacker chain fires post-blink with aim=self_origin legacy), mod-not-in-catalog test 'made'. Bara is the only catalog miss; v0.5.48.1 closes it. **Verification on next demo**: Bara expects w_catalog_eta_gate stream with speed=live NPC.GetMoveSpeed (NOT 1000 fallback unless live API fails); gate fires in_window=y when impact_t ~1.12; armed_threat_fire via=w_catalog_eta; W detonates at/before Bara arrival; Bara stunned at impact. Tusk / WD / PA unchanged from v0.5.48 (paths use different speed_source). **Lina.lua 8136 -> 8143 lines (+7). SHA refreshed. lib/threat_data.lua unchanged from v0.5.48. luac clean, no BOM, lesson 15 verified.")
+LOG:info("Lina brain v0.5.49 full math review on W fire window. User spec: 'Do a full review on the math we are doing, we are applying a little bit off'. **The audit**: W has W_LEAD=1.12s prep (0.6 cast point + 0.5 delay + 0.02 anim) and 225r AoE. The pre-v0.5.49 window [W_LEAD - 0.05, W_LEAD + 0.20] = [1.07, 1.32] was HARDCODED and treated all threat kinds identically. Three bugs surfaced from the math review: **Bug 1**: upper bound 1.32 misses fast targets. At impact_t=1.32 with speed=1675 (Tusk), W detonates 0.20s before arrival -> threat is 0.20*1675=335u from Lina at detonation -> OUTSIDE 225r AoE -> MISS. **Bug 2**: lower bound 1.07 wastes fire opportunities for hit-and-stop threats. Bara STOPS at Lina on arrival; W can detonate any time after Lina's W cast point completes (0.6s floor; below that mid-cast stun fizzles W). For Bara at speed 500, the window could be [0.6, 1.57] (much wider than 1.07-1.32). **Bug 3**: symmetric window for carry-Lina threats was wrong. The carry threat CONTINUES past Lina at the same speed; W must detonate within ±225/speed of arrival. The right window is SYMMETRIC and TIGHT around W_LEAD, not the 0.05/0.20 asymmetric hardcoded values. **Fix**: new state.compute_w_fire_window(entry, speed) helper returning (lower, upper) bounds per-mod based on catalog kind. Three kinds: (1) **homing_carry** (Tusk snowball; passes through target): window = [max(CAST_POINT_FLOOR=0.6, W_LEAD - 225/speed), W_LEAD + 225/speed]. At Tusk speed 1675, window ~ [0.99, 1.25] (much tighter than 1.07-1.32). (2) **homing_charge / instant_blink** (Bara / PA; stops at target): window = [CAST_POINT_FLOOR=0.6, W_LEAD + 225/speed]. Bara at speed 500 -> [0.6, 1.57] (much wider lower). Bara at speed 1200 (talents+items) -> [0.6, 1.31] (upper caps fast Bara). (3) **channel_at_caster / cast_point_targeted** (WD / Lion; stationary caster; fire timing handled by other paths): window = [0, infty] (catalog gate always passes; aim policy via impact_pos still applies). **Implementation**: armed_chain_peek W block now consults state.compute_w_fire_window with the catalog entry + computed speed, gets (lower, upper) bounds. w_catalog_eta_gate tlog now emits lower / upper / kind fields for transparency. CAST_POINT_FLOOR=0.6 protects Lina from firing W when the threat would stun her mid-cast (cast point window) and fizzle the spell. **Other findings from the audit**: (a) catalog gate only fires W for HOMING threats (Bara, Tusk); other kinds (channel_at_caster, cast_point_targeted) use catalog only for AIM (impact_pos field). (b) Instant_blink threats (PA) bypass armed_chain_peek entirely via the instant_blink branch in armed_threats_tick; catalog kind=instant_blink unused for gate timing but documented for completeness. (c) Lua multi-return gotcha caught mid-edit: `a and f() or x, y` does NOT assign both returns from f() to both targets; used explicit if/else for the window lookup. **Verification on next demo**: w_catalog_eta_gate tlog stream now includes lower, upper, kind. Bara expects window like [0.6, 1.31-1.57] depending on live speed; gate fires anywhere in range. Tusk expects [0.99, 1.25] tight window; gate fires when impact_t crosses into that range. WD / Lion expect window [0, inf] (catalog gate always passes, but in_window=y immediately; other paths handle fire timing). **Lina.lua 8143 -> 8202 lines (+59). lib/threat_data.lua unchanged. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
 
 return callbacks

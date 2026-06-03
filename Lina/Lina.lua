@@ -30,6 +30,17 @@ local Defense = require("lib.defense")    -- v0.5.0: generic Layer-2 save dispat
 local MS = Enum.ModifierState
 local UO = Enum.UnitOrder
 
+-- v0.5.46.3 forward declaration: defense_dispatcher is constructed at
+-- ~L1853 (Defense.New) but functions defined earlier in the file
+-- (state.scan_and_arm_committed_attackers at L797, etc.) reference it.
+-- Without a forward declaration the early references resolve to a
+-- GLOBAL `defense_dispatcher` (nil) at function-call time, causing
+-- silent failures like the v0.5.46.2 demo `commit_attacker_diag |
+-- exit=no_dispatcher` that completely disabled the commit-attacker
+-- chain. The L1853 line drops its `local` keyword so the assignment
+-- targets this forward-declared upvalue instead of shadowing it.
+local defense_dispatcher
+
 -- ThreatData owns these universal Dota-side facts; the consuming logic stays
 -- in this hero file (Tier-2 data-only extraction).
 local THREATS_ON_SELF       = TD.THREATS_ON_SELF
@@ -734,17 +745,20 @@ state.committed_attacker_armed_t    = state.committed_attacker_armed_t or {}
 -- v0.5.46 Problem A diag throttle (~5Hz) + last-scan stamp counter.
 state.commit_attacker_diag_t        = state.commit_attacker_diag_t or 0
 state.attacker_latch_last_stamped   = state.attacker_latch_last_stamped or 0
--- v0.5.46.2 W .fire too-late skip allowlist: mods that PHYSICALLY CARRY
--- Lina away from her pre-cast position (W AoE 225r at Lina's old spot
--- misses both Lina and the caster). Bundled into state.* per v0.5.45.1
--- 200-locals-per-function constraint. Keys are canonical modifier names;
--- VPK-verified. Add new entries when a carry-Lina mechanic is observed
--- missing in demo logs.
+-- v0.5.46.3 W .fire too-late skip allowlist: empty by default. Tusk
+-- snowball was removed in v0.5.46.3 because the v0.5.46.3 predict-aim
+-- (W aimed at threat caster's predicted position W_LEAD=1.12s ahead)
+-- now follows the caster's trajectory; W AoE lands wherever the caster
+-- actually is at detonation, including the snowball endpoint. The
+-- table stays as a no-op extension point: if some future mechanic is
+-- observed missing under predict-aim (e.g. unpredictable teleporter
+-- mid-cast), add the canonical modifier name as a true-value entry to
+-- restore the skip behavior. Bundled into state.* per v0.5.45.1
+-- 200-locals-per-function constraint.
 state.W_skip_too_late_mods          = state.W_skip_too_late_mods or {
-    modifier_tusk_snowball_movement = true,
-    -- Candidates if observed: modifier_magnataur_skewer (Magnus pulls
-    -- Lina toward him; W at Lina old spot may miss), Tiny Toss (Tiny
-    -- throws Lina far). Add only after demo confirms W misses.
+    -- Empty by default. Re-add modifier_tusk_snowball_movement here
+    -- if v0.5.46.3 predict-aim regresses Tusk; or add new mods like
+    -- modifier_magnataur_skewer / Tiny Toss when observed missing.
 }
 
 -- Per-tick: stamp attacking_seen_t for any visible enemy hero NPC.IsAttacking
@@ -1431,12 +1445,35 @@ local SAVE_FIRE = {
                 })
                 return false
             end
-            local pos = Entity.GetAbsOrigin and Entity.GetAbsOrigin(me)
+            -- v0.5.46.3 predict-aim: W has 1.12s prep (0.6 cast point +
+            -- 0.5 delay + ~0.02 cast animation). Aiming at Lina's CURRENT
+            -- position misses fast Bara (Bara still en-route at fire+1.12),
+            -- misses Tusk snowball (snowball carries Lina away from old
+            -- spot), misses any non-stationary committed caster. Aim at
+            -- the threat caster's predicted position W_LEAD seconds ahead
+            -- via state.predict_target_pos (smoothed velocity from
+            -- Geometry.PredictPos sampled in OnUpdateEx). This single change
+            -- handles homing-to-Lina (Bara stops AT Lina, predicted pos =
+            -- Lina origin), carry-Lina (Tusk snowball endpoint past Lina),
+            -- and chase-Lina (any moving committed attacker) uniformly.
+            -- Falls back to Lina origin if caster handle is missing
+            -- (proactive Dispatch with no armed entry, dead caster, etc.).
+            local W_LEAD = 1.12
+            local pos
+            local caster = state.cur_armed_caster
+            if caster and Entity.IsEntity(caster) and Target.IsAlive
+               and Target.IsAlive(caster) and state.predict_target_pos then
+                pos = state.predict_target_pos(caster, W_LEAD)
+            end
+            if not pos then
+                pos = Entity.GetAbsOrigin and Entity.GetAbsOrigin(me)
+            end
             if not pos then return false end
             tlog(2, "w_defensive_fire", {
                 intent = tostring(intent),
                 mana   = string.format("%.0f", mana),
                 w_cost = string.format("%.0f", w_cost),
+                aim    = caster and "predict" or "self_origin",
             })
             return issue_cast_position(intent, w, pos, "def")
         end,
@@ -1850,7 +1887,11 @@ local LINA_ETA_RESOLVERS = {
     lina_fc_offensive_pre_tf_sustain = _lina_eta_fc_offensive,
 }
 
-local defense_dispatcher = Defense.New {
+-- v0.5.46.3: drop `local` keyword so this assigns the forward-declared
+-- upvalue at top-of-file (see comment near L31). Without this fix,
+-- functions defined earlier (commit-attacker scan, etc.) referenced
+-- a nil global.
+defense_dispatcher = Defense.New {
     anim_save_overrides     = state.ANIM_SAVE_OVERRIDES,
     hero_save_overrides     = LINA_SAVE_OVERRIDES,
     patched_recommended     = PATCHED_RECOMMENDED_SAVES,
@@ -2182,23 +2223,20 @@ local SAVE_FIRE_DISTANCE = {
     item_invis_sword        = 240,
     item_silver_edge        = 240,
     item_ethereal_blade_self = 480,
-    -- v0.5.46.1 Problem B: restored to 800u. v0.5.46 removed the entry
-    -- to fix Tusk snowball mis-timing, but v0.5.46 demo confirmed the
-    -- removal regressed Bara charge: chain walker eta_trigger=1.20 fires
-    -- W at d=720 (bara_charge eta_speed=600 stamped) but Bara real
-    -- charge speed is ~700 u/s so real-eta at fire=1.03s. W detonates
-    -- at fire+1.10 = arrival+0.07 = Bara hits Lina BEFORE W detonates =
-    -- charge stun lands then W stuns Bara. v0.5.45.1 dist gate fired
-    -- W at d=800 (real-eta=1.14), W detonates 0.04s BEFORE Bara impact
-    -- = Bara stunned at/before contact = charge fails. Restored entry
-    -- delegates the Tusk vs Bara differentiation to the v0.5.46
-    -- too-late belt (state.cur_armed_eta < 1.0): Bara stamped
-    -- eta_speed=600 -> cur_armed_eta=800/600=1.33s -> belt passes -> W
-    -- fires (good); Tusk stamped eta_speed=1200 -> cur_armed_eta=
-    -- 800/1200=0.67s -> belt skips -> W not fired at dist gate (good,
-    -- W would miss snowball). Eta_trigger=1.20 path still applies to
-    -- Tusk at d=1440 (cur_armed_eta=1.20, belt passes, W fires).
-    lina_w_anti_gap         = 800,
+    -- v0.5.46.3 Problem B: bumped 800 -> 1200. v0.5.46.1's 800u gate
+    -- assumed Bara real charge speed ~700 u/s but the demo confirmed
+    -- "missing by little time" = real speed closer to 900-1000 u/s
+    -- (charge MS scales with level + Phase Boots + talents). At d=800
+    -- with real speed 1000, real-eta=0.80s and W lands 0.32s AFTER
+    -- impact = miss. At d=1200 with real speed 1000, real-eta=1.20s
+    -- and W lands 0.08s BEFORE impact = clean stun. Pairs with
+    -- v0.5.46.3 predict-aim (W aimed at threat caster's predicted
+    -- position W_LEAD=1.12s ahead, not Lina origin) so the AoE lands
+    -- wherever the caster actually is at detonation. Tusk dropped
+    -- from W_skip_too_late_mods in the same release: with predict-aim
+    -- the W AoE follows Tusk's snowball endpoint = past Lina's pre-
+    -- snowball position = the spot where the snowball lets Lina go.
+    lina_w_anti_gap         = 1200,
 }
 -- v0.5.9 (E2): self-displacement saves refuse to fire below this radius --
 -- pushing Lina 600u in facing when the threat already crossed inside would
@@ -2300,6 +2338,12 @@ local function armed_post_fire(key, entry, eta, d, fire_reason)
     -- W belt can gate against the carry-Lina allowlist (Tusk snowball etc).
     state.cur_armed_eta        = (not entry.cast_point_threat) and eta or nil
     state.cur_armed_threat_mod = entry.threat_mod
+    -- v0.5.46.3: stash threat caster handle so SAVE_FIRE.lina_w_anti_gap.fire
+    -- can aim W at the caster's predicted position W_LEAD seconds ahead
+    -- (Geometry.PredictPos uses smoothed velocity samples; matches the
+    -- caster's actual movement during charge / snowball / etc). Cleared
+    -- at function exit alongside cur_armed_eta + cur_armed_threat_mod.
+    state.cur_armed_caster     = entry.caster
     -- v0.5.6 (E2): eta_t shows the per-save effective trigger
     -- actually used this tick (entry default 0.8s when no
     -- override hit, or blink_arrived/eta_critical paths).
@@ -2344,6 +2388,7 @@ local function armed_post_fire(key, entry, eta, d, fire_reason)
     -- the in-flight save resolves. v0.5.46.2: also drop threat_mod stash.
     state.cur_armed_eta        = nil
     state.cur_armed_threat_mod = nil
+    state.cur_armed_caster     = nil  -- v0.5.46.3
 end
 
 -- Armed homing / instant-blink threats: fire on arrival (instant-blink) or at
@@ -7751,6 +7796,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.46.2 hotfix: W fires by default; too-late skip narrowed to carry-Lina mods. User spec from v0.5.46.1 demo discussion: 'Even if PA blink is to fast it still better use W to run or fight. No reason to not do.' v0.5.45 W .fire gates (intent-pattern skip for 10 sub-1.1s arrivals, 100u-melee dist skip) + v0.5.46 broad too-late belt treated 'W cannot stun the threat caster on arrival' as 'W is wasted' but that framing was inverted for the typical case: W's 1.6s AoE catches whoever stays at Lina's pre-cast position 1.1s after fire, which is the threat caster mid-attack-chain (PA blink + 4s attack speed window, AM blink + auto-attacks, Slark pounce + leashed attacks, Nyx vendetta + impale followup, Riki blink_strike + chain attacks, melee committed attackers). W stuns the caster mid-commit, breaks the attack chain, buys Lina 1.6s to TP / run / counter. Wasting 130 mana + 8s CD for that trade is correct value-for-cost. **Removed**: v0.5.45 intent-pattern skip block (phantom_strike / antimage_blink / queenofpain_blink / riki_blink_strike / slark_pounce / pangolier_swashbuckle / nyx_vendetta / mirana_leap / weaver_shukuchi / void_spirit_astral_step) ENTIRELY. v0.5.45 100u-melee dist scan block ENTIRELY (enemy at melee is INSIDE W's 225u AoE radius so W catches them, not a reason to skip). **Narrowed**: v0.5.46 too-late belt no longer fires on cur_armed_eta<1.0 alone; now also requires state.cur_armed_threat_mod in state.W_skip_too_late_mods allowlist. The only canonical entry today is modifier_tusk_snowball_movement (Tusk snowball physically carries Lina away from her pre-cast position; W AoE at Lina's old spot misses both Lina and Tusk). Future additions if observed missing: modifier_magnataur_skewer (Magnus pulls Lina), Tiny Toss. New tlog name: w_defensive_skip_too_late_carry (distinguishes the narrowed semantic from v0.5.46's broader belt). **State additions** (bundled into state.* per v0.5.45.1 200-locals constraint): state.W_skip_too_late_mods (carry-Lina allowlist), state.cur_armed_threat_mod (stashed by armed_post_fire alongside state.cur_armed_eta; cleared on function exit). **Verification on next demo**: PA blink scenarios now expect w_defensive_fire intent=armed_phantom_assassin_phantom_strike_w_stun (or similar) instead of w_defensive_skip_too_fast. Tusk snowball still expects w_defensive_skip_too_late_carry when belt rejects. Bara charge unchanged from v0.5.46.1 (eta_speed=600 -> cur_armed_eta=1.33 at d=800, belt passes regardless of allowlist). **Lina.lua 7777 -> 7754 lines (-23, net: -50 v0.5.45 gates +27 v0.5.46.2 allowlist+stash+narrowed-belt block). Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
+LOG:info("Lina brain v0.5.46.3 hotfix: defense_dispatcher upvalue fix + W predict-aim + Tusk drop from skip allowlist + Bara dist gate bumped 800->1200. Three patches addressing the v0.5.46.2 demo log. **Problem Aaa-2 (commit-attacker DEAD via exit=no_dispatcher)**: v0.5.46.1 hoisted diag emit revealed the smoking gun: commit_attacker_diag tlogs every 200ms across the entire demo with exit=no_dispatcher. Root cause: `local defense_dispatcher = Defense.New { ... }` at L1853 is declared AFTER state.scan_and_arm_committed_attackers at L797. The function captures `defense_dispatcher` as an UPVALUE, but at function-creation time the local does not exist yet so Lua resolves it as a GLOBAL (nil), and the global reference never picks up the later local assignment. PA blink path works because its dispatch goes through callbacks.OnModifierCreate -> handle_threat_on_self -> a code path declared AFTER L1853 where defense_dispatcher resolves to the live local. Fix: forward-declare `local defense_dispatcher` at top-of-file near the require statements; drop the `local` keyword from the L1853 assignment so it assigns to the forward-declared upvalue. Now commit-attacker scan can actually dispatch. **Problem B (Bara W still missing by little time)**: v0.5.46.1 SAVE_FIRE_DISTANCE=800 assumed Bara real charge speed ~700 u/s but the v0.5.46.2 demo log confirmed W still misses at d=797 fire moments. Real Bara charge speed scales with level + Phase Boots + talents; at level 6+ can hit 900-1000 u/s. At d=800 with real speed 1000 the real-eta is 0.80s and W 1.12s prep lands 0.32s AFTER impact = miss. **Fix**: bump SAVE_FIRE_DISTANCE[lina_w_anti_gap] 800 -> 1200. At d=1200 with real speed 1000, real-eta=1.20s and W lands 0.08s BEFORE impact = clean stun before Bara connects. **W predict-aim** (Tusk + general accuracy): v0.5.46.2 aimed W at Entity.GetAbsOrigin(state.self_npc) = Lina current position. This is correct for stationary-target threats (Bara stops at Lina) but wrong for Tusk snowball (Lina is carried away from her old spot by detonation time = W misses both Lina and Tusk). v0.5.46.3 changes aim resolution to state.predict_target_pos(threat_caster, W_LEAD=1.12) - smoothed-velocity prediction of where the caster will be when W detonates. Single change handles all three cases uniformly: (a) homing stop-at-Lina (Bara stops, predicted pos = current pos = Lina origin since Bara is at Lina), (b) carry-Lina (Tusk snowball endpoint past Lina pre-snowball position = where the snowball lets Lina go), (c) chase-Lina (committed attackers tracking Lina movement). Falls back to Lina origin for fog / no-caster cases. New tlog field: aim=predict | self_origin distinguishes the path. **Tusk dropped from W_skip_too_late_mods** allowlist (table is now empty by default; extensible for future regressions). User spec: 'Tusk not using W, even if we cant stop tusk W we can stun him right after skills is made by applying correctly our skill'. With predict-aim, W detonates at Tusk snowball endpoint where Lina is dropped = 1.6s AoE catches Tusk just as the snowball ends = Tusk stunned, no followup. **State additions** (state.* per 200-locals constraint): state.cur_armed_caster stashed in armed_post_fire alongside cur_armed_eta + cur_armed_threat_mod; cleared on function exit. **Forward-declared local**: defense_dispatcher (line 33 area; assignment at L1853 drops the `local` keyword). **Verification on next demo**: commit-attacker diag should show exit=scanned with attacking>0 + committed>0 + armed>0, then committed_attacker_armed tlog, then chain walker pick (Force Staff at d=500 then Pike at d=500 then W tail). Bara expects armed_threat_fire dist~1200 (NOT 800), then w_defensive_fire aim=predict. Tusk expects W to fire with aim=predict; visually W stuns Tusk at snowball endpoint. PA blink still works (was already in v0.5.46.2). **What is NOT in v0.5.46.3**: precise per-mod ETA using runtime NPC.GetMoveSpeed (user spec for future: 'It might be a way to get this info live through API, after getting this information it is possible to make a perfect ETA and skill landing time'). Threat-arrival-time catalog in threat_data.lua. KV ability data lookup for cast points + skill landing times. Sniper grenade-on-Bara reference (Sniper.lua L9598 stamps eta_speed=600 eta_trigger=0.8 + grenade cast point 0.1s + knockback 0.4s = 0.5s total; Sniper handles short-prep saves so the timing differs from Lina W 1.12s). All queued for v0.5.47+. **Lina.lua 7754 -> 7799 lines (+45). SHA refreshed. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
 
 return callbacks

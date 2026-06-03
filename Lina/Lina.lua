@@ -698,12 +698,22 @@ state.lina_chains = {
 -- from Sniper.lua L6568-6573 (WD) and L6600-6603 (Pit) for Lina's item set
 -- and ability mix (no grenade; W as tail interrupter).
 --
--- WD Death Ward (8s channel; ward auto-attacks Lina with magical damage):
--- displace WD out of the 700-cast-range bubble OR survive the channel via
--- magic immunity / cyclone-airborne. Pike-on-WD is the cleanest interrupt
--- (push 425u + cancels channel through forced movement); Cyclone-on-WD
--- bottles WD for 2.5s; W stuns WD on summon-then-channel sites.
+-- v0.5.47.1: WD Death Ward chain rebuilt with W as FRONT (was tail in
+-- v0.5.47). User spec: "On cases where the skill is interrupted the best
+-- option is to use the method that interrupt it. In this case our first
+-- option should be W and itens afterwards". Death Ward is an 8s
+-- interruptible channel (cast point is brief but the channel itself is
+-- interrupt-vulnerable: stun the WD hero and the ward dies/stops). W's
+-- 1.12s prep needs to start IMMEDIATELY when the channel begins so W
+-- detonates at WD's position before WD finishes a meaningful amount of
+-- the channel. Items follow as backup (Pike-on-WD pushes 425u + cancels
+-- channel via forced-movement; Cyclone-on-WD bottles 2.5s; etc.).
+-- W aim resolution is handled inside SAVE_FIRE.lina_w_anti_gap.fire
+-- via the threat_caster param (chain walker passes it per lib/defense.lua
+-- L566) which feeds predict_target_pos(WD, 1.12). WD is stationary while
+-- channeling so predict returns WD's current position = aim on WD.
 local _CHAIN_WD_DEATH_WARD = {
+    "lina_w_anti_gap",
     "item_hurricane_pike",
     "item_force_staff",
     "item_cyclone",
@@ -711,7 +721,6 @@ local _CHAIN_WD_DEATH_WARD = {
     "item_wind_waker",
     "item_black_king_bar",
     "lina_flame_cloak",
-    "lina_w_anti_gap",
 }
 -- Underlord Pit of Malice (400u radius ensare; 1.5-1.8s root per tick;
 -- re-snares every 3.6s for 12s; undispellable basic). Forced-movement
@@ -1436,7 +1445,18 @@ local SAVE_FIRE = {
     -- no_effective_save_for_threat if W also skipped).
     lina_w_anti_gap = {
         short = "w_stun",
-        fire  = function(intent)
+        -- v0.5.47.1: .fire signature now consumes threat_caster + threat_mod
+        -- which the chain walker passes (lib/defense.lua L566:
+        -- fire_entry.fire(issue_intent, threat_caster, threat_mod)). The
+        -- v0.5.46.3 predict-aim relied on state.cur_armed_caster which is
+        -- only set in armed_post_fire; non-armed dispatch paths (channel
+        -- start, cast point, proactive) saw nil and fell back to Lina
+        -- origin which missed the actual caster (v0.5.47 demo log: WD
+        -- Death Ward fired with aim=self_origin instead of WD position).
+        -- Using the .fire param directly works for ALL dispatch paths.
+        -- state.cur_armed_caster stays as a fallback for any caller that
+        -- passes nil (e.g., a test harness that bypasses the chain walker).
+        fire  = function(intent, threat_caster, threat_mod)
             local me = state.self_npc
             if not me then return false end
             if state.menu and state.menu.enable_w_anti_gap
@@ -1468,14 +1488,21 @@ local SAVE_FIRE = {
             -- pre-cast position (W cast at Lina's old spot misses both Lina
             -- and the caster). Tusk snowball is the canonical case. Future
             -- candidates: Magnus Skewer + Tiny Toss + similar pulls/throws.
+            -- Carry-Lina belt: skip W only when the threat's mod is in the
+            -- (currently empty) allowlist AND the cur_armed_eta stash from
+            -- armed_post_fire indicates we're firing too late to catch the
+            -- caster's snowball endpoint. v0.5.47.1: also consult the
+            -- threat_mod param so chain walker callers without an armed
+            -- entry (channel start, cast point, etc) can also gate.
+            local cur_mod = state.cur_armed_threat_mod or threat_mod
             if state.cur_armed_eta and state.cur_armed_eta < 1.0
-               and state.cur_armed_threat_mod
+               and cur_mod
                and state.W_skip_too_late_mods
-               and state.W_skip_too_late_mods[state.cur_armed_threat_mod] then
+               and state.W_skip_too_late_mods[cur_mod] then
                 tlog(3, "w_defensive_skip_too_late_carry", {
                     intent  = intent_s,
                     cur_eta = string.format("%.2f", state.cur_armed_eta),
-                    mod     = tostring(state.cur_armed_threat_mod),
+                    mod     = tostring(cur_mod),
                 })
                 return false
             end
@@ -1502,22 +1529,34 @@ local SAVE_FIRE = {
             -- and chase-Lina (any moving committed attacker) uniformly.
             -- Falls back to Lina origin if caster handle is missing
             -- (proactive Dispatch with no armed entry, dead caster, etc.).
+            -- v0.5.47.1 aim resolution: prefer the threat_caster param the
+            -- chain walker passes (lib/defense.lua L566); fall back to the
+            -- armed-only state stash; fall back to Lina origin. The
+            -- predict_target_pos handles all three caster movement profiles
+            -- uniformly: stationary (WD channeling) -> aim at caster pos;
+            -- moving toward Lina (Bara charge) -> aim at where Bara will be
+            -- 1.12s ahead = past Lina if charge speed > 600; carry-Lina
+            -- (Tusk snowball) -> aim at snowball endpoint past Lina.
             local W_LEAD = 1.12
             local pos
-            local caster = state.cur_armed_caster
+            local caster = threat_caster or state.cur_armed_caster
+            local aim_via
             if caster and Entity.IsEntity(caster) and Target.IsAlive
                and Target.IsAlive(caster) and state.predict_target_pos then
-                pos = state.predict_target_pos(caster, W_LEAD)
+                pos    = state.predict_target_pos(caster, W_LEAD)
+                aim_via = "predict_caster"
             end
             if not pos then
-                pos = Entity.GetAbsOrigin and Entity.GetAbsOrigin(me)
+                pos     = Entity.GetAbsOrigin and Entity.GetAbsOrigin(me)
+                aim_via = "self_origin_fallback"
             end
             if not pos then return false end
             tlog(2, "w_defensive_fire", {
                 intent = tostring(intent),
                 mana   = string.format("%.0f", mana),
                 w_cost = string.format("%.0f", w_cost),
-                aim    = caster and "predict" or "self_origin",
+                aim    = aim_via,
+                mod    = tostring(threat_mod or "-"),
             })
             return issue_cast_position(intent, w, pos, "def")
         end,
@@ -2359,13 +2398,20 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
                         entry._fire_save_eff = sn
                         return true, "w_live_eta", eta_trigger_eff
                     end
-                    -- Out of live-eta window: skip W this iteration.
-                    -- Don't fall through to the static dist gate -- it
-                    -- would fire with stamped 600 timing that disagrees
-                    -- with the live measurement we just rejected.
-                    local ov = SAVE_ETA_TRIGGER[sn]
-                    if ov then eta_trigger_eff = ov end
-                    return false, nil, eta_trigger_eff
+                    -- v0.5.47.1: out of live-eta window. Block both the
+                    -- static dist gate AND the eta_trigger fallback in
+                    -- armed_threats_tick by returning eta_trigger_eff=-1
+                    -- (sentinel). v0.5.47 returned eta_trigger_eff=1.20
+                    -- (W's SAVE_ETA_TRIGGER) which let armed_threats_tick
+                    -- fire W via the legacy eta_trigger path using the
+                    -- stamped eta=d/600. v0.5.47 demo log L4350-4378
+                    -- showed Bara fired at stamped eta=1.18 (via=eta_trigger)
+                    -- but real_eta was 1.37 (speed=515 d=707) -- live gate
+                    -- correctly said "wait" but legacy path overrode.
+                    -- eta_trigger_eff=-1 makes `eta <= -1` false in
+                    -- armed_threats_tick so no eta_trigger fire happens;
+                    -- next frame's chain peek re-evaluates with new d/speed.
+                    return false, nil, -1
                 end
                 -- live_speed unavailable or zero: fall through to the
                 -- standard dist + eta_trigger gates below (stamped path,
@@ -5782,10 +5828,17 @@ end
 -- Dodger config is unaffected. Opt-in via menu (default ON).
 -- NOTE: item_hurricane_pike is NOT in the Dodger list but may be auto-fired
 -- by the Items Manager subsystem; tracked as v0.5.43 D2 follow-up.
+-- v0.5.47.1: added item_ghost to the override list per user spec
+-- "add ethereal blade and ghost scepter to the itens list to disable
+-- on the dodger". item_ethereal_blade was already present (v0.5.43);
+-- item_ghost is new. Ghost Scepter (item_ghost) self-cast applies the
+-- ethereal state -- valuable as an escape vs melee carries (combo-
+-- system synergy per user Note 3) so brain should own the cast moment,
+-- not the framework Dodger.
 local DODGER_CHAIN_ITEMS = {
-    "item_cyclone", "item_ethereal_blade", "item_glimmer_cape",
-    "item_invis_sword", "item_lotus_orb", "item_silver_edge",
-    "item_wind_waker",
+    "item_cyclone", "item_ethereal_blade", "item_ghost",
+    "item_glimmer_cape", "item_invis_sword", "item_lotus_orb",
+    "item_silver_edge", "item_wind_waker",
 }
 local DODGER_MENU_PATH = {
     "General", "Main", "Dodger",
@@ -7906,6 +7959,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.47 Phase 1 of Option C (Full threat-arrival catalog roadmap): foundation slice with state.item_kv wrapper + 2 missing threat chains + live-MS precision gate for W. **Background**: post-v0.5.46.3 demo discussion led to a feasibility study (Explore agent) comparing Sniper threat handling to Lina. Findings: (a) Sniper has 14 SAVE_OVERRIDES vs Lina 13 (comparable), (b) both stamp eta_speed constants at arm-time without live MS re-read for Bara/Tusk, (c) Sniper has state.item_kv(handle,key,fallback) wrapper at L2466-2472 reused at 13 KV sites that Lina inlines, (d) Lina lacks per-mod chains for modifier_witch_doctor_death_ward + modifier_abyssal_underlord_pit_of_malice_ensare (Sniper has both at L6568-6603). The Lina W precise-timing concern (user spec 'perfect ETA + skill landing time') is NEW capability not present in either hero today; Sniper falls back to per-tick distance re-eval against stamped 600/1200 just like Lina. Phase 1 builds the foundation; Phase 2 (v0.5.48) adds the lib catalog; Phase 3 (v0.5.49) integrates with Defense dispatcher; Phase 4 (v0.5.50+) expands coverage and mirrors to Sniper. **Patch 1 (state.item_kv wrapper)**: ported verbatim from Sniper L2466-2472 to Lina near state.predict_target_pos. 7 lines + docstring. Function signature: state.item_kv(handle, key, fallback) returns Ability.GetLevelSpecialValueFor(handle,key) if non-zero else fallback. Migration plan: replace inline pcall sites with state.item_kv across subsequent releases (v0.5.48+). Backward compatible (additive only). **Patch 2 (WD Death Ward chain)**: new _CHAIN_WD_DEATH_WARD = {item_hurricane_pike, item_force_staff, item_cyclone, item_glimmer_cape, item_wind_waker, item_black_king_bar, lina_flame_cloak, lina_w_anti_gap}. Adapted from Sniper L6568-6573 for Lina item set (no grenade). Pike-on-WD is the cleanest interrupt (425u push + cancels channel via forced-movement state); Cyclone-on-WD bottles WD for 2.5s; FC reduces magical Death Ward DPS via +35% MR; W stuns WD interrupting channel. Closes a real coverage gap that previously fell through to libs generic channel_on_self chain. **Patch 3 (Underlord Pit of Malice chain)**: new _CHAIN_UNDERLORD_PIT = {item_wind_waker, item_cyclone, item_force_staff, item_hurricane_pike, item_black_king_bar, lina_w_anti_gap}. Adapted from Sniper L6600-6603. Forced-movement saves (Force/Pike push out of 400u pit radius) + cyclone-self (airborne immune to ensare) + W (stun Underlord interrupting followup). Same trap-escape posture as _CHAIN_DISRUPTOR_KFR. Closes another coverage gap from lib trap category default. **Patch 4 (live-MS precision gate for W)**: inside armed_chain_peek, when iterated save is lina_w_anti_gap, read NPC.GetMoveSpeed(entry.caster) live and compute real_eta = d / live_speed. Fire W precisely when real_eta in [W_LEAD - 0.05, W_LEAD + 0.20] where W_LEAD = 1.12s (Lina W prep: 0.6 cast point + 0.5 delay + ~0.02 cast animation per user-confirmed liquipedia value). Window means W detonates 0.05s BEFORE to 0.20s AFTER impact - tight enough that the 225u stun radius catches the caster at arrival. Falls back to existing static dist + eta_trigger gates if NPC.GetMoveSpeed unavailable or zero (live_speed=0 means caster stationary; defer to standard gates). New diagnostic tlog w_live_eta_gate v=3 emits per W chain-peek iteration with d, speed, real_eta, stamped_e (stamped-comparison reference), in_window (y/n). Stamped vs real comparison will inform v0.5.48 catalog tuning (does the divergence justify per-mod catalog or is stamped good enough for most threats). Fire reason w_live_eta on the chain-peek return value distinguishes from the legacy save_dist / eta_trigger / eta_critical paths. **v0.5.47 NOT in scope (queued for v0.5.48 Phase 2)**: per-mod arrival-timing catalog in lib/threat_data.lua (THREAT_ARRIVAL_TIMING table with cast_point + travel_speed + travel_distance_fn + post_cast_delay + carry_lina + aim_resolver_fn per modifier), ThreatData.GetArrivalTime(threat_mod, caster, target) API. Phase 3 (v0.5.49) Defense dispatcher consumes catalog; Phase 4 (v0.5.50+) catalog expansion + Sniper mirror + uczone-toolkit publish. **Verification on next demo**: WD Death Ward scenarios expect Pike-then-Force-then-Cyclone chain (was generic lib chain). Underlord Pit expects WW-then-Cyclone-then-Force chain (was lib trap default). Bara/Tusk W timing should be more precise: armed_threat_fire via=w_live_eta (instead of via=save_dist) with real_eta close to 1.12s. The w_live_eta_gate v=3 tlog stream lets the user tune the window if needed. PA blink unchanged (instant_blink path uses blink_arrived branch, not chain peek). **Lina.lua 7799 -> 7909 lines (+110). SHA refreshed. Lib unchanged from v0.5.42 (Phase 1 is hero-side only; Phase 2 touches lib/threat_data.lua). luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
+LOG:info("Lina brain v0.5.47.1 hotfix: W aim now uses chain-walker threat_caster param + WD chain front-loaded with W + live-MS fallback blocks legacy eta_trigger + item_ghost added to Dodger override. Four fixes from the v0.5.47 demo. **Bug 1 (W cast on self_origin instead of WD position)**: v0.5.46.3 predict-aim relied on state.cur_armed_caster which is only set in armed_post_fire; the WD Death Ward dispatch path goes through on_enemy_channel_start (not armed_post_fire) so the state stash was nil and W .fire fell back to Entity.GetAbsOrigin(state.self_npc) = Lina origin. The lib chain walker has been passing fire_entry.fire(issue_intent, threat_caster, threat_mod) at lib/defense.lua L566 the whole time - the .fire body just ignored the params. v0.5.47.1 changes the lina_w_anti_gap.fire signature to (intent, threat_caster, threat_mod) and uses threat_caster directly for predict_target_pos. Works for ALL dispatch paths (armed, channel, cast point, proactive). aim tlog field now shows predict_caster vs self_origin_fallback. **Bug 1b (W chain order)**: per user spec 'On cases where the skill is interrupted the best option is to use the method that interrupt it. In this case our first option should be W and itens afterwards', _CHAIN_WD_DEATH_WARD now has lina_w_anti_gap at FRONT (was tail). Death Ward is interruptible (stun the WD hero, ward dies), so W needs its 1.12s prep started IMMEDIATELY. Items follow as backup. Tusk snowball is uninterruptible (snowball in-flight has no caster to stun) so the carry-Lina chain ordering and aim semantics stay as v0.5.46.3. **Bug 3 (Bara timing off, eta_trigger fallback fired with stamped 1.18 when real_eta was 1.37)**: v0.5.47 demo log gap: w_live_eta_gate stream showed in_window=n throughout (real_eta=2.28 to 1.37 as Bara accelerated), but armed_chain_peek then returned eta_trigger_eff=1.20 (W SAVE_ETA_TRIGGER) which let armed_threats_tick fire W via legacy eta_trigger at stamped eta=1.18. Fix: when live_speed>0 and real_eta out of window, armed_chain_peek now returns eta_trigger_eff=-1 (sentinel) so armed_threats_tick `if eta <= -1` is false. No fire. Next frame chain peek re-evaluates with new d/speed; eventually real_eta enters window and live-MS gate fires with via=w_live_eta. **Note 2 (item_ghost in Dodger)**: added item_ghost to DODGER_CHAIN_ITEMS (was 7 entries; now 8). Ghost Scepter self-cast applies ethereal state - valuable escape vs melee (per user Note 3 combo synergy), brain owns the cast moment. item_ethereal_blade was already in the list since v0.5.43; user's mention was a reminder to check. **v0.5.47.1 NOT in scope**: per-mod W aim policy beyond predict_target_pos (Phase 2 catalog will add aim_resolver_fn), Items Manager subsystem hunt for the 'E on self during pit' user observation (could be Cyclone-on-self from Underlord Pit chain which is correct behavior, OR Ethereal Blade via the Items Manager subsystem which is the third framework auto-cast layer per Sniper L7814 note - investigation queued for v0.5.48+), commit-attacker AA broadening per user Note 1 (need clearer test data - log showed Bara correctly armed as committed_attacker at dist=233 mvspeed=762 so the system works; the AA reference may be Anti-Mage or auto-attack and needs disambiguation). **Lina.lua 7909 -> 7962 lines (+53). SHA refreshed. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy. **Verification on next demo**: WD Death Ward expects w_defensive_fire aim=predict_caster (NOT self_origin_fallback), W as chain HEAD fires first. Bara expects w_live_eta_gate stream then armed_threat_fire via=w_live_eta with real_eta in [1.07, 1.32] window (no via=eta_trigger fallback). Tusk unchanged. PA blink unchanged. Pit of Malice WW-self fires first - same as v0.5.47 (no chain change for Pit). Items Manager hunt for the 'E on self' is queued for v0.5.48+.")
 
 return callbacks

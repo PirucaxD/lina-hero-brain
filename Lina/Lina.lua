@@ -798,20 +798,28 @@ state.committed_attacker_armed_t    = state.committed_attacker_armed_t or {}
 -- v0.5.46 Problem A diag throttle (~5Hz) + last-scan stamp counter.
 state.commit_attacker_diag_t        = state.commit_attacker_diag_t or 0
 state.attacker_latch_last_stamped   = state.attacker_latch_last_stamped or 0
--- v0.5.46.3 W .fire too-late skip allowlist: empty by default. Tusk
--- snowball was removed in v0.5.46.3 because the v0.5.46.3 predict-aim
--- (W aimed at threat caster's predicted position W_LEAD=1.12s ahead)
--- now follows the caster's trajectory; W AoE lands wherever the caster
--- actually is at detonation, including the snowball endpoint. The
--- table stays as a no-op extension point: if some future mechanic is
--- observed missing under predict-aim (e.g. unpredictable teleporter
--- mid-cast), add the canonical modifier name as a true-value entry to
--- restore the skip behavior. Bundled into state.* per v0.5.45.1
--- 200-locals-per-function constraint.
-state.W_skip_too_late_mods          = state.W_skip_too_late_mods or {
-    -- Empty by default. Re-add modifier_tusk_snowball_movement here
-    -- if v0.5.46.3 predict-aim regresses Tusk; or add new mods like
-    -- modifier_magnataur_skewer / Tiny Toss when observed missing.
+-- v0.5.47.2 W .fire allowlists.
+--
+-- W_skip_too_late_mods: empty (v0.5.46.3+); legacy belt left as a no-op
+-- extension point.
+state.W_skip_too_late_mods          = state.W_skip_too_late_mods or {}
+-- W_aim_at_caster_mods: per-mod aim policy. Default for ALL other mods
+-- is aim at Lina origin (state.self_npc position); the W AoE catches
+-- the caster on arrival at Lina (Bara stops at Lina; Tusk snowball
+-- arrives at Lina; PA blink lands at Lina; committed melee attackers
+-- stay at Lina). Mods in this allowlist instead aim W at the threat
+-- CASTER's current position so W stuns the caster mid-channel (channel
+-- interrupt). Per user spec v0.5.47.2: "Tusk W is completely wrong,
+-- need a full review. W was casted on a completly wrong position. It
+-- should be casted on self in the right timing" -- the v0.5.46.3
+-- predict-aim default was wrong; reverted to self origin for everything
+-- except interruptible channels.
+state.W_aim_at_caster_mods          = state.W_aim_at_caster_mods or {
+    modifier_witch_doctor_death_ward = true,
+    -- Future interruptible channels to consider:
+    -- modifier_pugna_life_drain        (already has WW-first chain),
+    -- modifier_shadow_shaman_shackles,
+    -- modifier_enigma_black_hole_pull.
 }
 
 -- Per-tick: stamp attacking_seen_t for any visible enemy hero NPC.IsAttacking
@@ -1529,26 +1537,34 @@ local SAVE_FIRE = {
             -- and chase-Lina (any moving committed attacker) uniformly.
             -- Falls back to Lina origin if caster handle is missing
             -- (proactive Dispatch with no armed entry, dead caster, etc.).
-            -- v0.5.47.1 aim resolution: prefer the threat_caster param the
-            -- chain walker passes (lib/defense.lua L566); fall back to the
-            -- armed-only state stash; fall back to Lina origin. The
-            -- predict_target_pos handles all three caster movement profiles
-            -- uniformly: stationary (WD channeling) -> aim at caster pos;
-            -- moving toward Lina (Bara charge) -> aim at where Bara will be
-            -- 1.12s ahead = past Lina if charge speed > 600; carry-Lina
-            -- (Tusk snowball) -> aim at snowball endpoint past Lina.
-            local W_LEAD = 1.12
+            -- v0.5.47.2 aim resolution: per-mod policy via state.W_aim_at_
+            -- caster_mods allowlist. DEFAULT for all threats is Lina origin
+            -- (state.self_npc position) since the W AoE catches whoever
+            -- arrives at Lina (homing close-gap stops at Lina, carry-Lina
+            -- delivers Lina + caster to the same spot, instant blinks land
+            -- at Lina). The v0.5.46.3-v0.5.47.1 predict-aim was wrong for
+            -- Tusk snowball: predict_target_pos used Tusk's velocity to
+            -- extrapolate but the snowball's actual arrival point IS Lina
+            -- (the snowball PICKS UP Lina, doesn't deposit her past). User
+            -- spec v0.5.47.2: "It should be casted on self in the right
+            -- timing". ALLOWLIST exception: interruptible channels (WD
+            -- Death Ward currently) aim at the threat caster's CURRENT
+            -- position so W stuns the caster mid-channel before the channel
+            -- resolves. Tlog aim field: self_origin / caster_origin /
+            -- self_origin_fallback (no caster handle).
             local pos
             local caster = threat_caster or state.cur_armed_caster
             local aim_via
-            if caster and Entity.IsEntity(caster) and Target.IsAlive
-               and Target.IsAlive(caster) and state.predict_target_pos then
-                pos    = state.predict_target_pos(caster, W_LEAD)
-                aim_via = "predict_caster"
+            if threat_mod and state.W_aim_at_caster_mods
+               and state.W_aim_at_caster_mods[threat_mod]
+               and caster and Entity.IsEntity(caster) and Target.IsAlive
+               and Target.IsAlive(caster) then
+                pos     = Entity.GetAbsOrigin and Entity.GetAbsOrigin(caster)
+                aim_via = "caster_origin"
             end
             if not pos then
                 pos     = Entity.GetAbsOrigin and Entity.GetAbsOrigin(me)
-                aim_via = "self_origin_fallback"
+                aim_via = caster and "self_origin" or "self_origin_fallback"
             end
             if not pos then return false end
             tlog(2, "w_defensive_fire", {
@@ -2379,16 +2395,29 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
             -- the per-save live-eta gate to a per-mod arrival-timing
             -- catalog in lib/threat_data.lua.
             if sn == "lina_w_anti_gap" then
-                local W_LEAD     = 1.12
-                local live_speed = NPC.GetMoveSpeed and NPC.GetMoveSpeed(entry.caster) or 0
-                if live_speed > 0 then
-                    local real_eta  = d / live_speed
-                    local stamped_e = entry.eta_speed and (d / entry.eta_speed) or -1
+                local W_LEAD       = 1.12
+                local live_speed   = NPC.GetMoveSpeed and NPC.GetMoveSpeed(entry.caster) or 0
+                local stamped_spd  = entry.eta_speed or 0
+                -- v0.5.47.2: use max(stamped, live) so threats where the
+                -- hero MS API returns the wrong number (Tusk snowball:
+                -- NPC.GetMoveSpeed returns Tusk's BASE MS ~310 but the
+                -- snowball entity travels at ~1200) fall back to the
+                -- stamped value. Bara charge: stamped=600 vs live=515 at
+                -- mid-charge -> max=600 keeps gate working with the more
+                -- conservative number (live charge speed ramps up so
+                -- subsequent frames re-evaluate). PA blink doesn't hit
+                -- this branch (instant_blink path).
+                local eff_speed    = math.max(live_speed, stamped_spd)
+                if eff_speed > 0 then
+                    local real_eta  = d / eff_speed
+                    local stamped_e = stamped_spd > 0 and (d / stamped_spd) or -1
                     local in_window = real_eta >= (W_LEAD - 0.05)
                                       and real_eta <= (W_LEAD + 0.20)
                     tlog(3, "w_live_eta_gate", {
                         d         = string.format("%.0f", d),
-                        speed     = string.format("%.0f", live_speed),
+                        speed     = string.format("%.0f", eff_speed),
+                        live      = string.format("%.0f", live_speed),
+                        stamped   = string.format("%.0f", stamped_spd),
                         real_eta  = string.format("%.2f", real_eta),
                         stamped_e = string.format("%.2f", stamped_e),
                         in_window = in_window and "y" or "n",
@@ -7959,6 +7988,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.47.1 hotfix: W aim now uses chain-walker threat_caster param + WD chain front-loaded with W + live-MS fallback blocks legacy eta_trigger + item_ghost added to Dodger override. Four fixes from the v0.5.47 demo. **Bug 1 (W cast on self_origin instead of WD position)**: v0.5.46.3 predict-aim relied on state.cur_armed_caster which is only set in armed_post_fire; the WD Death Ward dispatch path goes through on_enemy_channel_start (not armed_post_fire) so the state stash was nil and W .fire fell back to Entity.GetAbsOrigin(state.self_npc) = Lina origin. The lib chain walker has been passing fire_entry.fire(issue_intent, threat_caster, threat_mod) at lib/defense.lua L566 the whole time - the .fire body just ignored the params. v0.5.47.1 changes the lina_w_anti_gap.fire signature to (intent, threat_caster, threat_mod) and uses threat_caster directly for predict_target_pos. Works for ALL dispatch paths (armed, channel, cast point, proactive). aim tlog field now shows predict_caster vs self_origin_fallback. **Bug 1b (W chain order)**: per user spec 'On cases where the skill is interrupted the best option is to use the method that interrupt it. In this case our first option should be W and itens afterwards', _CHAIN_WD_DEATH_WARD now has lina_w_anti_gap at FRONT (was tail). Death Ward is interruptible (stun the WD hero, ward dies), so W needs its 1.12s prep started IMMEDIATELY. Items follow as backup. Tusk snowball is uninterruptible (snowball in-flight has no caster to stun) so the carry-Lina chain ordering and aim semantics stay as v0.5.46.3. **Bug 3 (Bara timing off, eta_trigger fallback fired with stamped 1.18 when real_eta was 1.37)**: v0.5.47 demo log gap: w_live_eta_gate stream showed in_window=n throughout (real_eta=2.28 to 1.37 as Bara accelerated), but armed_chain_peek then returned eta_trigger_eff=1.20 (W SAVE_ETA_TRIGGER) which let armed_threats_tick fire W via legacy eta_trigger at stamped eta=1.18. Fix: when live_speed>0 and real_eta out of window, armed_chain_peek now returns eta_trigger_eff=-1 (sentinel) so armed_threats_tick `if eta <= -1` is false. No fire. Next frame chain peek re-evaluates with new d/speed; eventually real_eta enters window and live-MS gate fires with via=w_live_eta. **Note 2 (item_ghost in Dodger)**: added item_ghost to DODGER_CHAIN_ITEMS (was 7 entries; now 8). Ghost Scepter self-cast applies ethereal state - valuable escape vs melee (per user Note 3 combo synergy), brain owns the cast moment. item_ethereal_blade was already in the list since v0.5.43; user's mention was a reminder to check. **v0.5.47.1 NOT in scope**: per-mod W aim policy beyond predict_target_pos (Phase 2 catalog will add aim_resolver_fn), Items Manager subsystem hunt for the 'E on self during pit' user observation (could be Cyclone-on-self from Underlord Pit chain which is correct behavior, OR Ethereal Blade via the Items Manager subsystem which is the third framework auto-cast layer per Sniper L7814 note - investigation queued for v0.5.48+), commit-attacker AA broadening per user Note 1 (need clearer test data - log showed Bara correctly armed as committed_attacker at dist=233 mvspeed=762 so the system works; the AA reference may be Anti-Mage or auto-attack and needs disambiguation). **Lina.lua 7909 -> 7962 lines (+53). SHA refreshed. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy. **Verification on next demo**: WD Death Ward expects w_defensive_fire aim=predict_caster (NOT self_origin_fallback), W as chain HEAD fires first. Bara expects w_live_eta_gate stream then armed_threat_fire via=w_live_eta with real_eta in [1.07, 1.32] window (no via=eta_trigger fallback). Tusk unchanged. PA blink unchanged. Pit of Malice WW-self fires first - same as v0.5.47 (no chain change for Pit). Items Manager hunt for the 'E on self' is queued for v0.5.48+.")
+LOG:info("Lina brain v0.5.47.2 hotfix: W aim policy simplified to self-origin-default + max(stamped, live) speed source for the live-eta gate. Two structural fixes from the v0.5.47.1 demo log. **Bug 3 (Tusk W cast at completely wrong position)**: v0.5.46.3 predict-aim used Geometry.PredictPos which extrapolates Tusk velocity 1.12s forward; but for a snowball the actual physics is 'snowball PICKS UP Lina at Lina position' = arrival point IS Lina origin not past Lina. Predict-aim gave wrong endpoint. User spec v0.5.47.2: 'Tusk W is completely wrong, need a full review. W was casted on a completly wrong position. It should be casted on self in the right timing'. **Fix**: new per-mod aim policy via state.W_aim_at_caster_mods allowlist. DEFAULT for all threats is Lina origin (state.self_npc position); this catches Bara at impact (Bara stops at Lina), Tusk on snowball arrival (snowball picks up Lina at her position), PA after blink (PA at Lina), committed melee attackers (stay at Lina). ALLOWLIST exception: interruptible channels (currently just modifier_witch_doctor_death_ward) aim W at the threat CASTER current position to stun the caster mid-channel before the channel resolves. New tlog aim field values: self_origin (default with caster handle) / caster_origin (allowlist hit) / self_origin_fallback (no caster handle). Predict-aim path REMOVED from default; was overengineered. **Bug 2 (Bara timing still wrong + Tusk timing wrong)**: v0.5.47.1 demo log Tusk stream: speed=310 in_window=n real_eta=3.20 d=993 (chain peek never fired live-MS), then eta_critical panic at d=419 eta=0.35 stamped fired W (0.77s after snowball arrival). Root cause: NPC.GetMoveSpeed(Tusk_hero) returns Tusk BASE MS ~310 during snowball, not the snowball entity travel speed ~1200. Live-MS gate using just live_speed underestimates. **Fix**: in armed_chain_peek for lina_w_anti_gap, eff_speed = math.max(stamped_eta_speed, NPC.GetMoveSpeed(caster)). Tusk stamped=1200 vs live=310 -> max=1200, real_eta = d/1200 = correct snowball ETA. Bara stamped=600 vs live=515 -> max=600 (live charge speed ramps up so next frame may have live=620+ in which case live wins). Bara fast-charge with talents+items: live=900+ -> live wins. PA blink unaffected (instant_blink path bypasses chain peek). w_live_eta_gate tlog now emits both live and stamped fields plus the eff speed for transparency. **Other v0.5.47.1 demo findings**: WD Death Ward PASSED (W as chain head fired with caster aim). Underlord Pit fired correctly with W as last save. PA blink working. Commit-attacker working (caster=spirit_breaker dist=233 mvspeed=762 confirms commit-attacker armed correctly for an enemy auto-attacking Lina, per user note 5 'AA = Auto attack'). **Queued for v0.5.48+**: move Lina to safer position during cyclone-self / WW-self (user good-to-have); Disruptor same threat-type response; Items Manager subsystem hunt (third framework auto-cast layer after Dodger and Linkbreaker per Sniper L7814; potential source of unexplained casts); Ethereal Blade as escape mechanic in melee-threat chains. **Lina.lua 7962 -> 7991 lines (+29). SHA refreshed. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Tusk expects aim=self_origin (NOT predict_caster or caster_origin) and w_live_eta_gate stream showing speed=1200 effective (stamped winning over live 310) with in_window=y when d~1344; W lands at Lina origin when snowball arrives, catches Tusk on impact. Bara expects same self_origin aim with eff speed = max(stamped 600, live charge speed); W lands at Lina origin as Bara arrives. WD Death Ward expects aim=caster_origin (allowlist hit). PA blink expects aim=self_origin (default; caster present). Committed attacker (Bara walk-up): aim=self_origin (default).")
 
 return callbacks

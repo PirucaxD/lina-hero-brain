@@ -511,6 +511,7 @@ local _GAP_CLOSE_SAVES = {
     "item_wind_waker", "lina_flame_cloak", "item_glimmer_cape",
     "item_invis_sword", "item_silver_edge", "item_black_king_bar",
     "item_cyclone", "item_force_staff", "item_hurricane_pike",
+    "lina_w_anti_gap",  -- v0.5.44 (DEFENSE_PLAN.md sec 2.1 + Q1): tail position; W fires only when all items above are on CD. High-viability targets: Bara Charge, Bara Nether Strike, Tusk Snowball, MK Primal Spring.
 }
 local LINA_SAVE_OVERRIDES = {}
 for _, m in ipairs({
@@ -1098,6 +1099,61 @@ local SAVE_FIRE = {
             return issue_cast_notarget(intent, fc, "def")
         end,
     },
+    -- HERO-SPECIFIC: W (light_strike_array) anti-gap arrival stun.
+    -- v0.5.44 (DEFENSE_PLAN.md sec 2.1): W has 1.1s prep (0.6 cast point +
+    -- 0.5 delay) + 225 AoE + 1.6s stun. Workflow audit D1 surfaced 4 high-
+    -- viability targets (Bara Charge, Bara Nether Strike, Tusk Snowball,
+    -- MK Primal Spring) and 2 medium (Storm BL landing, Ember Remnant
+    -- arrival). All 4 high-viability cases land AT Lina position, so aim
+    -- is always state.self_npc origin (simplest correct policy; predicted-
+    -- landing variant deferred to v0.5.4X+ if evidence emerges). Spec'd
+    -- as chain TAIL of _GAP_CLOSE_SAVES per Q1: items fire first, W only
+    -- when WW/Force/Pike/Glimmer all on CD. Mana floor enforces +450
+    -- r_reserve so defensive W cannot starve the kill combo. Silenced
+    -- check via ABILITY_SAVES = { lina_w_anti_gap = true } (chain walker
+    -- gates this entry on self_can_cast_abilities, which checks
+    -- NPC.IsSilenced + MODIFIER_STATE_MUTED). Opt-in via Defense menu
+    -- toggle state.menu.enable_w_anti_gap (default true). Returns true
+    -- on successful cast (lock stays held by dispatcher per v0.5.40 A6
+    -- single-spend invariant); false otherwise drops chain walker to the
+    -- next entry (which is empty for tail position; chain ends with
+    -- no_effective_save_for_threat if W also skipped).
+    lina_w_anti_gap = {
+        short = "w_stun",
+        fire  = function(intent)
+            local me = state.self_npc
+            if not me then return false end
+            if state.menu and state.menu.enable_w_anti_gap
+               and not state.menu.enable_w_anti_gap:Get() then
+                return false
+            end
+            local w = ability("lina_light_strike_array")
+            if not w or not (Ability.GetLevel(w) > 0) or not Ability.IsReady(w) then
+                return false
+            end
+            if NPC.IsChannellingAbility and NPC.IsChannellingAbility(me) then
+                return false
+            end
+            local w_cost    = (Ability.GetManaCost and Ability.GetManaCost(w)) or 130
+            local r_reserve = 450
+            local mana      = (NPC.GetMana and NPC.GetMana(me)) or 0
+            if mana < (w_cost + r_reserve) then
+                tlog(3, "w_defensive_skip_mana", {
+                    mana = string.format("%.0f", mana),
+                    need = string.format("%.0f", w_cost + r_reserve),
+                })
+                return false
+            end
+            local pos = Entity.GetAbsOrigin and Entity.GetAbsOrigin(me)
+            if not pos then return false end
+            tlog(2, "w_defensive_fire", {
+                intent = tostring(intent),
+                mana   = string.format("%.0f", mana),
+                w_cost = string.format("%.0f", w_cost),
+            })
+            return issue_cast_position(intent, w, pos, "def")
+        end,
+    },
     -- HERO-SPECIFIC: Ethereal Blade self-cast (3-4s physical immune; niche vs
     -- physical burst; still takes magic).
     item_ethereal_blade_self = {
@@ -1233,6 +1289,7 @@ end
 
 local function save_is_ready(save_name)
     if save_name == "lina_flame_cloak" then return ability_ready("lina_flame_cloak") end
+    if save_name == "lina_w_anti_gap" then return ability_ready("lina_light_strike_array") end  -- v0.5.44 W anti-gap
     if save_name == "item_ethereal_blade_self" then
         return NPCLib.item_ready(state.self_npc, "item_ethereal_blade")
     end
@@ -1241,7 +1298,7 @@ end
 
 -- Ability-based saves fail silently while Lina is muted/silenced; the chain
 -- must fall through to item-based saves (HERO_PROMPT lesson, Sniper v6.15.41).
-local ABILITY_SAVES = { lina_flame_cloak = true }
+local ABILITY_SAVES = { lina_flame_cloak = true, lina_w_anti_gap = true }  -- v0.5.44 W anti-gap
 local function self_can_cast_abilities()
     local me = state.self_npc
     if not me then return false end
@@ -1807,6 +1864,7 @@ local SAVE_ETA_TRIGGER = {
     item_invis_sword        = 0.40,
     item_silver_edge        = 0.40,
     item_force_staff        = 0.60,
+    lina_w_anti_gap         = 1.20,  -- v0.5.44: W has 1.1s prep (0.6 cast point + 0.5 delay) + 0.1s safety margin. Gates the chain walker to consider W only for threats with eta >= 1.2s. PA blink (0.25s), AM blink (0.15s), Slark Pounce (0.75s) all auto-skip.
 }
 
 -- v0.5.9 (E2, covers A1/A5/C2/C3/C8/C9/F2): per-save PROXIMITY fire gate.
@@ -1837,6 +1895,7 @@ local SAVE_FIRE_DISTANCE = {
     item_invis_sword        = 240,
     item_silver_edge        = 240,
     item_ethereal_blade_self = 480,
+    lina_w_anti_gap         = 800,  -- v0.5.44: generous spatial gate. W is AoE not self-displacement so the 250u SELF_PUSH_FLOOR does not apply. 800u covers Bara charge fire moments (eta-trigger usually wins first; this is the proximity-fallback gate).
 }
 -- v0.5.9 (E2): self-displacement saves refuse to fire below this radius --
 -- pushing Lina 600u in facing when the threat already crossed inside would
@@ -5498,6 +5557,18 @@ local function setup_menu()
     -- See DODGER_CHAIN_ITEMS module-local + dodger_chain_disable/restore
     -- helpers earlier in this file. Off = Dodger and brain both fire and
     -- a double-fire pattern is observable (Bara WW+Pike v0.5.42 demo).
+    -- v0.5.44 (DEFENSE_PLAN.md sec 2.1 + Q1): W as anti-gap arrival stun,
+    -- chain TAIL of close_gap chains. High-viability targets: Bara Charge,
+    -- Bara Nether Strike, Tusk Snowball, MK Primal Spring. Mana floor
+    -- enforces +450 r_reserve so defensive W cannot starve the kill combo.
+    -- Off = W never fires defensively, chain falls through to no_effective_
+    -- save_for_threat if all items also on CD.
+    m.enable_w_anti_gap = gDef:Switch('Enable W anti-gap defensive', true)
+    m.enable_w_anti_gap:ToolTip("Fire light_strike_array as a tertiary "
+        .. "save when WW / Force / Pike / Glimmer are all on CD against a "
+        .. "slow-arrival gap-closer (Bara, Tusk, MK Primal Spring). Mana "
+        .. "floor reserves 450 for R combo so defensive W cannot starve "
+        .. "the kill commit. Off = W stays offensive-only.")
     m.override_dodger = gDef:Switch('Override Dodger defense items', true)
     m.override_dodger:ToolTip("On match start (GAME_IN_PROGRESS), capture "
         .. "and zero the 7 self-defense items in the Umbrella Dodger that "
@@ -7193,6 +7264,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.43 Dodger chain-item override: brain-side, match-scoped fix for the v0.5.42 Bara WW+Pike double-fire root cause. **Diagnosis**: v0.5.42 demo log showed brain emitted ZERO defensive `issued` tlogs across 4 Bara charges (chain reported all 9 items not_ready on the one Dispatch attempt, modifier ended before fire on 3 others), yet item_wind_waker / item_cyclone modifiers appeared in modseen with caster=lina via the framework's SafeSend queue. The Umbrella Dodger has a hidden Russian-named config at gui.json General/Main/Dodger/Дополнительные функции 2.0/Предметы/Защитные предметы that auto-fires 9 self-defense items on threat detection, BYPASSING the brain entirely. 7 of those overlap Lina's defense chain (item_cyclone / item_ethereal_blade / item_glimmer_cape / item_invis_sword / item_lotus_orb / item_silver_edge / item_wind_waker); item_hurricane_pike is NOT in that list and likely fires via the Items Manager subsystem (tracked as v0.5.43 D2 follow-up). **D1 fix**: new module-level DODGER_CHAIN_ITEMS table + DODGER_MENU_PATH + dodger_chain_disable() / dodger_chain_restore() helpers wired into the existing GameRules.GetGameState transition hook in OnUpdateEx. On GAME_IN_PROGRESS the brain captures the 7 items' current values into state.dodger_saved + sets each to false (idempotent via state.dodger_disabled latch); on POST_GAME restores from captured state (with safety fallback to all-true if captured state was all-false from a mid-match brain reload). Multi-select Menu API for the Dodger checkbox-list is undocumented in source: code tries BOTH common shapes (nested Menu.Find(path..., item):Set(value) AND container Menu.Find(path...):Set(item, value)) with pcall guards + a dodger_chain_disabled / dodger_chain_restored tlog at v=1 reporting which shape resolved (read_shape / write_shape fields) and how many of 7 sets succeeded (set_ok field). If both shapes fail, helpers degrade to silent no-op and the user can fall back to manually unchecking the items in the Dodger UI. Opt-in via new Defense menu toggle 'Override Dodger defense items' (default ON); off = pre-v0.5.43 behavior where Dodger and brain both fire and the double-fire pattern is observable. Scope is per-match (capture+set at start, restore at end) so other heroes' Dodger config is NOT permanently mutated. **Verification on next demo**: after match starts, expect `dodger_chain_disabled items=7 set_ok=7 read_shape=nested write_shape=nested` (or container) tlog. Then Bara charge test: brain's chain walker should successfully fire WW or another save (no all-not-ready situation) and the framework should NOT fire any of the 7 items independently (only the brain's `issued` tlog should appear for the save). At match end expect `dodger_chain_restored items=7 set_ok=7 default_to_true=n` (or y if reloaded mid-match). If `set_ok=0` in either tlog the Menu API didn't resolve and we iterate. **Workflow notes**: investigation was hybrid log-trace + Umbrella gui.json forensic dive; the Russian section is the hidden config user flagged. v0.5.40 dispatcher work + v0.5.41 Dedup-cleanup + v0.5.42 P4 OnModifierDestroy all CONFIRMED working in the v0.5.42 log (lock_acquired=1 + bara_charge_cleared=3 visible); the double-fire was never a brain-side bug, it was the Dodger subsystem racing the brain. Lina.lua 7049 -> 7198 lines (+149). lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified, source = runtime SHA verify post-deploy.")
+LOG:info("Lina brain v0.5.44 W anti-gap (DEFENSE_PLAN.md sec 2.1): first hero-spell entry in the defense chain. Background: v0.5.43 closed the Dodger collateral and surfaced that Lina's defense was 100% item-dependent; pre-Force-Staff Lina had effectively zero gap-close defense. The 5-agent design workflow (Lina/DEFENSE_PLAN.md, 536 lines) cataloged every gap-closer Lina faces and surfaced 4 high-viability targets for W as anti-gap arrival stun: Bara Charge of Darkness (1.5-6s travel), Bara Nether Strike (1.0s cast point), Tusk Snowball (3s channel + slow roll), Monkey King Primal Spring (1.75s channel). Plus 2 medium-viability: Storm Spirit Ball Lightning landing (~1500u+ trips), Ember Spirit Fire Remnant arrival. W's 1.1s prep (0.6 cast point + 0.5 delay) gates out all sub-1.1s arrivals (PA Phantom Strike, AM Blink, QoP Blink, Riki Blink Strike, Pangolier Swashbuckle, Nyx Vendetta etc.). 17 NONE-viability heroes catalogued in the design doc Section 2.1 table. **Implementation**: new lina_w_anti_gap SAVE_FIRE entry at Lina.lua adjacent to lina_flame_cloak. The .fire body checks (1) state.menu.enable_w_anti_gap toggle, (2) ability ready + level > 0, (3) NPC.IsChannellingAbility false, (4) mana floor (mana >= w_cost + 450 r_reserve so defensive W cannot starve the kill combo), (5) Entity.GetAbsOrigin available. Aim policy: always Lina position (state.self_npc origin); all 4 high-viability targets land AT Lina so no prediction needed (predicted-landing variant deferred to v0.5.4X+ if evidence emerges). Cast via existing issue_cast_position helper at L487. Emits w_defensive_fire tlog v=2 on issue + w_defensive_skip_mana v=3 on mana floor reject. Lock domain unchanged from v0.5.40: chain walker dispatches under the threat real canonical_mod, lock_key tuple identity preserved. **Supporting wiring**: ABILITY_SAVES gains lina_w_anti_gap=true so chain walker gates on silence/muted state (self_can_cast_abilities). save_is_ready gains explicit lina_w_anti_gap branch calling ability_ready('lina_light_strike_array'). SAVE_ETA_TRIGGER[lina_w_anti_gap]=1.20 (W prep + 0.1 safety margin; PA blink 0.25s and other sub-1.1s arrivals auto-skip). SAVE_FIRE_DISTANCE[lina_w_anti_gap]=800 (generous spatial gate; W is AoE not displacement so 250u SELF_PUSH_FLOOR doesn't apply). _GAP_CLOSE_SAVES gains 'lina_w_anti_gap' as TAIL per Q1 decision (items first, W as last resort). New Defense menu toggle 'Enable W anti-gap defensive' default true. **Decisions baked from owner planning session** (DEFENSE_PLAN.md sec 6): Q1 tail-only firing, Q2 FC shared CD with 5s pre-combo skip gate (deferred to v0.5.45), Q3 R defensive SKIPPED entirely, Q4 keep all 7 LINA_SAVE_OVERRIDES authoritative + promote targeted_burst + lockdown LINA_CATEGORY_PATCHES to per-mod overrides (v0.5.46 D0 sub-task), Q5 W for targeted_disable deferred to v0.5.47+ contingent on evidence, Q6 no doctrine change for defensive items, Q7 composer-tier audit BEFORE v0.5.46 ships, Q8 FC predicate gains fiery_soul_stacks >= 5 high-stacks gate (v0.5.45 scope). **Verification on next demo**: in a Bara fight where all chain items are on CD (likely after 2-3 prior saves spent in a teamfight), expect 'w_defensive_fire intent=armed_bara_charge mana=X w_cost=Y' tlog at v=2 followed by 'issued ability=lina_light_strike_array layer=def'. If mana below floor expect 'w_defensive_skip_mana mana=X need=Y' at v=3 instead. If W silenced/muted expect chain falls through (no w_defensive_fire emit). Bara should stun on impact at Lina position. Pre-v0.5.44 baseline = no_effective_save_for_threat (the v0.5.42 demo showed this; brain has nothing to fire). Lina.lua 7198 -> 7269 lines (+71, within the +80-120 spec estimate; lower because issue_cast_position helper already existed). Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified, source = runtime SHA verify post-deploy. **Roadmap context** (DEFENSE_PLAN.md sec 4): v0.5.45 = FC defensive refinements + targeted_disable + delayed_aoe per-mod patches. v0.5.46 = type-aware chain composition algorithm (lib-side, opt-in via cfg.compose_chain). v0.5.47+ = mirror to Sniper + uczone-toolkit. Each scoped to one logical change; each rollback-independent.")
 
 return callbacks

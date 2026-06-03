@@ -3720,33 +3720,38 @@ end
 --   caster; fire-timing handled by other paths):
 --     window = [0, infty] (always passes; aim still applies).
 state.compute_w_fire_window = function(entry, speed)
-    -- v0.5.49.1: lower bound is W_LEAD for BOTH homing kinds. User spec
-    -- from v0.5.49 demo: "Bara is getting stunned after hitting lina and
-    -- not before. This should hit before". Below W_LEAD, W detonates
-    -- AFTER the threat arrives = post-impact stun = charge stun already
-    -- lands on Lina. The math:
-    --   impact_t >  W_LEAD : W detonates BEFORE arrival; threat in
-    --                        transit at (impact_t - W_LEAD) * speed
-    --                        from Lina. Catch iff distance <= 225.
-    --   impact_t == W_LEAD : perfect (W detonates AT arrival).
-    --   impact_t <  W_LEAD : W detonates AFTER arrival = SKIP.
-    -- Window: [W_LEAD, W_LEAD + 225/speed]. v0.5.49 used CAST_POINT_FLOOR
-    -- =0.6 which allowed fires in [0.6, W_LEAD) = guaranteed late.
-    -- v0.5.49 demo fire 3 confirmed (impact_t=1.09 fired then W stunned
-    -- Bara 0.03s AFTER charge stun landed on Lina).
-    if not entry then return 1.12, 1.62 end
+    -- v0.5.50.3: tighten upper to W_LEAD + 0.10 for all homing kinds.
+    -- v0.5.49.1's W_LEAD + 225/speed allowed fires up to the AoE boundary
+    -- which left the caster 100-200u from Lina at W detonation (still
+    -- inside the 225r AoE but far from actual impact). v0.5.50.2 demo
+    -- log Bara fire at d=910 speed=630 impact_t=1.44 in_window=y upper
+    -- =1.48 -> Bara at (1.44-1.12)*630 = 204u from Lina at W detonation.
+    -- User: "Still firing earlier check the log".
+    --
+    -- Tight 0.10s band: W detonates within 0 to 0.10s of caster arrival.
+    -- For speed=630: caster at 0.10*630 = 63u from Lina at detonation
+    -- (well inside 225 AoE, close to impact point). For Tusk speed=1675:
+    -- caster at 168u (still inside 225 AoE). At 60Hz, impact_t drops
+    -- ~0.017s per frame -> ~6 frames available in the 0.10s window for
+    -- the gate to fire. If somehow missed, no W fire (chain continues);
+    -- preferred behavior over a too-early stun.
+    --
+    -- The math for "stun BEFORE impact":
+    --   impact_t >  W_LEAD : W detonates BEFORE arrival; caster in
+    --                        transit (impact_t - W_LEAD)*speed from Lina.
+    --                        Catch iff distance <= W_AOE_RADIUS=225.
+    --   impact_t == W_LEAD : perfect timing.
+    --   impact_t <  W_LEAD : late stun. SKIP.
+    if not entry then return 1.12, 1.22 end
     local W_LEAD       = 1.12
-    local W_AOE_RADIUS = 225
+    local UPPER_MARGIN = 0.10
     local k = entry.kind or ""
     if k == "channel_at_caster" or k == "cast_point_targeted" then
         return 0, math.huge
     end
-    local margin = (speed and speed > 0) and (W_AOE_RADIUS / speed) or 0.20
-    local upper  = W_LEAD + margin
-    -- Same lower for homing_charge AND homing_carry: must be >= W_LEAD
-    -- so W detonates ON or BEFORE the threat arrives at Lina.
-    local lower  = W_LEAD
-    return lower, upper
+    -- Same window for homing_charge AND homing_carry: tight band above
+    -- W_LEAD. Both must detonate AT or BEFORE caster arrival.
+    return W_LEAD, W_LEAD + UPPER_MARGIN
 end
 
 -- Q (Dragon Slave) is a traveling line wave (KV dragon_slave_speed = 1200 u/s,
@@ -8261,6 +8266,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.50.2 hotfix: force lib require cache reload + diagnostic source field. **Diagnosis**: v0.5.50.1 demo log Bara fires showed speed=634 (live NPC.GetMoveSpeed) NOT the v0.5.50 ramp avg-during-prep speed=~717. With ramp model, Bara fire at d=921 would have used speed=717 -> impact_t=1.28 -> gate fires at higher d. With live-only (regression), gate fires at impact_t=1.45 -> d=921 -> Bara at ~140u from Lina at W detonation (which is what user observed: 'came back to be used a bit earlier'). **Root cause**: file SHAs match runtime (v0.5.50 ramp catalog deployed to runtime lib/threat_data.lua) but Lua's package.loaded cache persists across Umbrella script reloads. Lina.lua re-loads on each reload (because Umbrella sources it directly) and `local TD = require(lib.threat_data)` returns the CACHED OLD module table -- which has the pre-v0.5.50 entry shape (speed_source=live_or_fallback, acceleration_buffer=100). Lina.lua compute_arrival_time enters the live_or_fallback branch (uses live exclusively, no buffer because v0.5.50 removed the buffer code), so speed=live no enhancement. The full v0.5.50 ramp branch never executes because entry.speed_source != live_with_ramp from the cached module. **Fix**: package.loaded[lib.<mod>] = nil for all lib modules at top of Lina.lua BEFORE require. Forces fresh re-read from disk on every script reload. Safe because lib modules are pure-data + pure-functions per the lib design philosophy (no stateful globals to lose). Lina is the only consumer at this load site; other heroes have their own require statements. **Diagnostic add**: w_catalog_eta_gate tlog now includes `source=entry.speed_source` (e.g., live_with_ramp vs live_or_fallback) so we can verify at a glance whether the lib refresh worked. If source=live_with_ramp the ramp is engaged; if source=live_or_fallback the lib cache is still stale (would indicate the package.loaded clearing isn't working for some reason). **Verification on next demo**: Bara w_catalog_eta_gate should show source=live_with_ramp kind=homing_charge. speed should be the avg-during-prep (not live). For Bara at live=634, speed=717; for live=750, speed=775; for live=900, speed=900 (cap raised by max(live, peak_cap)). **Lina.lua 8238 -> 8264 lines (+26). lib/threat_data.lua unchanged from v0.5.50. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
+LOG:info("Lina brain v0.5.50.3 tuning: tighten W fire window upper margin from W_LEAD + 225/speed to W_LEAD + 0.10. **v0.5.50.2 confirmed**: source=live_with_ramp in catalog tlog -> lib reload + ramp model engaged. But fire still 'a bit earlier' per user. Demo log fire 1: d=910 speed=630 (avg-during-prep from ramp) impact_t=1.44 in_window=y upper=1.48 -> Bara at (1.44-1.12)*630 = 204u from Lina at W detonation. Inside 225 AoE but at the edge, far from actual impact point. User wants W to detonate when Bara is CLOSER to Lina (closer to impact moment). **The wide upper formula** W_LEAD + 225/speed allowed fires anywhere up to AoE boundary -- mathematically valid catch but visually 'too early'. **Fix**: tight 0.10s band above W_LEAD for ALL homing kinds (homing_charge + homing_carry). New upper = W_LEAD + 0.10 = 1.22 fixed. For speed=630: caster at 0.10*630 = 63u from Lina at detonation (close to impact). For Tusk speed=1675: caster at 168u (still inside 225 AoE). At 60Hz impact_t drops ~0.017s per frame so ~6 frames available in the 0.10s window for the gate to fire. If missed, no W (preferred over too-early stun per user spec). **channel_at_caster + cast_point_targeted unchanged**: still [0, inf] (catalog provides aim only, other paths handle timing). **Verification on next demo**: Bara w_catalog_eta_gate should show upper=1.22 fixed (not 1.48+ scaled). Fire moment when impact_t enters [1.12, 1.22]. Bara at d such that d/speed = impact_t -> d at fire = 1.22 * 630 = 769 (vs previous 910). Bara stunned visibly close to Lina at detonation, not 200u out. **Lina.lua 8264 -> 8269 lines (+5). lib/threat_data.lua unchanged from v0.5.50. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
 
 return callbacks

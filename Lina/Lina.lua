@@ -3583,14 +3583,24 @@ state.compute_arrival_time = function(threat_mod, caster, target, modifier_handl
     local speed = entry.speed_fallback or 0
     if entry.speed_source == "live_or_fallback" then
         -- v0.5.48.1: use LIVE exclusively when live > 0; fallback ONLY
-        -- if live API failed. v0.5.48 used max(live, fallback) which
-        -- OVERESTIMATED Bara for early-charge fires (live=500 +
-        -- fallback=1000 -> speed=1000 -> impact_t=1.32 at d=1319 -> gate
-        -- fired, but real arrival was 1319/500=2.64s; W detonated 1.5s
-        -- BEFORE Bara arrived, miss by 535u). Live is the ground truth
-        -- when available.
+        -- if live API failed.
         local live = NPC.GetMoveSpeed and NPC.GetMoveSpeed(caster)
         if live and live > 0 then speed = live end
+        -- v0.5.49.2: acceleration_buffer for charging threats. Live
+        -- NPC.GetMoveSpeed is the CURRENT speed but Bara accelerates
+        -- ~220 u/s^2 during charge; the average speed during W's 1.12s
+        -- prep window is +100-200 u/s higher than the fire-moment live
+        -- reading. Without buffer, catalog impact_t = d/live_now
+        -- underestimates Bara's progress -> Bara hits Lina BEFORE W
+        -- detonates (post-impact stun per v0.5.49.1 demo). Buffer
+        -- inflates the speed estimate so W fires further out; the
+        -- catalog impact_t represents real arrival under the assumption
+        -- of continued acceleration. Tusk fixed-speed snowball etc
+        -- leave the field unset (defaults to 0 = no buffer).
+        if entry.acceleration_buffer and entry.acceleration_buffer > 0
+           and speed > 0 then
+            speed = speed + entry.acceleration_buffer
+        end
     elseif entry.speed_source == "kv_or_fallback" then
         local abil
         if modifier_handle and Modifier and Modifier.GetAbility then
@@ -8209,6 +8219,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.49.1 hotfix: lower bound = W_LEAD (stun BEFORE impact, not after). v0.5.49 demo log fire 3 (L2327, impact_t=1.09 < W_LEAD=1.12, in_window=y under v0.5.49 lower=0.60) confirmed the bug: Bara hit Lina FIRST, charge stun applied to Lina, THEN W stunned Bara 0.03s later. User spec: 'Bara is getting stunned after hitting lina and not before. This should hit before'. **Root cause**: v0.5.49 lower bound was CAST_POINT_FLOOR=0.6s (Lina W cast point) which guards against mid-cast fizzle but does NOT guarantee W lands BEFORE the threat. For homing threats, impact_t < W_LEAD mathematically means W detonates AFTER the threat arrives = late stun. **The math**: impact_t > W_LEAD -> W detonates BEFORE arrival, threat in transit at (impact_t - W_LEAD)*speed from Lina at W detonation; catch iff that distance <= W_AOE_RADIUS=225. impact_t == W_LEAD -> perfect timing (W detonates AT arrival). impact_t < W_LEAD -> W detonates AFTER arrival = SKIP. **Fix**: lower bound = W_LEAD for BOTH homing_charge AND homing_carry. Window now [W_LEAD, W_LEAD + 225/speed]. For Bara at speed 437: window [1.12, 1.64] (was [0.60, 1.64]). For Bara at speed 600: window [1.12, 1.50]. For Tusk at speed 1675: window [1.12, 1.25] (was [0.99, 1.25]). channel_at_caster / cast_point_targeted unchanged [0, inf]. **Outcome on next demo**: Bara fires at upper edge of window (impact_t just below 1.64 for slow Bara), W detonates ~0.5s BEFORE Bara would arrive, Bara stunned mid-charge ~225u from Lina (edge of AoE; accounts for acceleration). Tusk fires at impact_t just below 1.25, W detonates 0.13s before snowball arrival, snowball + Tusk caught mid-roll just before pickup. Late W fires (impact_t < W_LEAD) NO LONGER happen -- W simply doesn't fire and the chain returns no_effective_save_for_threat for that brief window. This is the user's preferred behavior: no W is better than late W. **What was confirmed in v0.5.49 demo**: math review identified three bugs, fixed two (upper bound for fast targets; symmetric vs wide-lower window per kind). Bug 3 (asymmetric 0.05/0.20 was empirical) addressed structurally via per-mod kind math. The remaining bug was the lower bound semantic -- v0.5.49.1 closes it. **Lina.lua 8202 -> 8212 lines (+10). lib/threat_data.lua unchanged. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
+LOG:info("Lina brain v0.5.49.2 hotfix: acceleration_buffer for homing_charge threats. v0.5.49.1 demo log fires 1+2 (impact_t=1.51, 1.50, both > W_LEAD=1.12, in_window=y) had Bara catalog math saying 'W detonates BEFORE arrival'. But user reported still off. Speed gradient in same log shows Bara accelerating ~220 u/s^2 (live MS 408 -> 522 over 0.5s = +228 u/s in 0.5s = 456 u/s^2 actually but observed avg lower). **Root cause**: NPC.GetMoveSpeed at fire moment returns CURRENT speed, NOT the AVERAGE speed Bara will have during the next 1.12s W prep window. Bara CONTINUES to accelerate during W prep, so real arrival is sooner than catalog impact_t = d / live_speed predicts. For fire 1 at d=789 live=522: catalog impact_t=1.51, but with avg prep speed ~700, real arrival ~1.13s. W detonates at fire+1.12s = 0.01s before arrival. With higher peak speed (talents+Phase Boots up to 1100), Bara hits Lina BEFORE W detonates. **Fix**: new acceleration_buffer field on catalog entries. For homing_charge (Bara): buffer=200. compute_arrival_time adds buffer to the live speed when speed_source=live_or_fallback AND entry.acceleration_buffer>0: speed = NPC.GetMoveSpeed(caster) + 200. impact_t = d / speed_with_buffer. The catalog impact_t now represents 'time to arrival under continued acceleration assumption'. Fire happens further out (Bara at larger d when impact_t in window) giving the acceleration ramp time without overtaking W detonation. **Math after fix**: Bara at live=522, buffered=722. Fire at impact_t in [1.12, 1.12 + 225/722=1.43]. At fire d = 1.12*722 = 809. Real arrival from d=809 with real avg ~622 (continued ramp) = 1.30s. W detonates at fire+1.12 = 0.18s BEFORE real arrival. Bara at 0.18 * real avg speed ~700 = 126u from Lina at W detonation. INSIDE 225 AoE. Bara stunned 126u short of Lina = BEFORE impact. **Other catalog entries**: Tusk fixed-speed snowball uses kv_or_fallback (no acceleration), buffer not applied. PA / WD / Lion use 'instant' or 'cast_point_targeted' speed sources, buffer field absent so defaults to 0. Only Bara-style accelerating chargers need the buffer. **Verification on next demo**: Bara w_catalog_eta_gate stream shows speed = live + 200 (e.g., speed=722 when live=522). Gate fires further out (larger d at fire). Bara stunned 100-200u from Lina visually = clearly before impact. Late fires (Bara hits Lina then W stuns) NO LONGER happen. **Lina.lua 8212 -> 8222 lines (+10). lib/threat_data.lua: +9 lines (acceleration_buffer field on Bara entry). SHA refreshed. luac clean both, no BOM, lesson 15 verified.")
 
 return callbacks

@@ -734,6 +734,18 @@ state.committed_attacker_armed_t    = state.committed_attacker_armed_t or {}
 -- v0.5.46 Problem A diag throttle (~5Hz) + last-scan stamp counter.
 state.commit_attacker_diag_t        = state.commit_attacker_diag_t or 0
 state.attacker_latch_last_stamped   = state.attacker_latch_last_stamped or 0
+-- v0.5.46.2 W .fire too-late skip allowlist: mods that PHYSICALLY CARRY
+-- Lina away from her pre-cast position (W AoE 225r at Lina's old spot
+-- misses both Lina and the caster). Bundled into state.* per v0.5.45.1
+-- 200-locals-per-function constraint. Keys are canonical modifier names;
+-- VPK-verified. Add new entries when a carry-Lina mechanic is observed
+-- missing in demo logs.
+state.W_skip_too_late_mods          = state.W_skip_too_late_mods or {
+    modifier_tusk_snowball_movement = true,
+    -- Candidates if observed: modifier_magnataur_skewer (Magnus pulls
+    -- Lina toward him; W at Lina old spot may miss), Tiny Toss (Tiny
+    -- throws Lina far). Add only after demo confirms W misses.
+}
 
 -- Per-tick: stamp attacking_seen_t for any visible enemy hero NPC.IsAttacking
 -- right now. Cheap O(N) scan over heroes in 3200u. API-guarded (NPC.IsAttacking
@@ -1380,71 +1392,32 @@ local SAVE_FIRE = {
             if NPC.IsChannellingAbility and NPC.IsChannellingAbility(me) then
                 return false
             end
-            -- v0.5.45 W .fire sub-1.1s arrival gate (DEFENSE_PLAN.md sec 4.2
-            -- W refinement track): SAVE_ETA_TRIGGER 1.20 gates the proactive
-            -- chain walker but the at-impact armed_threats_tick path bypasses
-            -- it (v0.5.44 demo showed W firing on PA Phantom Strike at eta
-            -- 0.04 as a 1.1s-late stun). Two belts: (a) intent-pattern skip
-            -- for known sub-1.1s arrivals via intent substring match, (b)
-            -- dist-to-nearest-enemy gate (caster already at melee = W stun
-            -- 1.1s later is post-fact). Either catches PA blink + similar.
-            -- Acceptable against slower arrivals (Bara/Tusk/MK) where the
-            -- caster is still en-route 1.1s out and W stuns on arrival.
             local intent_s = tostring(intent or "")
-            if intent_s:find(":phantom_assassin_phantom_strike", 1, true)
-               or intent_s:find(":antimage_blink", 1, true)
-               or intent_s:find(":queenofpain_blink", 1, true)
-               or intent_s:find(":riki_blink_strike", 1, true)
-               or intent_s:find(":slark_pounce", 1, true)
-               or intent_s:find(":pangolier_swashbuckle", 1, true)
-               or intent_s:find(":nyx_assassin_vendetta", 1, true)
-               or intent_s:find(":mirana_leap", 1, true)
-               or intent_s:find(":weaver_shukuchi", 1, true)
-               or intent_s:find(":void_spirit_astral_step", 1, true) then
-                tlog(3, "w_defensive_skip_too_fast", {
-                    intent = intent_s,
-                    reason = "sub_1_1s_arrival_pattern",
-                })
-                return false
-            end
-            -- Dist-to-nearest-visible-enemy gate (belt + suspenders). Iterate
-            -- enemies in 300u; if any < 100u then the attacker is already at
-            -- melee range and W's 1.1s-late stun is post-fact for the at-
-            -- impact path. Chain walker falls through to no_effective_save_
-            -- for_threat (acceptable; W cannot help this case).
-            if Entity and Entity.GetHeroesInRadius and Enum and Enum.TeamType then
-                local ok, nearby = pcall(Entity.GetHeroesInRadius, me, 300, Enum.TeamType.TEAM_ENEMY)
-                if ok and type(nearby) == "table" then
-                    for i = 1, #nearby do
-                        local h = nearby[i]
-                        if h and Entity.IsEntity(h) and Target.IsAlive(h) then
-                            local d = dist_to(h) or math.huge
-                            if d < 100 then
-                                tlog(3, "w_defensive_skip_too_fast", {
-                                    intent = intent_s,
-                                    reason = "enemy_already_at_melee",
-                                    dist   = string.format("%.0f", d),
-                                })
-                                return false
-                            end
-                        end
-                    end
-                end
-            end
-            -- v0.5.46 Problem B too-late belt+suspenders: armed_post_fire
-            -- stashes the threat's homing eta in state.cur_armed_eta. W's
-            -- 1.1s prep means firing at cur_eta < 1.0s detonates AFTER the
-            -- threat arrives, missing the target (v0.5.45.1 Test 7 Tusk
-            -- snowball: fire at eta=0.51, detonate 0.59s after arrival).
-            -- The primary fix is the SAVE_FIRE_DISTANCE removal which now
-            -- gates the homing path on SAVE_ETA_TRIGGER=1.20 only; this belt
-            -- covers the at-impact eta_critical (eta<=0.35) path PLUS any
-            -- future entry points (proactive Dispatch w/ low-eta hint, etc.)
-            -- that could still arrive at the .fire body with cur_eta<1.0s.
-            if state.cur_armed_eta and state.cur_armed_eta < 1.0 then
-                tlog(3, "w_defensive_skip_too_late", {
+            -- v0.5.46.2 user spec ("Even if PA blink is too fast it still
+            -- better use W to run or fight. No reason to not do."): W is
+            -- useful even when it can't stun the threat caster on arrival,
+            -- because the 1.6s AoE catches whoever stays at Lina's pre-cast
+            -- position 1.1s post-cast. For PA blink, AM blink, Slark pounce,
+            -- Nyx vendetta, etc. the caster lands at Lina and stays committed
+            -- to attacks; W catches them mid-attack and breaks the attack-
+            -- speed chain, buying Lina 1.6s to TP / run / counter. The
+            -- v0.5.45 intent-pattern (10 sub-1.1s arrivals) + 100u-melee
+            -- gates + the v0.5.46 broad too-late belt were over-conservative;
+            -- they treated "W can't stun the threat itself" as "W is wasted"
+            -- but the opposite is true for the typical commit case. Removed
+            -- v0.5.45 gates entirely; narrowed v0.5.46 belt to a small
+            -- allowlist of mods that PHYSICALLY CARRY Lina away from her
+            -- pre-cast position (W cast at Lina's old spot misses both Lina
+            -- and the caster). Tusk snowball is the canonical case. Future
+            -- candidates: Magnus Skewer + Tiny Toss + similar pulls/throws.
+            if state.cur_armed_eta and state.cur_armed_eta < 1.0
+               and state.cur_armed_threat_mod
+               and state.W_skip_too_late_mods
+               and state.W_skip_too_late_mods[state.cur_armed_threat_mod] then
+                tlog(3, "w_defensive_skip_too_late_carry", {
                     intent  = intent_s,
                     cur_eta = string.format("%.2f", state.cur_armed_eta),
+                    mod     = tostring(state.cur_armed_threat_mod),
                 })
                 return false
             end
@@ -2318,12 +2291,15 @@ local function armed_post_fire(key, entry, eta, d, fire_reason)
     entry.fired = true
     state.armed_threats[key] = nil
     -- v0.5.46 Problem B belt: stash threat eta for SAVE_FIRE.lina_w_anti_gap.fire
-    -- to consult below. W skips if cur_armed_eta < 1.0s (its 1.1s prep would
-    -- land too late). cast_point entries pass eta=0 here as a sentinel (real
-    -- timing lives in entry._cp_t), so stash nil for those to avoid a false
-    -- skip. Cleared at function end so non-armed call sites of W's .fire
-    -- (proactive Dispatch, etc.) see nil and fall through.
-    state.cur_armed_eta = (not entry.cast_point_threat) and eta or nil
+    -- to consult below. W skips if cur_armed_eta < 1.0s AND the threat mod is
+    -- in the v0.5.46.2 carry-Lina allowlist (state.W_skip_too_late_mods).
+    -- cast_point entries pass eta=0 here as a sentinel (real timing lives in
+    -- entry._cp_t), so stash nil for those to avoid a false skip. Cleared at
+    -- function end so non-armed call sites of W's .fire (proactive Dispatch,
+    -- etc.) see nil and fall through. v0.5.46.2: also stash threat_mod so the
+    -- W belt can gate against the carry-Lina allowlist (Tusk snowball etc).
+    state.cur_armed_eta        = (not entry.cast_point_threat) and eta or nil
+    state.cur_armed_threat_mod = entry.threat_mod
     -- v0.5.6 (E2): eta_t shows the per-save effective trigger
     -- actually used this tick (entry default 0.8s when no
     -- override hit, or blink_arrived/eta_critical paths).
@@ -2365,8 +2341,9 @@ local function armed_post_fire(key, entry, eta, d, fire_reason)
     -- calls outside the armed path (proactive Dispatch, etc.) see nil
     -- and skip the too-late check. Same-tick chain re-entry not a
     -- concern here -- the lock domain (v0.5.40) gates re-entry until
-    -- the in-flight save resolves.
-    state.cur_armed_eta = nil
+    -- the in-flight save resolves. v0.5.46.2: also drop threat_mod stash.
+    state.cur_armed_eta        = nil
+    state.cur_armed_threat_mod = nil
 end
 
 -- Armed homing / instant-blink threats: fire on arrival (instant-blink) or at
@@ -7774,6 +7751,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.46.1 hotfix: commit-attacker diag always-reach + W SAVE_FIRE_DISTANCE=800 restore for Bara. v0.5.46 demo log surfaced two regressions. **Problem Aaa (commit-attacker silent gates STILL silent)**: v0.5.46 added throttled diag emits but placed them AFTER the menu / self_npc / API / pcall early-return gates inside scan_and_arm_committed_attackers, so the entire v0.5.46 demo logged ZERO commit_attacker_diag events despite the user testing an enemy auto-attacking Lina. The diagnostic was nominally added but practically invisible. **Fix**: hoist a throttled (~5Hz) diag emit ABOVE every early-return path with an `exit` reason: menu_off / no_self / no_api / no_dispatcher / pcall_fail / list_nil / scanned. The aggregate scanned emit retains v0.5.46 per-enemy commit_attacker_diag_h + commit_attacker_diag_latched breakdown. Next demo Test 5 re-run reveals whether menu toggle is on (default true, expected `scanned`) or some other gate filters. If `scanned` fires with attacking=N committed=0, the gate is internal to the classifier (dist / IsKitingUs / latch window) per v0.5.46 plan. **Problem B (Bara W timing regression)**: v0.5.46 removed SAVE_FIRE_DISTANCE[lina_w_anti_gap]=800 to fix Tusk snowball mis-timing (W detonated AFTER Tusk arrival). v0.5.46 demo confirmed Tusk fix worked (belt skipped W at cur_armed_eta=0.66-0.97 < 1.0 for fast snowball), but the dist-gate removal regressed Bara charge: chain walker eta_trigger=1.20 fires W at d=720 (bara_charge eta_speed=600 stamped) but Bara real charge speed is ~700 u/s so real-eta at fire=1.03s; W detonates at fire+1.10 = 0.07s AFTER Bara impact = Bara charge stun lands first then W stuns Bara. v0.5.45.1 with SAVE_FIRE_DISTANCE=800 fired W at d=800 (real-eta=1.14), W detonated 0.04s BEFORE Bara impact = Bara stunned before contact = charge fails cleanly. User explicitly reported v0.5.46 demo: 'the old methodology for bara charge using W was better since it was a cast on self on the right time not letting bara hit'. **Fix**: restore SAVE_FIRE_DISTANCE[lina_w_anti_gap]=800. Tusk vs Bara differentiation now lives in the v0.5.46 too-late belt (state.cur_armed_eta < 1.0): Bara stamped eta_speed=600 -> cur_armed_eta=800/600=1.33s -> belt passes -> W fires (matches v0.5.45.1 timing); Tusk stamped eta_speed=1200 -> cur_armed_eta=800/1200=0.67s -> belt skips -> W not fired at dist gate (good, W would miss snowball). Eta_trigger=1.20 path still applies to Tusk at d=1440 (cur_armed_eta=1.20, belt passes). Belt acts as the hit-and-stop (Bara) vs snowball-carry (Tusk) dispatcher via stamped eta_speed differential. **Other demo findings (queued for v0.5.46.2+)**: framework Pike collateral (debug.log L9148 shows modifier_item_hurricane_pike_active_alternate caster=lina after brain emitted no_effective_save_for_threat at L9135; Linkbreaker override may not cover ALL paths OR Items Manager subsystem is the source per Sniper L7814 third-subsystem note), Bara chain walker save_eff field showing item_hurricane_pike with via=save_dist when Pike returned fire_returned_false (cosmetic; save_eff is set before .fire is called in armed_chain_peek). **Lina.lua 7742 -> 7777 lines (+35)**. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
+LOG:info("Lina brain v0.5.46.2 hotfix: W fires by default; too-late skip narrowed to carry-Lina mods. User spec from v0.5.46.1 demo discussion: 'Even if PA blink is to fast it still better use W to run or fight. No reason to not do.' v0.5.45 W .fire gates (intent-pattern skip for 10 sub-1.1s arrivals, 100u-melee dist skip) + v0.5.46 broad too-late belt treated 'W cannot stun the threat caster on arrival' as 'W is wasted' but that framing was inverted for the typical case: W's 1.6s AoE catches whoever stays at Lina's pre-cast position 1.1s after fire, which is the threat caster mid-attack-chain (PA blink + 4s attack speed window, AM blink + auto-attacks, Slark pounce + leashed attacks, Nyx vendetta + impale followup, Riki blink_strike + chain attacks, melee committed attackers). W stuns the caster mid-commit, breaks the attack chain, buys Lina 1.6s to TP / run / counter. Wasting 130 mana + 8s CD for that trade is correct value-for-cost. **Removed**: v0.5.45 intent-pattern skip block (phantom_strike / antimage_blink / queenofpain_blink / riki_blink_strike / slark_pounce / pangolier_swashbuckle / nyx_vendetta / mirana_leap / weaver_shukuchi / void_spirit_astral_step) ENTIRELY. v0.5.45 100u-melee dist scan block ENTIRELY (enemy at melee is INSIDE W's 225u AoE radius so W catches them, not a reason to skip). **Narrowed**: v0.5.46 too-late belt no longer fires on cur_armed_eta<1.0 alone; now also requires state.cur_armed_threat_mod in state.W_skip_too_late_mods allowlist. The only canonical entry today is modifier_tusk_snowball_movement (Tusk snowball physically carries Lina away from her pre-cast position; W AoE at Lina's old spot misses both Lina and Tusk). Future additions if observed missing: modifier_magnataur_skewer (Magnus pulls Lina), Tiny Toss. New tlog name: w_defensive_skip_too_late_carry (distinguishes the narrowed semantic from v0.5.46's broader belt). **State additions** (bundled into state.* per v0.5.45.1 200-locals constraint): state.W_skip_too_late_mods (carry-Lina allowlist), state.cur_armed_threat_mod (stashed by armed_post_fire alongside state.cur_armed_eta; cleared on function exit). **Verification on next demo**: PA blink scenarios now expect w_defensive_fire intent=armed_phantom_assassin_phantom_strike_w_stun (or similar) instead of w_defensive_skip_too_fast. Tusk snowball still expects w_defensive_skip_too_late_carry when belt rejects. Bara charge unchanged from v0.5.46.1 (eta_speed=600 -> cur_armed_eta=1.33 at d=800, belt passes regardless of allowlist). **Lina.lua 7777 -> 7754 lines (-23, net: -50 v0.5.45 gates +27 v0.5.46.2 allowlist+stash+narrowed-belt block). Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
 
 return callbacks

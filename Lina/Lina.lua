@@ -18,6 +18,27 @@
 local Order  = require("lib.order")
 local Damage = require("lib.damage")
 local Anim   = require("lib.anim")
+-- v0.5.50.2: force-clear the require cache for the lib modules before
+-- requiring them. Umbrella reloads Lina.lua on script reload but Lua's
+-- package.loaded cache persists across reloads, so lib changes (e.g.
+-- v0.5.50 catalog ramp model) deployed AFTER an initial brain load
+-- never take effect until Dota is fully restarted. v0.5.50 demo log
+-- confirmed this: file SHAs matched runtime but compute_arrival_time
+-- was using OLD catalog values (speed_source=live_or_fallback instead
+-- of live_with_ramp; speed=live instead of avg-during-prep). Clearing
+-- package.loaded[*] makes the next require() re-read from disk.
+-- Safe because lib modules are pure-data + pure-functions (no stateful
+-- globals to lose). Lina is the only consumer at this load site.
+if package and package.loaded then
+    package.loaded["lib.signal"]      = nil
+    package.loaded["lib.target"]      = nil
+    package.loaded["lib.threat_data"] = nil
+    package.loaded["lib.npc"]         = nil
+    package.loaded["lib.dedup"]       = nil
+    package.loaded["lib.geometry"]    = nil
+    package.loaded["lib.native"]      = nil
+    package.loaded["lib.defense"]     = nil
+end
 local Signal = require("lib.signal")
 local Target = require("lib.target")      -- v0.2.0: IsAlive / NotIllusion / NotClone
 local TD     = require("lib.threat_data") -- v0.2.0: category chains + recommended saves
@@ -2470,6 +2491,11 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
                             in_window = in_window and "y" or "n",
                             mod       = tostring(entry.threat_mod),
                             kind      = tostring(cat_entry and cat_entry.kind or "-"),
+                            -- v0.5.50.2 diag: surface speed_source so we can
+                            -- tell at a glance whether the lib catalog has
+                            -- the new ramp fields (live_with_ramp) or stale
+                            -- cached pre-v0.5.50 values (live_or_fallback).
+                            source    = tostring(cat_entry and cat_entry.speed_source or "-"),
                         })
                         if in_window then
                             entry._fire_dist_eff   = -3  -- sentinel: catalog path
@@ -8235,6 +8261,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.50.1 hotfix: r_reserve only if R is leveled. v0.5.50 demo log showed w_defensive_skip_mana mana=435 need=550 repeatedly at low-level Lina. User: 'strangely on lvl1 W was not used only on higher levels'. **Root cause**: SAVE_FIRE.lina_w_anti_gap.fire mana gate hardcoded r_reserve=450 (reserve mana for R combo) even when R is not yet leveled. At Lina lvl 1-5 (pre-R), the 450 reserve has nothing to preserve and blocks defensive W from firing despite having enough mana for W itself (W costs 100/110/120/130 = 100 at lvl 1). Mana 435 - W cost 100 = 335 free, but gate adds 450 = 550 required, fails. **Fix**: local r_ab = ability('lina_laguna_blade'); local r_reserve = (r_ab and Ability.GetLevel(r_ab) > 0) and 450 or 0. At pre-R Lina: r_reserve=0, mana gate = w_cost only (100), passes with 435 mana. At post-R Lina: r_reserve=450, gate = 550 (preserves R combo). Tlog gains r_reserve field for transparency: w_defensive_skip_mana now logs mana / need / r_reserve. **Edge case**: even with R leveled, if Lina is past the R kill window, r_reserve forces W to wait. Acceptable trade-off (combo preservation > sometimes-blocked W). **Verification on next demo**: low-level Lina vs Bara should now show w_defensive_fire intent=armed_bara_charge_w_stun. The w_catalog_eta_gate ramp model from v0.5.50 still applies (avg-during-prep speed, in_window check). The MANA gate after the catalog gate just permits the fire now at low levels. **Lina.lua 8231 -> 8238 lines (+7). lib/threat_data.lua unchanged from v0.5.50. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
+LOG:info("Lina brain v0.5.50.2 hotfix: force lib require cache reload + diagnostic source field. **Diagnosis**: v0.5.50.1 demo log Bara fires showed speed=634 (live NPC.GetMoveSpeed) NOT the v0.5.50 ramp avg-during-prep speed=~717. With ramp model, Bara fire at d=921 would have used speed=717 -> impact_t=1.28 -> gate fires at higher d. With live-only (regression), gate fires at impact_t=1.45 -> d=921 -> Bara at ~140u from Lina at W detonation (which is what user observed: 'came back to be used a bit earlier'). **Root cause**: file SHAs match runtime (v0.5.50 ramp catalog deployed to runtime lib/threat_data.lua) but Lua's package.loaded cache persists across Umbrella script reloads. Lina.lua re-loads on each reload (because Umbrella sources it directly) and `local TD = require(lib.threat_data)` returns the CACHED OLD module table -- which has the pre-v0.5.50 entry shape (speed_source=live_or_fallback, acceleration_buffer=100). Lina.lua compute_arrival_time enters the live_or_fallback branch (uses live exclusively, no buffer because v0.5.50 removed the buffer code), so speed=live no enhancement. The full v0.5.50 ramp branch never executes because entry.speed_source != live_with_ramp from the cached module. **Fix**: package.loaded[lib.<mod>] = nil for all lib modules at top of Lina.lua BEFORE require. Forces fresh re-read from disk on every script reload. Safe because lib modules are pure-data + pure-functions per the lib design philosophy (no stateful globals to lose). Lina is the only consumer at this load site; other heroes have their own require statements. **Diagnostic add**: w_catalog_eta_gate tlog now includes `source=entry.speed_source` (e.g., live_with_ramp vs live_or_fallback) so we can verify at a glance whether the lib refresh worked. If source=live_with_ramp the ramp is engaged; if source=live_or_fallback the lib cache is still stale (would indicate the package.loaded clearing isn't working for some reason). **Verification on next demo**: Bara w_catalog_eta_gate should show source=live_with_ramp kind=homing_charge. speed should be the avg-during-prep (not live). For Bara at live=634, speed=717; for live=750, speed=775; for live=900, speed=900 (cap raised by max(live, peak_cap)). **Lina.lua 8238 -> 8264 lines (+26). lib/threat_data.lua unchanged from v0.5.50. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
 
 return callbacks

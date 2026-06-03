@@ -685,6 +685,151 @@ LINA_SAVE_OVERRIDES["modifier_pugna_life_drain"]                = _CHAIN_PUGNA_D
 LINA_SAVE_OVERRIDES["modifier_legion_commander_duel"]           = _CHAIN_LEGION_DUEL
 LINA_SAVE_OVERRIDES["modifier_disruptor_kinetic_field_remnant"] = _CHAIN_DISRUPTOR_KFR
 
+----------------------------------------------- commit-attacker close-gap ---
+-- v0.5.45 CA (DEFENSE_PLAN.md sec 4.2 commit-attacker track): port of
+-- Sniper.lua state.is_committed_attacker (S3 L4318) + state.sample_velocities
+-- attacker-latch (S3 L3921-3940). Sniper uses this OFFENSIVELY (gates D-peel
+-- combo); Lina uses it DEFENSIVELY (synthesizes a virtual threat that routes
+-- through v0.5.40 dispatcher to fire close-gap saves when a melee attacker
+-- commits on Lina, even without a spell threat to react to).
+--
+-- Why we need this: pre-v0.5.45 the Lina defense chain only fires on SPELL
+-- threats (Bara charge modifier, PA blink modifier, etc.). If an enemy hero
+-- walks up and starts auto-attacking, brain does nothing. This is bad for
+-- melee carries that close gap with auto-attacks (Slark post-pounce, Naga
+-- post-Riptide, etc.) and bad for Sniper-like positional threats where the
+-- attacker spends the spell window auto-attacking.
+--
+-- Detection: NPC.IsAttacking returns true only ~0.3s per ~1.4s attack cycle
+-- (lib gap), so we latch via state.attacking_seen_t[caster_idx] = now and
+-- consider attacker "committed" for LINA_COMMITTED_ATTACK_WINDOW_S after the
+-- last latch. Proximity gate at LINA_ATTACK_ENGAGE_RADIUS = 700u (matches
+-- Sniper). Kiting-away check via Target.IsKitingUs excludes heroes moving
+-- away from us.
+--
+-- Synthesis: when a committed attacker is detected and the per-caster re-arm
+-- latch (LINA_COMMITTED_ATTACK_WINDOW_S = 1.6s) has cleared, call
+-- defense_dispatcher:Dispatch directly with threat_mod="lina_committed_attacker"
+-- threat_caster=<attacker hero> category_hint="close_gap". The dispatcher
+-- lock keyed (state.self_npc, "lina_committed_attacker", caster_idx) keeps
+-- one save per attacker per window. Chain table _COMMITTED_ATTACKER_SAVES
+-- is slim per user Q (slim chain recommended): displacement + escape + W
+-- tail; no BKB/Lotus/Aeon/FC since attackers are mostly physical not magical
+-- so magic immune / reflect / magic barrier are not useful.
+local LINA_COMMITTED_ATTACK_WINDOW_S = 1.6  -- Sniper L319 parity
+local LINA_ATTACK_ENGAGE_RADIUS      = 700  -- Sniper ATTACK_ENGAGE_RADIUS parity; covers Lina's 670 attack range
+local LINA_COMMITTED_ATTACKER_RETREAT_BUFFER = 200  -- attacker further than 700+200=900 = released
+
+local _COMMITTED_ATTACKER_SAVES = {
+    "item_force_staff", "item_hurricane_pike", "item_wind_waker",
+    "item_cyclone", "item_glimmer_cape", "lina_w_anti_gap",
+}
+LINA_SAVE_OVERRIDES["lina_committed_attacker"] = _COMMITTED_ATTACKER_SAVES
+
+-- State table init (per-tick attacker latches + per-caster re-arm latches).
+-- Declared here adjacent to the helpers so the file stays grep-coherent;
+-- could be hoisted to the L175-230 state.* block if maintenance prefers.
+state.attacking_seen_t           = state.attacking_seen_t or {}
+state.committed_attacker_armed_t = state.committed_attacker_armed_t or {}
+
+-- Per-tick: stamp attacking_seen_t for any visible enemy hero NPC.IsAttacking
+-- right now. Cheap O(N) scan over heroes in 3200u. API-guarded (NPC.IsAttacking
+-- absent on some framework builds; degrades to silent no-op which means the
+-- classifier falls back to current-tick IsAttacking only, i.e. firing only
+-- during the ~0.3s swing window per attack cycle).
+state.sample_attacker_latches = function()
+    local me = state.self_npc
+    if not (me and Entity.IsEntity and Entity.IsEntity(me)) then return end
+    if not (Entity.GetHeroesInRadius and Enum and Enum.TeamType) then return end
+    local ok, list = pcall(Entity.GetHeroesInRadius, me, 3200, Enum.TeamType.TEAM_ENEMY)
+    if not ok or type(list) ~= "table" then return end
+    local t = now()
+    for i = 1, #list do
+        local h = list[i]
+        if h and Entity.IsEntity(h) and Target.IsAlive and Target.IsAlive(h)
+           and NPC.IsAttacking and NPC.IsAttacking(h) then
+            local ok2, idx = pcall(Entity.GetIndex, h)
+            if ok2 and idx then state.attacking_seen_t[idx] = t end
+        end
+    end
+end
+
+-- Classifier: returns true iff h is currently committing attacks on Lina
+-- (close + attacking-now-or-recently + not kiting away).
+state.is_committed_attacker_on_self = function(h)
+    local me = state.self_npc
+    if not (me and h and Entity.IsEntity(h) and Target.IsAlive and Target.IsAlive(h)) then
+        return false
+    end
+    local d = dist_to(h) or math.huge
+    if d > LINA_ATTACK_ENGAGE_RADIUS then return false end
+    -- Kiting check: hero moving AWAY is not committing. Target.IsKitingUs
+    -- may be absent (older Target lib); treat absence as not-kiting (the
+    -- proximity + attack check is then the sole gate, more aggressive
+    -- but conservative-on-classification-error since IsKitingUs nil =
+    -- "we don't know, assume not kiting").
+    if Target.IsKitingUs and Target.IsKitingUs(h, me) then return false end
+    if NPC.IsAttacking and NPC.IsAttacking(h) then return true end
+    local ok, idx = pcall(Entity.GetIndex, h)
+    if not (ok and idx and state.attacking_seen_t) then return false end
+    local seen = state.attacking_seen_t[idx]
+    if not seen then return false end
+    return (now() - seen) < LINA_COMMITTED_ATTACK_WINDOW_S
+end
+
+-- Per-tick scan: for each enemy hero in LINA_ATTACK_ENGAGE_RADIUS, if
+-- is_committed_attacker_on_self AND the per-caster re-arm latch is clear,
+-- call defense_dispatcher:Dispatch directly. The dispatcher's per-(target,
+-- canonical_mod, caster) lock keeps one save per attacker per window; the
+-- re-arm latch (LINA_COMMITTED_ATTACK_WINDOW_S) prevents spam if the
+-- dispatcher releases the lock before the attacker stops committing.
+state.scan_and_arm_committed_attackers = function()
+    if not (state.menu and state.menu.enable_commit_attacker
+            and state.menu.enable_commit_attacker:Get()) then
+        return
+    end
+    local me = state.self_npc
+    if not (me and Entity.IsEntity and Entity.IsEntity(me)) then return end
+    if not (Entity.GetHeroesInRadius and Enum and Enum.TeamType) then return end
+    if not defense_dispatcher then return end
+    local ok, list = pcall(Entity.GetHeroesInRadius, me, LINA_ATTACK_ENGAGE_RADIUS,
+                           Enum.TeamType.TEAM_ENEMY)
+    if not ok or type(list) ~= "table" then return end
+    local t = now()
+    for i = 1, #list do
+        local h = list[i]
+        if state.is_committed_attacker_on_self(h) then
+            local ok2, idx = pcall(Entity.GetIndex, h)
+            if ok2 and idx then
+                local last_arm = state.committed_attacker_armed_t[idx] or 0
+                if (t - last_arm) >= LINA_COMMITTED_ATTACK_WINDOW_S then
+                    local d     = dist_to(h) or LINA_ATTACK_ENGAGE_RADIUS
+                    local speed = (NPC.GetMoveSpeed and NPC.GetMoveSpeed(h)) or 300
+                    state.committed_attacker_armed_t[idx] = t
+                    tlog(1, "committed_attacker_armed", {
+                        caster  = uname(h),
+                        dist    = string.format("%.0f", d),
+                        mvspeed = string.format("%.0f", speed),
+                    })
+                    local intent = "committed_attacker_" .. tostring(idx)
+                    defense_dispatcher:Dispatch(
+                        intent,                            -- intent
+                        "lina_committed_attacker",         -- threat_mod (synthetic)
+                        h,                                 -- threat_caster
+                        me,                                -- target_unit
+                        nil,                               -- fire_thunk (use chain walker)
+                        "close_gap",                       -- category_hint
+                        nil,                               -- ability_name
+                        nil,                               -- armed_entry
+                        record_save,                       -- on_save_fired
+                        { fs_shard_window = fs_shard_window_active() }  -- ctx
+                    )
+                end
+            end
+        end
+    end
+end
+
 -- Ability-keyed (anim route -- pre-cast detection via OnPrepareUnitOrders /
 -- spell-cast probe). v0.2.2 lesson: modifier names drift across patches but KV
 -- ability names are stable; the anim route detects by KV ability name and
@@ -1133,6 +1278,57 @@ local SAVE_FIRE = {
             end
             if NPC.IsChannellingAbility and NPC.IsChannellingAbility(me) then
                 return false
+            end
+            -- v0.5.45 W .fire sub-1.1s arrival gate (DEFENSE_PLAN.md sec 4.2
+            -- W refinement track): SAVE_ETA_TRIGGER 1.20 gates the proactive
+            -- chain walker but the at-impact armed_threats_tick path bypasses
+            -- it (v0.5.44 demo showed W firing on PA Phantom Strike at eta
+            -- 0.04 as a 1.1s-late stun). Two belts: (a) intent-pattern skip
+            -- for known sub-1.1s arrivals via intent substring match, (b)
+            -- dist-to-nearest-enemy gate (caster already at melee = W stun
+            -- 1.1s later is post-fact). Either catches PA blink + similar.
+            -- Acceptable against slower arrivals (Bara/Tusk/MK) where the
+            -- caster is still en-route 1.1s out and W stuns on arrival.
+            local intent_s = tostring(intent or "")
+            if intent_s:find(":phantom_assassin_phantom_strike", 1, true)
+               or intent_s:find(":antimage_blink", 1, true)
+               or intent_s:find(":queenofpain_blink", 1, true)
+               or intent_s:find(":riki_blink_strike", 1, true)
+               or intent_s:find(":slark_pounce", 1, true)
+               or intent_s:find(":pangolier_swashbuckle", 1, true)
+               or intent_s:find(":nyx_assassin_vendetta", 1, true)
+               or intent_s:find(":mirana_leap", 1, true)
+               or intent_s:find(":weaver_shukuchi", 1, true)
+               or intent_s:find(":void_spirit_astral_step", 1, true) then
+                tlog(3, "w_defensive_skip_too_fast", {
+                    intent = intent_s,
+                    reason = "sub_1_1s_arrival_pattern",
+                })
+                return false
+            end
+            -- Dist-to-nearest-visible-enemy gate (belt + suspenders). Iterate
+            -- enemies in 300u; if any < 100u then the attacker is already at
+            -- melee range and W's 1.1s-late stun is post-fact for the at-
+            -- impact path. Chain walker falls through to no_effective_save_
+            -- for_threat (acceptable; W cannot help this case).
+            if Entity and Entity.GetHeroesInRadius and Enum and Enum.TeamType then
+                local ok, nearby = pcall(Entity.GetHeroesInRadius, me, 300, Enum.TeamType.TEAM_ENEMY)
+                if ok and type(nearby) == "table" then
+                    for i = 1, #nearby do
+                        local h = nearby[i]
+                        if h and Entity.IsEntity(h) and Target.IsAlive(h) then
+                            local d = dist_to(h) or math.huge
+                            if d < 100 then
+                                tlog(3, "w_defensive_skip_too_fast", {
+                                    intent = intent_s,
+                                    reason = "enemy_already_at_melee",
+                                    dist   = string.format("%.0f", d),
+                                })
+                                return false
+                            end
+                        end
+                    end
+                end
             end
             local w_cost    = (Ability.GetManaCost and Ability.GetManaCost(w)) or 130
             local r_reserve = 450
@@ -5557,6 +5753,19 @@ local function setup_menu()
     -- See DODGER_CHAIN_ITEMS module-local + dodger_chain_disable/restore
     -- helpers earlier in this file. Off = Dodger and brain both fire and
     -- a double-fire pattern is observable (Bara WW+Pike v0.5.42 demo).
+    -- v0.5.45 CA (DEFENSE_PLAN.md sec 4.2 commit-attacker track): port of
+    -- Sniper's is_committed_attacker detection. Synthesizes a virtual
+    -- threat when an enemy hero is auto-attacking Lina at melee range and
+    -- routes through v0.5.40 dispatcher to fire close-gap saves (Force /
+    -- Pike / WW / Eul / Glimmer / W tail). Off = brain only responds to
+    -- SPELL threats; raw auto-attacks go ignored (pre-v0.5.45 behavior).
+    m.enable_commit_attacker = gDef:Switch('Enable commit-attacker close-gap', true)
+    m.enable_commit_attacker:ToolTip("Detect enemy heroes auto-attacking "
+        .. "Lina at melee range (700u) and trigger close-gap saves (Force "
+        .. "/ Pike / WW / Eul / Glimmer / W tail). Sniper-precedent port. "
+        .. "Per-attacker 1.6s re-arm latch + Dispatcher lock prevent spam. "
+        .. "Off = no defensive response to raw auto-attacks; chain only "
+        .. "triggers on spell threats (pre-v0.5.45 behavior).")
     -- v0.5.44 (DEFENSE_PLAN.md sec 2.1 + Q1): W as anti-gap arrival stun,
     -- chain TAIL of close_gap chains. High-viability targets: Bara Charge,
     -- Bara Nether Strike, Tusk Snowball, MK Primal Spring. Mana floor
@@ -6382,6 +6591,17 @@ function callbacks.OnUpdateEx()
         end
         persistent_threats_tick()  -- re-fire saves during Duel / Static Storm (lesson 60)
         armed_threats_tick()       -- fire-on-arrival homing saves
+        -- v0.5.45 CA (DEFENSE_PLAN.md sec 4.2 commit-attacker track): sample
+        -- enemy NPC.IsAttacking latches, then scan attackers in 700u for
+        -- commit-attacker detection and synthesize close-gap dispatches.
+        -- Order: AFTER armed_threats_tick so spell-armed entries take priority,
+        -- BEFORE pre_face_tick / Layer-1 offense so the close-gap save fires
+        -- before the brain reissues attacks toward the attacker. The two
+        -- helpers self-gate on menu toggle and the dispatcher lock keys
+        -- (state.self_npc, "lina_committed_attacker", caster_idx) prevent
+        -- per-tick spam; per-caster re-arm latch is the additional gate.
+        state.sample_attacker_latches()
+        state.scan_and_arm_committed_attackers()
         -- v0.5.13 PIKE-PRIME-01 / PIKE-PRIME-TICK-NEVER-CALLED: restore the PE-03
         -- fresh-Pike prime + double-issue per-frame driver. Dead code since v0.5.11
         -- because this call site was omitted during the Sniper S29 port, so
@@ -7264,6 +7484,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.44 W anti-gap (DEFENSE_PLAN.md sec 2.1): first hero-spell entry in the defense chain. Background: v0.5.43 closed the Dodger collateral and surfaced that Lina's defense was 100% item-dependent; pre-Force-Staff Lina had effectively zero gap-close defense. The 5-agent design workflow (Lina/DEFENSE_PLAN.md, 536 lines) cataloged every gap-closer Lina faces and surfaced 4 high-viability targets for W as anti-gap arrival stun: Bara Charge of Darkness (1.5-6s travel), Bara Nether Strike (1.0s cast point), Tusk Snowball (3s channel + slow roll), Monkey King Primal Spring (1.75s channel). Plus 2 medium-viability: Storm Spirit Ball Lightning landing (~1500u+ trips), Ember Spirit Fire Remnant arrival. W's 1.1s prep (0.6 cast point + 0.5 delay) gates out all sub-1.1s arrivals (PA Phantom Strike, AM Blink, QoP Blink, Riki Blink Strike, Pangolier Swashbuckle, Nyx Vendetta etc.). 17 NONE-viability heroes catalogued in the design doc Section 2.1 table. **Implementation**: new lina_w_anti_gap SAVE_FIRE entry at Lina.lua adjacent to lina_flame_cloak. The .fire body checks (1) state.menu.enable_w_anti_gap toggle, (2) ability ready + level > 0, (3) NPC.IsChannellingAbility false, (4) mana floor (mana >= w_cost + 450 r_reserve so defensive W cannot starve the kill combo), (5) Entity.GetAbsOrigin available. Aim policy: always Lina position (state.self_npc origin); all 4 high-viability targets land AT Lina so no prediction needed (predicted-landing variant deferred to v0.5.4X+ if evidence emerges). Cast via existing issue_cast_position helper at L487. Emits w_defensive_fire tlog v=2 on issue + w_defensive_skip_mana v=3 on mana floor reject. Lock domain unchanged from v0.5.40: chain walker dispatches under the threat real canonical_mod, lock_key tuple identity preserved. **Supporting wiring**: ABILITY_SAVES gains lina_w_anti_gap=true so chain walker gates on silence/muted state (self_can_cast_abilities). save_is_ready gains explicit lina_w_anti_gap branch calling ability_ready('lina_light_strike_array'). SAVE_ETA_TRIGGER[lina_w_anti_gap]=1.20 (W prep + 0.1 safety margin; PA blink 0.25s and other sub-1.1s arrivals auto-skip). SAVE_FIRE_DISTANCE[lina_w_anti_gap]=800 (generous spatial gate; W is AoE not displacement so 250u SELF_PUSH_FLOOR doesn't apply). _GAP_CLOSE_SAVES gains 'lina_w_anti_gap' as TAIL per Q1 decision (items first, W as last resort). New Defense menu toggle 'Enable W anti-gap defensive' default true. **Decisions baked from owner planning session** (DEFENSE_PLAN.md sec 6): Q1 tail-only firing, Q2 FC shared CD with 5s pre-combo skip gate (deferred to v0.5.45), Q3 R defensive SKIPPED entirely, Q4 keep all 7 LINA_SAVE_OVERRIDES authoritative + promote targeted_burst + lockdown LINA_CATEGORY_PATCHES to per-mod overrides (v0.5.46 D0 sub-task), Q5 W for targeted_disable deferred to v0.5.47+ contingent on evidence, Q6 no doctrine change for defensive items, Q7 composer-tier audit BEFORE v0.5.46 ships, Q8 FC predicate gains fiery_soul_stacks >= 5 high-stacks gate (v0.5.45 scope). **Verification on next demo**: in a Bara fight where all chain items are on CD (likely after 2-3 prior saves spent in a teamfight), expect 'w_defensive_fire intent=armed_bara_charge mana=X w_cost=Y' tlog at v=2 followed by 'issued ability=lina_light_strike_array layer=def'. If mana below floor expect 'w_defensive_skip_mana mana=X need=Y' at v=3 instead. If W silenced/muted expect chain falls through (no w_defensive_fire emit). Bara should stun on impact at Lina position. Pre-v0.5.44 baseline = no_effective_save_for_threat (the v0.5.42 demo showed this; brain has nothing to fire). Lina.lua 7198 -> 7269 lines (+71, within the +80-120 spec estimate; lower because issue_cast_position helper already existed). Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified, source = runtime SHA verify post-deploy. **Roadmap context** (DEFENSE_PLAN.md sec 4): v0.5.45 = FC defensive refinements + targeted_disable + delayed_aoe per-mod patches. v0.5.46 = type-aware chain composition algorithm (lib-side, opt-in via cfg.compose_chain). v0.5.47+ = mirror to Sniper + uczone-toolkit. Each scoped to one logical change; each rollback-independent.")
+LOG:info("Lina brain v0.5.45 W .fire sub-1.1s gate + Sniper commit-attacker port: two defense-layer additions driven by v0.5.44 demo feedback. **W .fire gate** (DEFENSE_PLAN.md sec 4.2 W refinement track): v0.5.44 demo log showed W firing on PA Phantom Strike at eta=0.04s via the at-impact armed_threats_tick path (which bypasses SAVE_ETA_TRIGGER=1.20). Stun lands 1.1s late which still interrupts PA 4s attack-speed window but is outside spec. Two new gates inside SAVE_FIRE.lina_w_anti_gap.fire: (a) intent-pattern skip for 10 known sub-1.1s arrivals (phantom_assassin_phantom_strike / antimage_blink / queenofpain_blink / riki_blink_strike / slark_pounce / pangolier_swashbuckle / nyx_assassin_vendetta / mirana_leap / weaver_shukuchi / void_spirit_astral_step); (b) belt+suspenders dist gate: skip if any enemy hero within 300u is < 100u from Lina (caster already at melee, W stun 1.1s later is post-fact). Emit w_defensive_skip_too_fast v=3 tlog with reason. Bara/Tusk/MK still pass (caster en-route 1.1s out). **Sniper commit-attacker port** (DEFENSE_PLAN.md sec 4.2 commit-attacker track): port of Sniper.lua state.is_committed_attacker (S3 L4318) + state.sample_velocities attacker-latch (S3 L3921-3940). Sniper uses this OFFENSIVELY (gates D-peel combo); Lina uses DEFENSIVELY (synthesizes virtual threat routing through v0.5.40 dispatcher to fire close-gap saves when melee attacker commits on Lina even without spell threat to react to). New module-level constants: LINA_COMMITTED_ATTACK_WINDOW_S=1.6, LINA_ATTACK_ENGAGE_RADIUS=700, LINA_COMMITTED_ATTACKER_RETREAT_BUFFER=200. New chain table _COMMITTED_ATTACKER_SAVES = item_force_staff / item_hurricane_pike / item_wind_waker / item_cyclone / item_glimmer_cape / lina_w_anti_gap (slim per user Q: displacement + escape + W tail; no BKB/Lotus/Aeon/FC since attackers mostly physical not magical). LINA_SAVE_OVERRIDES['lina_committed_attacker'] = _COMMITTED_ATTACKER_SAVES so dispatcher ResolveSaveOrder finds the chain. New state.attacking_seen_t per-caster latch table + state.committed_attacker_armed_t per-caster re-arm latch. Three helpers: state.sample_attacker_latches (per-tick scan; stamp attacking_seen_t when NPC.IsAttacking true; API-guarded), state.is_committed_attacker_on_self (dist <=700 AND attacking-now-or-recently AND not Target.IsKitingUs), state.scan_and_arm_committed_attackers (per-tick scan of enemies in 700u; if committed AND re-arm latch clear AND menu toggle on, call defense_dispatcher:Dispatch with intent='committed_attacker_<idx>', threat_mod='lina_committed_attacker', threat_caster=h, category_hint='close_gap', record_save callback, fs_shard_window ctx). Per-tick calls wired in OnUpdateEx after armed_threats_tick before pre_face_tick / Layer-1 offense so close-gap save fires before the brain reissues attacks toward the attacker. New Defense menu toggle 'Enable commit-attacker close-gap' default true. Diagnostic tlog committed_attacker_armed v=1 with caster + dist + mvspeed payload (per-arm); chain walker emits its usual resolve_save_order_pick + save_chain_skip + dispatch_blocked telemetry for the synthetic mod, no special wrapping needed. **Verification on next demo**: enemy melee carry walks up to Lina and starts attacking. Expect within ~1.6s: committed_attacker_armed | caster=<hero> | dist=X | mvspeed=Y tlog at v=1, followed by chain walker resolve_save_order_pick head=item_force_staff or similar, followed by issued ability=item_force_staff layer=def (Lina pushed away). For Slark/Naga post-spell auto-attack windows: same trigger; brain now reacts to the AUTO-ATTACK CHAIN itself instead of just the spell. Pre-v0.5.45 baseline = brain ignores auto-attacks unless they're animated as a recognized spell threat. **What's NOT in this release** (deferred to v0.5.45.1 or v0.5.46): FC defensive refinements (Q2 5s pre-combo skip gate + Q8 fiery_soul_stacks>=5 high-stacks gate + fc_offensive_inflight flag + fc_demote_filter drop + HasModifier early-return) and category patches (targeted_disable / delayed_aoe / targeted_burst FC-to-tail). Reason: tight test cycle: shipping commit-attacker isolated lets owner validate without FC noise. **What was confirmed working in v0.5.44 demo log**: W as tail-fallback works exactly per Q1 spec (all 9 fires were chain-walker-tail with every item ahead reporting not_ready). Only edge case was PA blink at-impact which v0.5.45 W .fire gate now closes. Lina.lua 7269 -> 7487 lines (+218: W gate +49 + commit-attacker block +145 + per-tick call +12 + menu toggle +12). Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified, source = runtime SHA verify post-deploy. **Roadmap context** (DEFENSE_PLAN.md sec 4): v0.5.45.1 or v0.5.46 = FC refinements + category patches. v0.5.46 then ships type-aware chain composer (lib-side, opt-in). v0.5.47+ Sniper + toolkit mirror.")
 
 return callbacks

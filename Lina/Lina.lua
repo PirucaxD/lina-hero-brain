@@ -40,6 +40,25 @@ local UO = Enum.UnitOrder
 -- chain. The L1853 line drops its `local` keyword so the assignment
 -- targets this forward-declared upvalue instead of shadowing it.
 local defense_dispatcher
+-- v0.5.47.3 forward declarations: same class of upvalue-capture bug as
+-- defense_dispatcher above. v0.5.47.2 demo log L5070-5076:
+--
+--   [Lua error] C:\Umbrella\scripts\Lina.lua:982: attempt to call a nil
+--   value (global 'fs_shard_window_active')
+--   stack traceback:
+--       Lina.lua:982: in field 'scan_and_arm_committed_attackers'
+--
+-- fs_shard_window_active is defined at ~L2090, record_save at ~L2099,
+-- but state.scan_and_arm_committed_attackers (L797 area) calls both
+-- inside its Dispatch invocation. Lua resolved them as nil globals at
+-- function-call time; the call crashed the function, no save was issued
+-- for the auto-attack commit. User reported: "Target that are commiting
+-- to attack lina have response only for skills, auto attacks no" --
+-- ROOT CAUSE was the crashed Dispatch, not a chain or arm-time gate.
+-- L2090 / L2099 lines drop their `local` keyword to target these
+-- forward-declared upvalues instead of shadowing them.
+local fs_shard_window_active
+local record_save
 
 -- ThreatData owns these universal Dota-side facts; the consuming logic stays
 -- in this hero file (Tier-2 data-only extraction).
@@ -2087,7 +2106,12 @@ local function mark_layer2_fired(c)    return defense_dispatcher:MarkFired(c) en
 -- compute_fs_state (grep `shard_window = true`) so the offensive and defensive
 -- sides cannot disagree on the window boundary. Defined here, BEFORE the
 -- first Dispatch call site in try_save_self below.
-local function fs_shard_window_active()
+-- v0.5.47.3: dropped `local` keyword so this assigns the forward-declared
+-- upvalue near top-of-file (see comment near L35). Functions defined earlier
+-- (scan_and_arm_committed_attackers L797) reference fs_shard_window_active
+-- inside their Dispatch call; without the forward declaration the reference
+-- captured a nil global and crashed at runtime.
+function fs_shard_window_active()
     local me = state.self_npc
     return me ~= nil
        and NPCLib.has_shard(me)
@@ -2096,7 +2120,12 @@ local function fs_shard_window_active()
 end
 state.fs_shard_window_active = fs_shard_window_active  -- harness/test handle
 
-local function record_save(intent, item_name, threat_mod, threat_caster)
+-- v0.5.47.3: dropped `local` keyword so this assigns the forward-declared
+-- upvalue near top-of-file. Same upvalue-capture rationale as
+-- fs_shard_window_active above; scan_and_arm_committed_attackers passes
+-- record_save as the on_save_fired callback in its Dispatch call so the
+-- forward declaration must already exist at L797 function-creation time.
+function record_save(intent, item_name, threat_mod, threat_caster)
     state.last_save_intent = item_name .. ":" .. intent
     state.l2_counter = state.l2_counter + 1
     if not intent:find("^save_ally") then
@@ -7988,6 +8017,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.47.2 hotfix: W aim policy simplified to self-origin-default + max(stamped, live) speed source for the live-eta gate. Two structural fixes from the v0.5.47.1 demo log. **Bug 3 (Tusk W cast at completely wrong position)**: v0.5.46.3 predict-aim used Geometry.PredictPos which extrapolates Tusk velocity 1.12s forward; but for a snowball the actual physics is 'snowball PICKS UP Lina at Lina position' = arrival point IS Lina origin not past Lina. Predict-aim gave wrong endpoint. User spec v0.5.47.2: 'Tusk W is completely wrong, need a full review. W was casted on a completly wrong position. It should be casted on self in the right timing'. **Fix**: new per-mod aim policy via state.W_aim_at_caster_mods allowlist. DEFAULT for all threats is Lina origin (state.self_npc position); this catches Bara at impact (Bara stops at Lina), Tusk on snowball arrival (snowball picks up Lina at her position), PA after blink (PA at Lina), committed melee attackers (stay at Lina). ALLOWLIST exception: interruptible channels (currently just modifier_witch_doctor_death_ward) aim W at the threat CASTER current position to stun the caster mid-channel before the channel resolves. New tlog aim field values: self_origin (default with caster handle) / caster_origin (allowlist hit) / self_origin_fallback (no caster handle). Predict-aim path REMOVED from default; was overengineered. **Bug 2 (Bara timing still wrong + Tusk timing wrong)**: v0.5.47.1 demo log Tusk stream: speed=310 in_window=n real_eta=3.20 d=993 (chain peek never fired live-MS), then eta_critical panic at d=419 eta=0.35 stamped fired W (0.77s after snowball arrival). Root cause: NPC.GetMoveSpeed(Tusk_hero) returns Tusk BASE MS ~310 during snowball, not the snowball entity travel speed ~1200. Live-MS gate using just live_speed underestimates. **Fix**: in armed_chain_peek for lina_w_anti_gap, eff_speed = math.max(stamped_eta_speed, NPC.GetMoveSpeed(caster)). Tusk stamped=1200 vs live=310 -> max=1200, real_eta = d/1200 = correct snowball ETA. Bara stamped=600 vs live=515 -> max=600 (live charge speed ramps up so next frame may have live=620+ in which case live wins). Bara fast-charge with talents+items: live=900+ -> live wins. PA blink unaffected (instant_blink path bypasses chain peek). w_live_eta_gate tlog now emits both live and stamped fields plus the eff speed for transparency. **Other v0.5.47.1 demo findings**: WD Death Ward PASSED (W as chain head fired with caster aim). Underlord Pit fired correctly with W as last save. PA blink working. Commit-attacker working (caster=spirit_breaker dist=233 mvspeed=762 confirms commit-attacker armed correctly for an enemy auto-attacking Lina, per user note 5 'AA = Auto attack'). **Queued for v0.5.48+**: move Lina to safer position during cyclone-self / WW-self (user good-to-have); Disruptor same threat-type response; Items Manager subsystem hunt (third framework auto-cast layer after Dodger and Linkbreaker per Sniper L7814; potential source of unexplained casts); Ethereal Blade as escape mechanic in melee-threat chains. **Lina.lua 7962 -> 7991 lines (+29). SHA refreshed. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Tusk expects aim=self_origin (NOT predict_caster or caster_origin) and w_live_eta_gate stream showing speed=1200 effective (stamped winning over live 310) with in_window=y when d~1344; W lands at Lina origin when snowball arrives, catches Tusk on impact. Bara expects same self_origin aim with eff speed = max(stamped 600, live charge speed); W lands at Lina origin as Bara arrives. WD Death Ward expects aim=caster_origin (allowlist hit). PA blink expects aim=self_origin (default; caster present). Committed attacker (Bara walk-up): aim=self_origin (default).")
+LOG:info("Lina brain v0.5.47.3 hotfix: fs_shard_window_active + record_save upvalue capture fix. Same class of bug as v0.5.46.3 defense_dispatcher. v0.5.47.2 demo log L5070-5076 caught a runtime error: `[Lua error] C:\\Umbrella\\scripts\\Lina.lua:982: attempt to call a nil value (global fs_shard_window_active)` inside the scan_and_arm_committed_attackers Dispatch call. Root cause: fs_shard_window_active local function is defined at L2090 + record_save at L2099 but state.scan_and_arm_committed_attackers (L797 area) references both inside its Dispatch invocation. At function-creation time the locals do not exist yet so Lua resolves both as nil GLOBALS; at call time the function CRASHES on `fs_shard_window_active()`. Every committed_attacker_armed log was immediately followed by `[Lua error] ... in field scan_and_arm_committed_attackers` then `[DEBUG] pre_face_skip reason=not_self_alive` -- the Dispatch crashed, the chain walker never ran, no save fired. User reported: 'Target that are commiting to attack lina have response only for skills, auto attacks no. Sniper have this feature. We need this'. ROOT CAUSE was the crashed Dispatch on every auto-attack commit, NOT a missing chain or arm-time gate. v0.5.45 originally introduced commit-attacker; v0.5.46.3 fixed the defense_dispatcher upvalue; v0.5.47.3 closes the final two upvalue captures in the same scan function. **Fix**: forward-declare `local fs_shard_window_active` + `local record_save` near the top of file (adjacent to the v0.5.46.3 defense_dispatcher forward declaration); drop the `local` keyword from the L2090 + L2099 assignments so they target the forward-declared upvalues. **Bug 2 (timing off; user spec 'Time is off, we should make the calculus to intercept the skills')**: not in v0.5.47.3 scope. The intercept calculation requires the Phase 2 catalog work (THREAT_ARRIVAL_TIMING table in lib/threat_data.lua per the Option C roadmap with cast_point + travel_speed + travel_distance_fn + post_cast_delay per modifier). Queued for v0.5.48. **Bug 4 (PA second blink no W response)**: probable side-effect of the runtime-error crash trashing dispatch state on subsequent ticks. With v0.5.47.3 the dispatch flow runs cleanly; subsequent PA blinks should fire saves. Re-verify on next demo. **Other v0.5.47.2 demo confirmation**: WD Death Ward PASSED (v0.5.47.1 Bug 1 fix held). Tusk W intercept timing not in scope (needs Bug 2 catalog work). **Verification on next demo**: scan_and_arm_committed_attackers should run cleanly with NO Lua error stack traces in the log; auto-attack commits (PA at melee, Bara walk-up after charge stun, Slark post-pounce auto chain, etc.) should now produce committed_attacker_armed FOLLOWED BY a chain walker save fire (Force / Pike / WW / etc. from _COMMITTED_ATTACKER_SAVES). PA second blink should get the same chain response. **Lina.lua 7991 -> 8020 lines (+29). SHA refreshed. Lib unchanged from v0.5.42. luac clean, no BOM, lesson 15 verified. Source = runtime SHA verify post-deploy.")
 
 return callbacks

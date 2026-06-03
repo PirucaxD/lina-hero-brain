@@ -3668,22 +3668,32 @@ end
 --   caster; fire-timing handled by other paths):
 --     window = [0, infty] (always passes; aim still applies).
 state.compute_w_fire_window = function(entry, speed)
-    if not entry then return 1.07, 1.32 end
-    local W_LEAD           = 1.12
-    local W_AOE_RADIUS     = 225
-    local CAST_POINT_FLOOR = 0.6
+    -- v0.5.49.1: lower bound is W_LEAD for BOTH homing kinds. User spec
+    -- from v0.5.49 demo: "Bara is getting stunned after hitting lina and
+    -- not before. This should hit before". Below W_LEAD, W detonates
+    -- AFTER the threat arrives = post-impact stun = charge stun already
+    -- lands on Lina. The math:
+    --   impact_t >  W_LEAD : W detonates BEFORE arrival; threat in
+    --                        transit at (impact_t - W_LEAD) * speed
+    --                        from Lina. Catch iff distance <= 225.
+    --   impact_t == W_LEAD : perfect (W detonates AT arrival).
+    --   impact_t <  W_LEAD : W detonates AFTER arrival = SKIP.
+    -- Window: [W_LEAD, W_LEAD + 225/speed]. v0.5.49 used CAST_POINT_FLOOR
+    -- =0.6 which allowed fires in [0.6, W_LEAD) = guaranteed late.
+    -- v0.5.49 demo fire 3 confirmed (impact_t=1.09 fired then W stunned
+    -- Bara 0.03s AFTER charge stun landed on Lina).
+    if not entry then return 1.12, 1.62 end
+    local W_LEAD       = 1.12
+    local W_AOE_RADIUS = 225
     local k = entry.kind or ""
     if k == "channel_at_caster" or k == "cast_point_targeted" then
         return 0, math.huge
     end
     local margin = (speed and speed > 0) and (W_AOE_RADIUS / speed) or 0.20
     local upper  = W_LEAD + margin
-    local lower
-    if k == "homing_carry" then
-        lower = math.max(CAST_POINT_FLOOR, W_LEAD - margin)
-    else
-        lower = CAST_POINT_FLOOR
-    end
+    -- Same lower for homing_charge AND homing_carry: must be >= W_LEAD
+    -- so W detonates ON or BEFORE the threat arrives at Lina.
+    local lower  = W_LEAD
     return lower, upper
 end
 
@@ -8199,6 +8209,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.49 full math review on W fire window. User spec: 'Do a full review on the math we are doing, we are applying a little bit off'. **The audit**: W has W_LEAD=1.12s prep (0.6 cast point + 0.5 delay + 0.02 anim) and 225r AoE. The pre-v0.5.49 window [W_LEAD - 0.05, W_LEAD + 0.20] = [1.07, 1.32] was HARDCODED and treated all threat kinds identically. Three bugs surfaced from the math review: **Bug 1**: upper bound 1.32 misses fast targets. At impact_t=1.32 with speed=1675 (Tusk), W detonates 0.20s before arrival -> threat is 0.20*1675=335u from Lina at detonation -> OUTSIDE 225r AoE -> MISS. **Bug 2**: lower bound 1.07 wastes fire opportunities for hit-and-stop threats. Bara STOPS at Lina on arrival; W can detonate any time after Lina's W cast point completes (0.6s floor; below that mid-cast stun fizzles W). For Bara at speed 500, the window could be [0.6, 1.57] (much wider than 1.07-1.32). **Bug 3**: symmetric window for carry-Lina threats was wrong. The carry threat CONTINUES past Lina at the same speed; W must detonate within ±225/speed of arrival. The right window is SYMMETRIC and TIGHT around W_LEAD, not the 0.05/0.20 asymmetric hardcoded values. **Fix**: new state.compute_w_fire_window(entry, speed) helper returning (lower, upper) bounds per-mod based on catalog kind. Three kinds: (1) **homing_carry** (Tusk snowball; passes through target): window = [max(CAST_POINT_FLOOR=0.6, W_LEAD - 225/speed), W_LEAD + 225/speed]. At Tusk speed 1675, window ~ [0.99, 1.25] (much tighter than 1.07-1.32). (2) **homing_charge / instant_blink** (Bara / PA; stops at target): window = [CAST_POINT_FLOOR=0.6, W_LEAD + 225/speed]. Bara at speed 500 -> [0.6, 1.57] (much wider lower). Bara at speed 1200 (talents+items) -> [0.6, 1.31] (upper caps fast Bara). (3) **channel_at_caster / cast_point_targeted** (WD / Lion; stationary caster; fire timing handled by other paths): window = [0, infty] (catalog gate always passes; aim policy via impact_pos still applies). **Implementation**: armed_chain_peek W block now consults state.compute_w_fire_window with the catalog entry + computed speed, gets (lower, upper) bounds. w_catalog_eta_gate tlog now emits lower / upper / kind fields for transparency. CAST_POINT_FLOOR=0.6 protects Lina from firing W when the threat would stun her mid-cast (cast point window) and fizzle the spell. **Other findings from the audit**: (a) catalog gate only fires W for HOMING threats (Bara, Tusk); other kinds (channel_at_caster, cast_point_targeted) use catalog only for AIM (impact_pos field). (b) Instant_blink threats (PA) bypass armed_chain_peek entirely via the instant_blink branch in armed_threats_tick; catalog kind=instant_blink unused for gate timing but documented for completeness. (c) Lua multi-return gotcha caught mid-edit: `a and f() or x, y` does NOT assign both returns from f() to both targets; used explicit if/else for the window lookup. **Verification on next demo**: w_catalog_eta_gate tlog stream now includes lower, upper, kind. Bara expects window like [0.6, 1.31-1.57] depending on live speed; gate fires anywhere in range. Tusk expects [0.99, 1.25] tight window; gate fires when impact_t crosses into that range. WD / Lion expect window [0, inf] (catalog gate always passes, but in_window=y immediately; other paths handle fire timing). **Lina.lua 8143 -> 8202 lines (+59). lib/threat_data.lua unchanged. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
+LOG:info("Lina brain v0.5.49.1 hotfix: lower bound = W_LEAD (stun BEFORE impact, not after). v0.5.49 demo log fire 3 (L2327, impact_t=1.09 < W_LEAD=1.12, in_window=y under v0.5.49 lower=0.60) confirmed the bug: Bara hit Lina FIRST, charge stun applied to Lina, THEN W stunned Bara 0.03s later. User spec: 'Bara is getting stunned after hitting lina and not before. This should hit before'. **Root cause**: v0.5.49 lower bound was CAST_POINT_FLOOR=0.6s (Lina W cast point) which guards against mid-cast fizzle but does NOT guarantee W lands BEFORE the threat. For homing threats, impact_t < W_LEAD mathematically means W detonates AFTER the threat arrives = late stun. **The math**: impact_t > W_LEAD -> W detonates BEFORE arrival, threat in transit at (impact_t - W_LEAD)*speed from Lina at W detonation; catch iff that distance <= W_AOE_RADIUS=225. impact_t == W_LEAD -> perfect timing (W detonates AT arrival). impact_t < W_LEAD -> W detonates AFTER arrival = SKIP. **Fix**: lower bound = W_LEAD for BOTH homing_charge AND homing_carry. Window now [W_LEAD, W_LEAD + 225/speed]. For Bara at speed 437: window [1.12, 1.64] (was [0.60, 1.64]). For Bara at speed 600: window [1.12, 1.50]. For Tusk at speed 1675: window [1.12, 1.25] (was [0.99, 1.25]). channel_at_caster / cast_point_targeted unchanged [0, inf]. **Outcome on next demo**: Bara fires at upper edge of window (impact_t just below 1.64 for slow Bara), W detonates ~0.5s BEFORE Bara would arrive, Bara stunned mid-charge ~225u from Lina (edge of AoE; accounts for acceleration). Tusk fires at impact_t just below 1.25, W detonates 0.13s before snowball arrival, snowball + Tusk caught mid-roll just before pickup. Late W fires (impact_t < W_LEAD) NO LONGER happen -- W simply doesn't fire and the chain returns no_effective_save_for_threat for that brief window. This is the user's preferred behavior: no W is better than late W. **What was confirmed in v0.5.49 demo**: math review identified three bugs, fixed two (upper bound for fast targets; symmetric vs wide-lower window per kind). Bug 3 (asymmetric 0.05/0.20 was empirical) addressed structurally via per-mod kind math. The remaining bug was the lower bound semantic -- v0.5.49.1 closes it. **Lina.lua 8202 -> 8212 lines (+10). lib/threat_data.lua unchanged. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
 
 return callbacks

@@ -8134,8 +8134,17 @@ local function handle_unrecognized_harvest(npc, modifier, mod_name, is_self)
     -- Harvest unrecognized self-threats so real names can be wired (lesson 111).
     -- v0.5.2: also skip threats in LINA_EXTRA_THREATS - those are wired
     -- hero-side and should not appear as "unrecognized" in the harvest.
+    -- v0.5.59: also skip LINA_DEFER_TO_ARMED entries. Those modifiers ARE
+    -- recognized; they just route to an armed_threats entry instead of
+    -- firing a save chain on modifier-create. Without this exclusion the
+    -- v0.5.55 demo logged threat_unrecognized for
+    -- modifier_spirit_breaker_charge_of_darkness_vision on every Bara
+    -- charge, even though LINA_DEFER_TO_ARMED already mapped it to
+    -- bara_charge. Adding new defer entries now silences the harvest log
+    -- automatically.
     if is_self and not (THREATS_ON_SELF and THREATS_ON_SELF[mod_name])
-       and not LINA_EXTRA_THREATS[mod_name] then
+       and not LINA_EXTRA_THREATS[mod_name]
+       and not LINA_DEFER_TO_ARMED[mod_name] then
         local caster = Modifier.GetCaster(modifier)
         if caster and Entity.IsEntity(caster) and Target.IsEnemyHero
            and Target.IsEnemyHero(caster, state.self_npc)
@@ -8634,6 +8643,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.58: Phase 5 slice 2, Force Staff now picks a safe direction (Pike + Force share the same harness). User: 'Go on' on the Phase 5 progression. **The refactor**: state.pending_pike_self renamed to state.pending_self_push (gains item_name field); state.pending_pike_self_tick renamed to state.pending_self_push_tick (generic over item_name). New state.try_self_push helper centralises the Escape.PickDir + two-phase turn-then-fire pattern so both Pike's self-cast fallback and Force Staff's .fire body call one shared implementation. Pike's first-cast-drop pike_reissue stamp is the only item-specific behaviour inside the helper (gated on item_name == 'item_hurricane_pike'). **The Force wire**: SAVE_FIRE.item_force_staff.fire body collapses from gate-only state.safe_push_destination(threat_caster, 600) + raw issue_item_self to a single state.try_self_push call. Force Staff now rotates to face a safe direction BEFORE pushing 600u, same as Pike. **What is NOT in this slice**: EUL (item_cyclone) + WW (item_wind_waker) need a different move-then-cast harness (2.5s/3s airborne, not a push along facing); queued for Phase 5 slice 3. **New tlogs**: force_self_fired phase=immediate|turned, force_self_turnaway, force_self_turnaway_timeout (per-item via item_name in pending). pike_self_* tlogs unchanged. **Files**: Lina.lua only (+50 lines net: helper + tick generalisation + Force wire). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.57. **Verification on next demo**: Bara hits Lina with Force Staff in the chain. Force fires only when there is a viable safe direction; if Lina is facing the threat, force_self_turnaway logged, Lina turns, force_self_fired phase=turned. If she is already facing safely: force_self_fired phase=immediate. If the picker finds no safe destination (terrain blocked, all 7 angles dangerous): chain falls through to the next save instead of firing Force into a bad spot. Pike unchanged in behaviour but its .fire body shrinks to a single state.try_self_push call.")
+LOG:info("Lina brain v0.5.59 (log-hygiene): harvest skips LINA_DEFER_TO_ARMED. User: 'Add it' on the v0.5.58 demo finding. **The noise**: handle_unrecognized_harvest emitted threat_unrecognized | mod=modifier_spirit_breaker_charge_of_darkness_vision on every Bara charge in the v0.5.58 demo log, even though LINA_DEFER_TO_ARMED at Lina.lua:1114 already maps that modifier to the bara_charge armed entry. The harvest's exclusion list was THREATS_ON_SELF + LINA_EXTRA_THREATS only; LINA_DEFER_TO_ARMED was missing. **The fix**: one-line addition to handle_unrecognized_harvest, also skips LINA_DEFER_TO_ARMED[mod_name]. Silences the vision modifier today and any future DEFER_TO_ARMED additions (modifier_tusk_snowball_target, modifier_phantom_assassin_phantom_strike_target are also in DEFER_TO_ARMED but did not happen to trigger in the v0.5.58 demo). **Behaviour change**: log noise only. Save dispatch unaffected; the LINA_DEFER_TO_ARMED check in handle_threat_on_self is at a different site and still fires. **Files**: Lina.lua only (+8 lines comment + 1 condition). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.58. **Verification on next demo**: zero threat_unrecognized lines for the 3 DEFER_TO_ARMED modifiers. Real unrecognized threats (genuine gaps in the catalog) still log as before.")
 
 return callbacks

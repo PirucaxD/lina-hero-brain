@@ -1982,29 +1982,24 @@ state.try_self_push = function(intent, item, item_name, push_dist, threat_caster
     return moved
 end
 
--- v0.5.60 Phase 5 slice 3 (rewritten v0.5.62): post-airborne move helper for
--- EUL / WW. v0.5.60 used Order.Issue(queue=true) and assumed the engine
--- would dispatch the queued move when cyclone ended. The v0.5.61 demo log
--- proved that wrong: the queue=true order is sent, but the moment the
--- modifier expires the baseline UCZone Hit&Run / Orbwalker wakes up and
--- issues a USER-tagged MOVE_TO_POSITION that REPLACES the queued move
--- (L3254, L3267, L3304 of debug.log all show USER orders within 1s of
--- airborne-end, all overriding the brain dest with local kite positions).
+-- v0.5.60 Phase 5 slice 3 (rewritten v0.5.62, rewritten again v0.5.63):
+-- post-airborne move helper for EUL / WW.
 --
--- v0.5.62 design:
---   1. Pause Native HR/OW (lib/native) so the baseline cannot issue
---      USER moves during the airborne + post-move window.
---   2. Arm state.pending_post_airborne_move with dest + modifier_name +
---      deadline_restore.
---   3. state.pending_post_airborne_move_tick (hooked into OnUpdateEx)
---      waits for the modifier to be observed at least once (cast resolved)
---      then disappear (airborne ended), then issues the MOVE_TO_POSITION.
---      Native is restored on deadline_restore (~1.5s after expected
---      airborne end) so baseline orbwalker resumes for any subsequent
---      micro-positioning.
---   4. Belt-and-suspenders: ALSO issue the queue=true move at .fire time,
---      in case the engine honours it. Doubles up but harmless (tick's
---      reissue replaces it at airborne end, same destination).
+-- v0.5.60: queue=true MOVE_TO_POSITION issued at .fire. Preempted at
+--   airborne-end by baseline Hit&Run / Orbwalker USER orders (per v0.5.61
+--   demo L3254, L3267, L3304).
+-- v0.5.62: added Native.PauseHitRun for the window. **User feedback after
+--   v0.5.62 test**: do NOT disable HR/OW. The framework's restore path
+--   has a cloud-sync menu lag and HR does not reliably come back when
+--   re-enabled (user already tested this regression).
+-- v0.5.63: NO Native pause. Tick re-issues the MOVE_TO_POSITION every
+--   ~100ms until Lina arrives within 100u of dest OR the deadline expires
+--   (7s, covers airborne up to 3s + walk 600u at 300 MS ~ 2s + grace).
+--   Re-issuing at ~10/sec with a unique intent per call (bypasses
+--   safe_issue's dedup) keeps the brain's MOVE as the most-recent order
+--   on enough frames to dominate the baseline orbwalker's interleaved
+--   USER MOVEs. Lina walks toward the brain's dest; baseline kites have
+--   their effect on the OFF frames but the net direction is brain-dest.
 --
 -- Returns true if pending was armed (cast can proceed and tick will move
 -- her), false if no safe destination was found (in which case Lina just
@@ -2015,13 +2010,9 @@ state.queue_safe_post_move = function(intent, push_dist, threat_caster, modifier
     if not me then return false end
     local _, landing = state.compute_safe_dest(threat_caster, push_dist)
     if not landing then return false end
-    -- Pause native HR/OW for the airborne + post-move window. RestoreHitRun
-    -- happens in the tick on deadline_restore. Native.PauseHitRun is
-    -- idempotent and respects the v0.5.32 user-config guard (returns false
-    -- if user has hr_override OFF).
-    pcall(Native.PauseHitRun, LINA_MENU)
-    -- Belt: queue=true move. If the engine honours it across the airborne
-    -- window, Lina starts moving the instant she lands.
+    -- Belt: queue=true at .fire. If the engine honours it across the
+    -- airborne window, Lina starts moving the instant she lands and the
+    -- tick's reissues just keep her on course.
     safe_issue {
         hero = HERO_KEY, layer = "def",
         intent = intent .. "_post_move",
@@ -2029,17 +2020,15 @@ state.queue_safe_post_move = function(intent, push_dist, threat_caster, modifier
         unit = me, position = landing,
         queue = true,
     }
-    -- Suspenders: tick fires the move after observing modifier appear and
-    -- then disappear. deadline_restore = airborne max (3s for WW) + 1.5s
-    -- grace covers EUL (2.5s) and WW (3s) without leaving the orbwalker
-    -- paused for too long.
+    -- Suspenders: tick re-issues every ~100ms after airborne ends.
     state.pending_post_airborne_move = {
         dest              = landing,
         modifier_name     = modifier_name,
-        deadline_restore  = now() + 4.5,
+        deadline          = now() + 7.0,
         intent            = intent,
         observed_airborne = false,
-        move_issued       = false,
+        last_reissue_t    = 0,
+        reissue_seq       = 0,
     }
     tlog(1, intent .. "_post_move", {
         x = string.format("%.0f", landing.x),
@@ -2049,28 +2038,26 @@ state.queue_safe_post_move = function(intent, push_dist, threat_caster, modifier
     return true
 end
 
--- v0.5.62: tick driver for state.pending_post_airborne_move. Hooked into
--- callbacks.OnUpdateEx alongside the other state.*_tick functions. Three
--- phases:
+-- v0.5.63: tick driver for state.pending_post_airborne_move. Hooked into
+-- callbacks.OnUpdateEx. Three phases:
 --   1. Wait for the airborne modifier to be observed at least once. The
---      cast itself takes a few frames to resolve into the modifier; an
---      "is modifier absent?" check immediately after .fire would fire
---      the move BEFORE the cast lands. observed_airborne latches true
---      the first tick the modifier is present.
---   2. Wait for the modifier to disappear. While airborne, defer.
---   3. Issue the move (once). Keep Native paused until deadline_restore
---      so the post-move can stick before baseline orbwalker resumes.
+--      cast takes a few frames to resolve into the modifier; without this
+--      latch the tick would fire MOVE before the cast lands.
+--   2. While airborne, defer (Lina untargetable; no point issuing MOVE).
+--   3. Airborne ended. Re-issue MOVE_TO_POSITION every ~100ms until Lina
+--      is within 100u of dest OR deadline expires. Unique intent each
+--      reissue bypasses safe_issue's identifier dedup so every issue
+--      actually reaches the engine.
 state.pending_post_airborne_move_tick = function()
     local p = state.pending_post_airborne_move
     if not p then return end
     local me = state.self_npc
     if not me or not Target.IsAlive(me) then
-        pcall(Native.RestoreHitRun, LINA_MENU)
         state.pending_post_airborne_move = nil
         return
     end
-    if now() > p.deadline_restore then
-        pcall(Native.RestoreHitRun, LINA_MENU)
+    if now() > p.deadline then
+        tlog(2, p.intent .. "_post_move_expired", { reissues = p.reissue_seq or 0 })
         state.pending_post_airborne_move = nil
         return
     end
@@ -2079,28 +2066,48 @@ state.pending_post_airborne_move_tick = function()
         p.observed_airborne = true
         return
     end
-    -- Not airborne now. If we never observed airborne, the cast has not
-    -- resolved yet; wait. (Without this latch the tick would fire the
-    -- move IMMEDIATELY between .fire and the cast taking effect.)
     if not p.observed_airborne then
         return
     end
-    -- Airborne ended. Issue the move once.
-    if not p.move_issued then
-        safe_issue {
-            hero = HERO_KEY, layer = "def",
-            intent = p.intent .. "_post_move_fire",
-            order_type = UO.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
-            unit = me, position = p.dest,
-        }
-        p.move_issued = true
+    -- Arrival check: within 100u of dest. Avoids reissue oscillation when
+    -- Lina is already there and the orbwalker kites locally.
+    local me_pos = Entity.GetAbsOrigin(me)
+    if me_pos then
+        local dx = me_pos.x - p.dest.x
+        local dy = me_pos.y - p.dest.y
+        if (dx * dx + dy * dy) < (100 * 100) then
+            tlog(1, p.intent .. "_post_move_arrived", {
+                reissues = p.reissue_seq or 0,
+                x = string.format("%.0f", me_pos.x),
+                y = string.format("%.0f", me_pos.y),
+            })
+            state.pending_post_airborne_move = nil
+            return
+        end
+    end
+    -- Throttle to ~10 reissues/sec (100ms apart) so the brain order is the
+    -- most-recent on enough frames to dominate baseline orbwalker MOVEs.
+    if (now() - (p.last_reissue_t or 0)) < 0.1 then return end
+    p.last_reissue_t = now()
+    p.reissue_seq    = (p.reissue_seq or 0) + 1
+    -- Unique intent each call bypasses safe_issue's dedup
+    -- (Order.Identifier dedups by hero+layer+intent within PENDING_TTL).
+    safe_issue {
+        hero = HERO_KEY, layer = "def",
+        intent = p.intent .. "_post_move_fire_" .. p.reissue_seq,
+        order_type = UO.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
+        unit = me, position = p.dest,
+    }
+    -- One-time fire tlog on first reissue so the log has a marker for
+    -- "airborne ended, brain pushing Lina toward dest". Subsequent
+    -- reissues are silent to avoid log spam; arrival / expiration tlogs
+    -- capture total reissues at the end.
+    if p.reissue_seq == 1 then
         tlog(1, p.intent .. "_post_move_fired", {
             x = string.format("%.0f", p.dest.x),
             y = string.format("%.0f", p.dest.y),
         })
     end
-    -- Native stays paused until deadline_restore so the post-move can land
-    -- without the baseline orbwalker preempting it.
 end
 
 -- v0.5.58 Phase 5 slice 2: generalized from v0.5.57's pending_pike_self_tick.
@@ -8812,6 +8819,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.62 (hotfix): EUL/WW post-move via tick + Native pause (queue=true alone preempted by baseline). User: 'Check the log, EUL still not moving'. **The diagnosis**: v0.5.61 demo log L3105+ showed save_fire_invoked + cast_verify fired=y for item_cyclone AND eul_post_move tlog with valid dest (-2980, 935). The queued MOVE_TO_POSITION (Q:1) was sent to the engine at L3109. But L3254 at time 73.95s (right after cyclone ends at ~73.23s) shows a USER-tagged MOVE_TO_POSITION (Q:0, front) toward (-1882, 1118) -- the baseline UCZone Hit&Run / Orbwalker waking up and immediately replacing the queued move with a local kite. L3267 + L3304 show more USER-tagged kite orders in rapid succession. The queue=true mechanism either does not survive the cyclone airborne state OR the baseline preempts at airborne-end. **The fix**: tick-driven post-move with Native HR/OW paused. (1) state.queue_safe_post_move now also calls Native.PauseHitRun(LINA_MENU) and arms state.pending_post_airborne_move = {dest, modifier_name, deadline_restore=4.5s, observed_airborne=false, move_issued=false}. (2) New state.pending_post_airborne_move_tick (hooked into OnUpdateEx) waits for the modifier to appear at least once (cast resolved) then disappear (airborne ended), THEN issues a fresh MOVE_TO_POSITION. Native stays paused until deadline_restore so the baseline orbwalker cannot preempt the post-move during its critical first ~1.5s. (3) The queue=true issue at .fire stays as belt-and-suspenders; if the engine honours it, Lina moves at airborne-end with no tick delay. The tick's reissue then replaces it (same dest, harmless). **EUL .fire passes modifier_name='modifier_eul_cyclone'; WW passes 'modifier_wind_waker'**. Pike + Force unchanged from v0.5.58 (turn-then-push has no airborne state). **New tlogs**: <intent>_post_move_fired x= y= when the tick actually issues the move (separate from <intent>_post_move at arm time). **Files**: Lina.lua only (+50 lines: tick fn + Native pause + state decl + tick wiring + .fire modifier param). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.61. **Verification on next demo**: EUL or WW fires -> save_fire_invoked + cast verified + eul_post_move tlog (arm). Within 1-3s: airborne modifier observed by tick (observed_airborne latches true). At airborne end: tick fires eul_post_move_fired tlog with same x/y. Lina walks toward landing. ZERO USER-tagged MOVE_TO_POSITION orders should appear in the 1.5s window after airborne ends (Native paused). Baseline orbwalker resumes after deadline_restore (~4.5s after .fire).")
+LOG:info("Lina brain v0.5.63 (hotfix): EUL/WW post-move via re-issue loop, NO Native disable. User: 'we shouldnt disable hit and run, weve already tested it and it does not come back when reactivate due to lag to cloud setting. What we can do is re-issue the position till it reachs it'. **v0.5.62 was wrong direction**: pausing Native HR/OW would prevent the baseline orbwalker from preempting our post-airborne MOVE, but the framework restore path is unreliable (cloud-sync menu lag, HR stays off after RestoreHitRun returns), so users would lose their auto-attack after every EUL/WW save. **v0.5.63 design**: NO Native pause / restore. The tick re-issues MOVE_TO_POSITION every ~100ms until Lina arrives within 100u of dest OR the deadline expires (7s, covers airborne up to 3s + walk 600u at 300 MS ~ 2s + grace). Each reissue uses a unique intent (intent_post_move_fire_N where N increments) to bypass safe_issue's dedup; without that, only the first reissue would actually reach the engine. ~10/sec reissue rate keeps the brain's MOVE as the most-recent order on enough frames to dominate the baseline orbwalker's interleaved USER MOVEs. Lina walks toward the brain's dest; baseline kites have effect on the OFF frames but the net direction is brain-dest. **Removed**: pcall(Native.PauseHitRun, LINA_MENU) at .fire entry; pcall(Native.RestoreHitRun, LINA_MENU) in tick (on dead/timeout). pending_post_airborne_move dropped move_issued field, added last_reissue_t + reissue_seq. deadline renamed from deadline_restore (no Native restore to gate). **Belt-and-suspenders**: queue=true MOVE issue at .fire STAYS in case the engine honours it (Lina starts moving the instant airborne ends, tick reissues keep her on course). **Arrival logic**: tick checks dist_sqr < 100*100 each iteration; emits <intent>_post_move_arrived tlog with reissue count and clears pending. **Timeout**: deadline emits <intent>_post_move_expired with reissue count. **New tlogs**: eul_post_move (arm, unchanged), eul_post_move_fired (FIRST reissue marker, ~1 per save), eul_post_move_arrived OR eul_post_move_expired (end). Pike + Force unchanged. **Files**: Lina.lua only (~30 lines net swap). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.61. **Verification on next demo**: EUL or WW fires -> save_fire_invoked + cast_verify + eul_post_move (arm). Airborne ends -> eul_post_move_fired (first reissue). Lina walks toward dest. After arrival -> eul_post_move_arrived with reissue count ~10-20 (depends on walk time). Native HR/OW NEVER touched -- user keeps their auto-attack intact across the save.")
 
 return callbacks

@@ -1892,6 +1892,132 @@ ThreatData.THREAT_ARRIVAL_TIMING = {
         post_cast_delay = 0,
         impact_pos      = "self",
     },
+
+    -- v0.5.69 Phase 4 slice 4: more projectiles + late-stage threats.
+    -- 8 new entries. Same cast_point_targeted approximation pattern as
+    -- slices 1-3 (kind taxonomy still lacks projectile_homing /
+    -- cast_point_aoe variants). Cast point + modifier names from common
+    -- Dota knowledge; refine when a consumer comes online and demo
+    -- evidence is available.
+
+    -- Pudge Meat Hook: skill-shot projectile that drags hit target back
+    -- to Pudge. Cast point 0.3s. impact_pos=self (Lina is hooked).
+    -- Pre-cast saves: BKB blocks the magic damage but NOT the drag (the
+    -- hook is undispellable). Lotus reflect doesn't work. Eul / WW dodge
+    -- via airborne. Best save is the W stun on Pudge during the cast
+    -- point or the hook flight.
+    modifier_pudge_meat_hook = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "pudge_meat_hook",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Mirana Sacred Arrow: long-range straight-line projectile, stun +
+    -- damage that scales with travel distance. Cast point 0.3s.
+    -- impact_pos=self (Lina is the target). BKB blocks; Lotus doesn't
+    -- reflect; airborne dodge works.
+    modifier_mirana_arrow = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "mirana_arrow",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Skywrath Mystic Flare: AoE-at-ground thinker that does massive
+    -- damage over 2s (split across targets, full damage if alone). Cast
+    -- point 0.5s. impact_pos=self (the AoE catches Lina if she's in it).
+    -- Best save: BKB during cast point, OR move out of the radius
+    -- (375u) during the 2s damage window.
+    modifier_skywrath_mage_mystic_flare_thinker = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "skywrath_mage_mystic_flare",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.5,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Ogre Magi Fireblast: single-target projectile stun + damage. Cast
+    -- point 0.4s. impact_pos=self. Multicast doubles / triples the
+    -- effect on chance. BKB blocks; airborne dodge works.
+    modifier_ogre_magi_fireblast = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "ogre_magi_fireblast",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.4,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Crystal Maiden Frostbite: single-target root + DoT. Cast point
+    -- 0.3s. impact_pos=self. Lotus reflect works (it's a debuff).
+    -- BKB blocks the magic damage AND the root.
+    modifier_crystal_maiden_frostbite = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "crystal_maiden_frostbite",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Jakiro Macropyre: long line of fire damage from a thinker entity.
+    -- Cast point 0.5s. impact_pos=self (Lina catches the line damage if
+    -- she's in it). Move out of the line during the 7-9s damage window.
+    modifier_jakiro_macropyre_thinker = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "jakiro_macropyre",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.5,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Witch Doctor Maledict: single-target curse + delayed damage burst
+    -- at every 4s tick based on HP lost. Cast point 0.3s. impact_pos=
+    -- self. The dispellable curse can be cleansed (BKB / Lotus / Manta);
+    -- the damage bursts are the real threat and they're prophylactic.
+    modifier_witch_doctor_maledict = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "witch_doctor_maledict",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Dazzle Poison Touch: chain stun + slow + damage starting on
+    -- single-target. Cast point 0.3s. impact_pos=self. Dispel removes
+    -- (Manta / Lotus reflect on initial cast); BKB blocks.
+    modifier_dazzle_poison_touch = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "dazzle_poison_touch",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
 }
 
 -- v0.5.56: cast_point single source of truth.

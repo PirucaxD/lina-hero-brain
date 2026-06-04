@@ -6450,6 +6450,115 @@ LB.restore = function()
     })
 end
 
+----------------------------------------------- autodisabler override ---
+-- v0.5.52 Phase 3 slice 2: AutoDisabler "Force Interrupt" subsystem
+-- override. v0.5.51 demo log proved the conflict: brain's
+-- catalog_eta_pike fired at impact_t=0.59 (d=441) but framework
+-- AutoDisabler.lua had ALREADY cast Pike on Bara at d=569 and d=473
+-- (modifier_spirit_breaker_charge_of_darkness is in Force Interrupt/
+-- Versus list with item_hurricane_pike + item_force_staff in Force
+-- Interrupt/Usage). The v0.5.43 Dodger + v0.5.45.1 Linkbreaker
+-- overrides cover those framework subsystems but NOT AutoDisabler,
+-- which is a third independent subsystem at General/Main/Auto Disabler
+-- in gui.json. Same match-scoped capture+restore pattern. Items: Pike
+-- + Force Staff (both Lina-brain-owned via SAVE_FIRE). BKB, Manta,
+-- Ghost are NOT in any AutoDisabler list so no conflict.
+--
+-- v0.5.52: lives under state.AD (not module-local) because Lua's
+-- 200-local-vars-per-function limit in the main chunk was already at
+-- the ceiling pre-v0.5.52 (see memory rule from v0.5.45.1: "module-
+-- level additions MUST bundle into state.* or named tables"). LB and
+-- Dodger pre-date that constraint; new subsystems go on state.
+state.AD = {
+    items = { "item_hurricane_pike", "item_force_staff" },
+    path = {
+        "General", "Main", "Auto Disabler", "Main",
+        "Force Interrupt", "Usage",
+    },
+}
+state.AD.container = function()
+    if not (Menu and Menu.Find) then return nil end
+    local p = state.AD.path
+    local ok, h = pcall(Menu.Find, p[1], p[2], p[3], p[4], p[5], p[6])
+    return ok and h or nil
+end
+state.AD.item_nested = function(item)
+    if not (Menu and Menu.Find) then return nil end
+    local p = state.AD.path
+    local ok, h = pcall(Menu.Find, p[1], p[2], p[3], p[4], p[5], p[6], item)
+    return ok and h or nil
+end
+state.AD.read = function(item)
+    local h = state.AD.item_nested(item)
+    if h and h.Get then
+        local ok, v = pcall(h.Get, h)
+        if ok and type(v) == "boolean" then return v, "nested" end
+    end
+    local c = state.AD.container()
+    if c and c.Get then
+        local ok, v = pcall(c.Get, c, item)
+        if ok and type(v) == "boolean" then return v, "container" end
+    end
+    return nil, "unknown"
+end
+state.AD.write = function(item, value)
+    local h = state.AD.item_nested(item)
+    if h and h.Set then
+        local ok = pcall(h.Set, h, value)
+        if ok then return true, "nested" end
+    end
+    local c = state.AD.container()
+    if c and c.Set then
+        local ok = pcall(c.Set, c, item, value)
+        if ok then return true, "container" end
+    end
+    return false, "unknown"
+end
+state.AD.disable = function()
+    if state.autodisabler_disabled then return end
+    local saved, read_shape = {}, nil
+    for _, item in ipairs(state.AD.items) do
+        local v, shape = state.AD.read(item)
+        saved[item] = v
+        read_shape = read_shape or shape
+    end
+    local n_set, write_shape = 0, nil
+    for _, item in ipairs(state.AD.items) do
+        local ok, shape = state.AD.write(item, false)
+        if ok then n_set = n_set + 1 end
+        write_shape = write_shape or shape
+    end
+    state.autodisabler_saved = saved
+    state.autodisabler_disabled = true
+    tlog(1, "autodisabler_chain_disabled", {
+        items       = tostring(#state.AD.items),
+        set_ok      = tostring(n_set),
+        read_shape  = tostring(read_shape or "nil"),
+        write_shape = tostring(write_shape or "nil"),
+    })
+end
+state.AD.restore = function()
+    if not state.autodisabler_disabled then return end
+    local saved = state.autodisabler_saved or {}
+    local any_true = false
+    for _, v in pairs(saved) do if v then any_true = true; break end end
+    local default_to_true = (not any_true)
+    local n_set = 0
+    for _, item in ipairs(state.AD.items) do
+        local v = default_to_true and true or saved[item]
+        if v == nil then v = true end
+        local ok = state.AD.write(item, v)
+        if ok then n_set = n_set + 1 end
+    end
+    state.autodisabler_saved = nil
+    state.autodisabler_disabled = false
+    tlog(1, "autodisabler_chain_restored", {
+        items           = tostring(#state.AD.items),
+        set_ok          = tostring(n_set),
+        default_to_true = default_to_true and "y" or "n",
+    })
+end
+
 ------------------------------------------------------------------ menu ------
 local function setup_menu()
     local m = {}
@@ -6645,6 +6754,23 @@ local function setup_menu()
         .. "Edge/Ether/Wind Waker). Restored at POST_GAME so the change is "
         .. "scoped to one match. Off = Dodger and brain both fire (causes "
         .. "double-fires on Bara WW+Pike etc. observed in v0.5.42 demo).")
+    -- v0.5.52 Phase 3 slice 2: AutoDisabler Force Interrupt override.
+    -- v0.5.51 demo log proved brain-vs-framework double-fire on Pike
+    -- when both the brain catalog gate AND AutoDisabler.lua targeted
+    -- Bara charge (modifier_spirit_breaker_charge_of_darkness is in
+    -- AutoDisabler/Force Interrupt/Versus list). Zero AutoDisabler's
+    -- Pike + Force Staff at match start so brain has sole control of
+    -- those saves; v0.5.51's prep_time-based ladder works without
+    -- competing with the framework's force-interrupt path.
+    m.override_autodisabler = gDef:Switch('Override AutoDisabler Force Interrupt items', true)
+    m.override_autodisabler:ToolTip("On match start (GAME_IN_PROGRESS), "
+        .. "capture and zero the 2 chain-overlap items in the framework's "
+        .. "AutoDisabler Force Interrupt subsystem (Pike + Force Staff). "
+        .. "Restored at POST_GAME so the change is scoped to one match. "
+        .. "Off = AutoDisabler and brain both fire Pike on Bara charge "
+        .. "(the v0.5.51 double-fire pattern: brain catalog_eta_pike at "
+        .. "impact_t=0.59 fired AFTER AutoDisabler already cast Pike on "
+        .. "Bara at d=569 / d=473 in the same encounter).")
     m.preface_enable = gDef:Switch("Pre-face incoming threats", false)
     m.preface_enable:ToolTip("Turn to face an approaching enemy that has a "
         .. "ready targeted threat, so Lina's 0.6 turn rate does not delay her "
@@ -7417,6 +7543,25 @@ function callbacks.OnUpdateEx()
         elseif gs_lb == Enum.GameState.DOTA_GAMERULES_STATE_POST_GAME
            and state.linkbreaker_disabled then
             LB.restore()
+        end
+    end
+
+    -- v0.5.52 Phase 3 slice 2: AutoDisabler Force Interrupt override.
+    -- Same transition hook + idempotent latch pattern as Dodger / LB,
+    -- but state.AD lives on state (not a module local) per the 200-
+    -- locals limit. No new locals in this hook block either: the
+    -- GameRules.GetGameState() call is cheap and inlined to keep this
+    -- block from pushing OnUpdateEx over the function-local ceiling.
+    if state.menu and state.menu.override_autodisabler
+       and state.menu.override_autodisabler:Get()
+       and GameRules and GameRules.GetGameState
+       and Enum and Enum.GameState then
+        if GameRules.GetGameState() == Enum.GameState.DOTA_GAMERULES_STATE_GAME_IN_PROGRESS
+           and not state.autodisabler_disabled then
+            state.AD.disable()
+        elseif GameRules.GetGameState() == Enum.GameState.DOTA_GAMERULES_STATE_POST_GAME
+           and state.autodisabler_disabled then
+            state.AD.restore()
         end
     end
 
@@ -8361,6 +8506,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.51 Phase 3 slice 1: per-save prep_time + generalized catalog gate. User: 'Sure lets make the best plan possible to apply phase 3' -> picked D3 semantics (tight upper tolerance, active_duration informational only; above upper STOPS chain walk, below lower CONTINUES to next save). **Architectural shift**: today the chain walker fires the first ready save when its single gate trips. Phase 3 turns each save into its own timing gate: a save fires when impact_t in [prep_time, prep_time + upper_margin]. Chain order stays as preference; prep_time controls when each save's moment is. Earlier-priority saves with smaller prep_time will fire their moment LATER in the encounter (saves stack as ladder W -> Pike -> Lotus -> BKB as Bara closes). **Three changes** (Lina.lua only): (1) state.compute_w_fire_window renamed to state.compute_save_fire_window(threat_entry, speed, save_entry). Reads save_entry.prep_time as lower; upper is save_entry.catch_radius/speed for AoE-catch saves on homing kinds (W's old geometric upper), or prep_time + 0.10 tolerance otherwise. Backwards-compat alias compute_w_fire_window synthesizes W-shaped save_entry. (2) Four SAVE_FIRE entries gain prep_time + active_duration (+ catch_radius for W): lina_w_anti_gap (1.12/1.6/225), item_lotus_orb (0.3/6.0), item_black_king_bar (0.05/7.0), item_hurricane_pike (0.5/0.4). active_duration is informational only in v0.5.51 (D3 chose tight tolerance over wide active-duration upper because the spec specifies a singular fire moment). Other saves keep prep_time=nil = no gate, legacy behavior. (3) armed_chain_peek's W-only catalog gate generalized to per-save. For any save with prep_time > 0 AND catalog entry: in_window -> fire; impact_t > upper -> STOP chain (D3 y); impact_t < lower -> set catalog_too_late, continue to next save (D3 x). W-specific legacy live-eta fallback retained for threats with no catalog entry. Standard distance + eta_trigger gates wrapped in if not catalog_too_late. **Tlog rename**: w_catalog_eta_gate -> catalog_eta_gate with new save field showing which save the gate is for. **Scope**: only homing_charge / homing_carry kinds use the per-save gate's geometric upper; channel_at_caster / cast_point_targeted keep [0, inf] for v0.5.51 (revisit in slice 2 when gate moves into lib/defense.lua). Cast-point-armed branches still use hardcoded cast_point literals (slice 3 = v0.5.53 catalog cast_point). **Lina.lua 8347 -> 8364 lines (+17; expanded compute_save_fire_window, added SAVE_FIRE prep fields, expanded armed_chain_peek catalog branch + wrapped legacy gates). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara w_catalog_eta_gate replaced with catalog_eta_gate save=w_stun. Same lower=1.12 upper geometric as v0.5.50.8 (W gate behavior unchanged). If W on CD, next save in chain (likely Pike at 0.5 or Lotus at 0.3) has catalog_eta_gate with save=pike/lotus and tight upper tolerance 0.10. Lotus would fire at impact_t in [0.3, 0.4], BKB at [0.05, 0.15]. Chain ladders naturally as Bara closes.")
+LOG:info("Lina brain v0.5.52 Phase 3 slice 2: AutoDisabler Force Interrupt override (Pike + Force Staff). User: 'structural, the right end-state' on the v0.5.51 Pike double-fire fix choice. **The v0.5.51 demo log proved the conflict**: brain's catalog_eta_pike fired at impact_t=0.59 d=441, but framework AutoDisabler.lua had ALREADY cast Pike on Bara at d=569 and d=473 (two prior Pike casts in the same encounter). modifier_spirit_breaker_charge_of_darkness is in AutoDisabler/Force Interrupt/Versus list, and item_hurricane_pike + item_force_staff are in Force Interrupt/Usage. v0.5.43 Dodger override + v0.5.45.1 Linkbreaker override covered those subsystems but NOT AutoDisabler -- it's a third independent framework subsystem at General/Main/Auto Disabler in gui.json. **Fix**: mirror the v0.5.43 / v0.5.45.1 capture+restore pattern for AutoDisabler. New state.AD module (lives on state, not module-local, per the 200-locals limit memory rule from v0.5.45.1) with items {item_hurricane_pike, item_force_staff} at path General/Main/Auto Disabler/Main/Force Interrupt/Usage. state.AD.disable() captures+zeroes at GAME_IN_PROGRESS; state.AD.restore() restores at POST_GAME. Match-scoped so other heroes' AutoDisabler config is not permanently mutated. New menu toggle Override AutoDisabler Force Interrupt items (default ON). **Scope**: ONLY Force Interrupt/Usage items (Pike + Force Staff) -- the proven conflict from v0.5.51 log. AutoDisabler/General/Usage list (Cyclone + Pike + WW as disablers) has NOT shown demonstrated conflict yet (Dodger already zeroes those for defensive use); deferred until a demo log proves a problem. BKB / Manta / Ghost are NOT in any AutoDisabler list; no zeroing needed for them. **Why bundled into state.***: pre-v0.5.52 the main chunk was at the 200-locals ceiling. Adding local AD = {} pushed luac to 'too many local variables in main function'. Moved AD to state.AD per the v0.5.45.1 memory rule ('module-level additions MUST bundle into state.* or named tables'). The OnUpdateEx transition hook also avoids a new local (gs_ad) by inlining GameRules.GetGameState() twice instead of stashing it. **No code changes to the catalog gate, prep_time fields, or compute_save_fire_window from v0.5.51** -- this is purely the framework conflict resolution. **Lina.lua 8364 -> 8509 lines (+145; state.AD module + menu toggle + OnUpdateEx hook). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: at game start, tlog autodisabler_chain_disabled with items=2 set_ok=2 (Pike + Force Staff zeroed in framework AutoDisabler). Bara charge fires only ONE Pike from brain via catalog_eta_pike at impact_t in [0.5, 0.6]; no preceding AutoDisabler-source Pike casts. At post-game, autodisabler_chain_restored undoes the change so the framework AutoDisabler config is unchanged for other heroes / next match.")
 
 return callbacks

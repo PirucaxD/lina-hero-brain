@@ -2009,341 +2009,87 @@ state.pike_prime_tick = function()
     end
 end
 
--- v0.5.60 Phase 5 slice 3: shared "where should the defender go" helper.
--- Derives a `toward` direction (caster preferred, hero centroid in 1500u
--- fallback) and runs Escape.PickDir for a danger-aware 7-angle pick.
--- Returns (escape_dir, landing) on success, (nil, nil) when no viable
--- destination exists (caller falls through). Used by state.try_self_push
--- (Pike + Force turn-then-push) and by SAVE_FIRE.item_cyclone /
--- item_wind_waker .fire bodies (cast + queued post-airborne move).
+-- v0.5.75 lib-first lift (bucket B + C + D): the 5 self-displacement
+-- save helpers below moved to lib/escape.lua. Lina-side bodies become
+-- 3-5 line aliases that pass state.self_npc as `me` and state.escape_cfg
+-- as the callback bundle. Pattern mirrors v0.5.74's
+-- state.compute_arrival_time alias over ThreatData.ComputeArrivalTime.
+-- Sniper.lua intentionally untouched in v0.5.75 (his pike_self_reposition
+-- duplicate at ~5790-5910 can opt in later by installing his own cfg).
+--
+-- cfg shape: see lib/escape.lua EscapeCfg annotation. The Pike-specific
+-- pike_reissue stamp lives in on_self_cast so the lib has no idea Pike
+-- exists beyond the "item_hurricane_pike" string used as a tlog short
+-- name selector.
+state.escape_cfg = {
+    safe_issue      = safe_issue,
+    issue_item_self = issue_item_self,
+    tlog            = tlog,
+    now             = now,
+    uname           = uname,
+    hero_key        = HERO_KEY,
+    layer           = "def",
+    item_get        = NPCLib.item,
+    item_ready      = NPCLib.item_ready,
+    on_self_cast    = function(item_name, me)
+        if item_name == "item_hurricane_pike" and not state.pike_primed then
+            state.pike_reissue = { caster = me, t = now(), self_cast = true }
+        end
+    end,
+}
+
+-- v0.5.75 alias over Escape.ComputeSafeDest (lifted from Lina v0.5.60).
 state.compute_safe_dest = function(threat_caster, push_dist)
-    local me = state.self_npc
-    local me_pos = me and Entity.GetAbsOrigin(me)
-    if not (me and me_pos and push_dist) then return nil, nil end
-    local toward
-    local cp = threat_caster and Entity.IsEntity(threat_caster)
-               and Target.IsAlive(threat_caster)
-               and Entity.GetAbsOrigin(threat_caster) or nil
-    if cp then
-        local diff = cp - me_pos
-        if diff:Length2DSqr() < 1 then return nil, nil end
-        toward = diff:Normalized()
-    else
-        local enemies = Heroes.InRadius(me_pos, 1500, Entity.GetTeamNum(me),
-                                        Enum.TeamType.TEAM_ENEMY)
-        if enemies and #enemies > 0 then
-            local cx, cy = 0, 0
-            local n = 0
-            for i = 1, #enemies do
-                local ep = Entity.GetAbsOrigin(enemies[i])
-                if ep then cx, cy, n = cx + ep.x, cy + ep.y, n + 1 end
-            end
-            if n > 0 then
-                local cen = Vector(cx / n, cy / n, me_pos.z)
-                local diff = cen - me_pos
-                if diff:Length2DSqr() > 1 then toward = diff:Normalized() end
-            end
-        end
-    end
-    if not toward then return nil, nil end
-    local escape_dir = Escape.PickDir(me, me_pos, toward, push_dist, threat_caster)
-    if not escape_dir then return nil, nil end
-    local landing = me_pos + escape_dir * push_dist
-    return escape_dir, landing
+    return Escape.ComputeSafeDest(state.self_npc, threat_caster, push_dist)
 end
 
--- v0.5.58 Phase 5 slice 2: shared self-push harness. Both Pike (600u) and
--- Force Staff (600u) push along Lina's CURRENT facing, so the
--- rotate-then-fire pattern is identical. v0.5.60: factored the
--- destination-pick into state.compute_safe_dest so EUL / WW can share it.
--- This helper still owns the turn-or-fire-now decision + the
--- state.pending_self_push arm. Returns truthy when an action issued
--- (immediate cast OR turn-then-arm); false when no destination found
--- (caller falls through to next save in the chain). Pike's first-cast-drop
--- pike_reissue stamp is the only item-specific behaviour gated inside.
+-- v0.5.75 alias over Escape.TrySelfPush (lifted from Lina v0.5.58).
+-- Lib returns (pending|nil, ok). When pending is non-nil, the lib armed
+-- a turn-then-fire and Lina stashes it for pending_self_push_tick. nil
+-- means either immediate cast OR no safe dest; caller's `ok` decides
+-- whether the chain falls through to the next save.
 state.try_self_push = function(intent, item, item_name, push_dist, threat_caster)
-    local me = state.self_npc
-    local me_pos = me and Entity.GetAbsOrigin(me)
-    if not (me and me_pos and item) then return false end
-    local escape_dir, _ = state.compute_safe_dest(threat_caster, push_dist)
-    if not escape_dir then return false end
-    -- away_pt is 400u along escape_dir, used both as the rotation target and
-    -- as the alignment-check reference. Not the full push_dist because the
-    -- 30deg gate is about facing direction, not landing distance.
-    local away_pt = Vector(me_pos.x + escape_dir.x * 400,
-                           me_pos.y + escape_dir.y * 400, me_pos.z)
-    -- NPC.FindRotationAngle returns RADIANS; math.deg before the 30deg gate
-    -- (reference_uczone_api_gotchas).
-    local angle_ok, angle_rad = pcall(NPC.FindRotationAngle, me, away_pt)
-    local angle = (angle_ok and angle_rad) and math.deg(math.abs(angle_rad)) or 0
-    local short = (item_name == "item_hurricane_pike") and "pike_self" or "force_self"
-    if angle <= 30 then
-        local ok = issue_item_self(intent, "def", item)
-        if ok and item_name == "item_hurricane_pike" and not state.pike_primed then
-            state.pike_reissue = { caster = state.self_npc, t = now(), self_cast = true }
-        end
-        tlog(1, short .. "_fired", {
-            angle = string.format("%.0f", angle), phase = "immediate",
-        })
-        return ok
-    end
-    -- Faced sideways / toward the threat: turn first via a move order to
-    -- away_pt. pending_self_push_tick fires once facing is within 30deg.
-    -- 0.7s deadline ~ a 180deg turn at standard rate. Return truthy so the
-    -- dispatcher records this threat as responded; if the tick times out
-    -- the threat is not re-saved this encounter.
-    local moved = safe_issue {
-        hero = HERO_KEY, layer = "def",
-        intent = intent .. "_turnaway",
-        order_type = UO.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
-        unit = me, position = away_pt,
-    }
-    state.pending_self_push = {
-        caster    = threat_caster,
-        away_pt   = away_pt,
-        deadline  = now() + 0.7,
-        intent    = intent,
-        item_name = item_name,
-    }
-    tlog(1, short .. "_turnaway", {
-        angle = string.format("%.0f", angle),
-        caster = threat_caster and uname(threat_caster) or "centroid",
-    })
-    return moved
+    local pending, ok = Escape.TrySelfPush(state.self_npc, intent, item,
+                                            item_name, push_dist,
+                                            threat_caster, state.escape_cfg)
+    if pending then state.pending_self_push = pending end
+    return ok
 end
 
--- v0.5.60 Phase 5 slice 3 (rewritten v0.5.62, rewritten again v0.5.63):
--- post-airborne move helper for EUL / WW.
---
--- v0.5.60: queue=true MOVE_TO_POSITION issued at .fire. Preempted at
---   airborne-end by baseline Hit&Run / Orbwalker USER orders (per v0.5.61
---   demo L3254, L3267, L3304).
--- v0.5.62: added Native.PauseHitRun for the window. **User feedback after
---   v0.5.62 test**: do NOT disable HR/OW. The framework's restore path
---   has a cloud-sync menu lag and HR does not reliably come back when
---   re-enabled (user already tested this regression).
--- v0.5.63: NO Native pause. Tick re-issues the MOVE_TO_POSITION every
---   ~100ms until Lina arrives within 100u of dest OR the deadline expires
---   (7s, covers airborne up to 3s + walk 600u at 300 MS ~ 2s + grace).
---   Re-issuing at ~10/sec with a unique intent per call (bypasses
---   safe_issue's dedup) keeps the brain's MOVE as the most-recent order
---   on enough frames to dominate the baseline orbwalker's interleaved
---   USER MOVEs. Lina walks toward the brain's dest; baseline kites have
---   their effect on the OFF frames but the net direction is brain-dest.
---
--- Returns true if pending was armed (cast can proceed and tick will move
--- her), false if no safe destination was found (in which case Lina just
--- lands in place after airborne; the save still served its purpose by
--- surviving the threat).
-state.queue_safe_post_move = function(intent, push_dist, threat_caster, modifier_name, moves_during_airborne)
-    local me = state.self_npc
-    if not me then return false end
-    local _, landing = state.compute_safe_dest(threat_caster, push_dist)
-    if not landing then return false end
-    -- Belt: queue=true at .fire. If the engine honours it across the
-    -- airborne window, Lina starts moving the instant she lands and the
-    -- tick's reissues just keep her on course.
-    safe_issue {
-        hero = HERO_KEY, layer = "def",
-        intent = intent .. "_post_move",
-        order_type = UO.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
-        unit = me, position = landing,
-        queue = true,
-    }
-    -- Suspenders: tick re-issues every ~100ms. moves_during_airborne
-    -- decides whether reissues fire WHILE the modifier is present:
-    --   true  (WW self-cast per Liquipedia): "If the target is the
-    --         wielder, they can move freely at a fixed speed (300),
-    --         free pathing, ignores turn rates". Lina moves at 300 MS
-    --         during the 2.5s airborne. 300 * 2.5 = 750u covers the
-    --         600u dest with time to spare; she arrives mid-airborne.
-    --   false (EUL self-cast per Liquipedia): "fully disabling",
-    --         modifier states STUNNED + INVULNERABLE + NO_HEALTH_BAR,
-    --         "no horizontal movement is possible". Tick must wait for
-    --         the modifier to clear before reissuing; orders during the
-    --         disable would no-op.
-    state.pending_post_airborne_move = {
-        dest                  = landing,
-        modifier_name         = modifier_name,
-        moves_during_airborne = moves_during_airborne or false,
-        deadline              = now() + 7.0,
-        intent                = intent,
-        observed_airborne     = false,
-        last_reissue_t        = 0,
-        reissue_seq           = 0,
-    }
-    tlog(1, intent .. "_post_move", {
-        x = string.format("%.0f", landing.x),
-        y = string.format("%.0f", landing.y),
-        caster = threat_caster and uname(threat_caster) or "centroid",
-        movable = (moves_during_airborne and "y") or "n",
-    })
-    return true
+-- v0.5.75 alias over Escape.QueueSafePostMove (lifted from Lina v0.5.60,
+-- rewritten v0.5.62 + v0.5.63 + v0.5.64). EUL / WW only; the lib body
+-- documents the 3-version evolution + the moves_during_airborne switch
+-- (WW=true per Liquipedia 300 MS movable, EUL=false per Liquipedia full
+-- disable).
+state.queue_safe_post_move = function(intent, push_dist, threat_caster,
+                                       modifier_name, moves_during_airborne)
+    local pending = Escape.QueueSafePostMove(state.self_npc, intent, push_dist,
+                                              threat_caster, modifier_name,
+                                              moves_during_airborne,
+                                              state.escape_cfg)
+    if pending then state.pending_post_airborne_move = pending end
+    return pending ~= nil
 end
 
--- v0.5.63: tick driver for state.pending_post_airborne_move. Hooked into
--- callbacks.OnUpdateEx. Three phases:
---   1. Wait for the airborne modifier to be observed at least once. The
---      cast takes a few frames to resolve into the modifier; without this
---      latch the tick would fire MOVE before the cast lands.
---   2. While airborne, defer (Lina untargetable; no point issuing MOVE).
---   3. Airborne ended. Re-issue MOVE_TO_POSITION every ~100ms until Lina
---      is within 100u of dest OR deadline expires. Unique intent each
---      reissue bypasses safe_issue's identifier dedup so every issue
---      actually reaches the engine.
+-- v0.5.75 alias over Escape.PostAirborneMoveTick (lifted from Lina v0.5.63).
+-- Lib returns the (possibly nil) updated pending; Lina stashes back.
 state.pending_post_airborne_move_tick = function()
-    local p = state.pending_post_airborne_move
-    if not p then return end
-    local me = state.self_npc
-    if not me or not Target.IsAlive(me) then
-        state.pending_post_airborne_move = nil
-        return
-    end
-    if now() > p.deadline then
-        tlog(2, p.intent .. "_post_move_expired", { reissues = p.reissue_seq or 0 })
-        state.pending_post_airborne_move = nil
-        return
-    end
-    local airborne = NPC.HasModifier and NPC.HasModifier(me, p.modifier_name) or false
-    if airborne then
-        p.observed_airborne = true
-        -- WW self-cast (moves_during_airborne=true): Lina moves at fixed
-        -- 300 MS during the 2.5s airborne. Fall through to reissue logic
-        -- so the brain pushes her toward dest during the lift.
-        -- EUL self-cast (moves_during_airborne=false): full disable, no
-        -- horizontal movement; defer until modifier clears.
-        if not p.moves_during_airborne then return end
-    elseif not p.observed_airborne then
-        return
-    end
-    -- Arrival check: within 100u of dest. Avoids reissue oscillation when
-    -- Lina is already there and the orbwalker kites locally.
-    local me_pos = Entity.GetAbsOrigin(me)
-    if me_pos then
-        local dx = me_pos.x - p.dest.x
-        local dy = me_pos.y - p.dest.y
-        if (dx * dx + dy * dy) < (100 * 100) then
-            tlog(1, p.intent .. "_post_move_arrived", {
-                reissues = p.reissue_seq or 0,
-                x = string.format("%.0f", me_pos.x),
-                y = string.format("%.0f", me_pos.y),
-            })
-            state.pending_post_airborne_move = nil
-            return
-        end
-    end
-    -- Throttle to ~10 reissues/sec (100ms apart) so the brain order is the
-    -- most-recent on enough frames to dominate baseline orbwalker MOVEs.
-    if (now() - (p.last_reissue_t or 0)) < 0.1 then return end
-    p.last_reissue_t = now()
-    p.reissue_seq    = (p.reissue_seq or 0) + 1
-    -- Unique intent each call bypasses safe_issue's dedup
-    -- (Order.Identifier dedups by hero+layer+intent within PENDING_TTL).
-    safe_issue {
-        hero = HERO_KEY, layer = "def",
-        intent = p.intent .. "_post_move_fire_" .. p.reissue_seq,
-        order_type = UO.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
-        unit = me, position = p.dest,
-    }
-    -- One-time fire tlog on first reissue so the log has a marker for
-    -- "airborne ended, brain pushing Lina toward dest". Subsequent
-    -- reissues are silent to avoid log spam; arrival / expiration tlogs
-    -- capture total reissues at the end.
-    if p.reissue_seq == 1 then
-        tlog(1, p.intent .. "_post_move_fired", {
-            x = string.format("%.0f", p.dest.x),
-            y = string.format("%.0f", p.dest.y),
-        })
-    end
+    state.pending_post_airborne_move = Escape.PostAirborneMoveTick(
+        state.self_npc, state.pending_post_airborne_move, state.escape_cfg)
 end
 
--- v0.5.58 Phase 5 slice 2: generalized from v0.5.57's pending_pike_self_tick.
--- Consumes state.pending_self_push armed by state.try_self_push for either
--- Pike or Force. Per-item tlog name uses item_name to keep grep-ability
--- (pike_self_fired vs force_self_fired). Pike's first-cast-drop pike_reissue
--- stamp is the only item-specific branch.
+-- v0.5.75 alias over Escape.SelfPushTick (lifted from Lina v0.5.58).
 state.pending_self_push_tick = function()
-    local p = state.pending_self_push
-    if not p then return end
-    local me = state.self_npc
-    if not me or not Target.IsAlive(me) then state.pending_self_push = nil; return end
-    local short = (p.item_name == "item_hurricane_pike") and "pike_self" or "force_self"
-    if now() > p.deadline then
-        tlog(2, short .. "_turnaway_timeout", {})
-        state.pending_self_push = nil
-        return
-    end
-    -- Caster gone (died / TP'd): reposition no longer needed; drop without
-    -- burning the item's CD.
-    if p.caster and not (Entity.IsEntity(p.caster) and Target.IsAlive(p.caster)) then
-        state.pending_self_push = nil
-        return
-    end
-    local angle_ok, angle_rad = pcall(NPC.FindRotationAngle, me, p.away_pt)
-    local angle = (angle_ok and angle_rad) and math.deg(math.abs(angle_rad)) or 0
-    if angle > 30 then return end
-    local it = NPCLib.item(me, p.item_name)
-    if it and NPCLib.item_ready(me, p.item_name) then
-        if issue_item_self((p.intent or short) .. "_aligned", "def", it) then
-            if p.item_name == "item_hurricane_pike" and not state.pike_primed then
-                state.pike_reissue = { caster = me, t = now(), self_cast = true }
-            end
-            tlog(1, short .. "_fired", {
-                angle = string.format("%.0f", angle), phase = "turned",
-            })
-        end
-    end
-    state.pending_self_push = nil
+    state.pending_self_push = Escape.SelfPushTick(
+        state.self_npc, state.pending_self_push, state.escape_cfg)
 end
 
--- Proximity-weighted enemy-hero danger at a world position. Ranks Force/Pike
--- self-push destinations so a save does not push Lina into a worse spot.
-state.danger_at_pos = function(pos)
-    if not pos then return 0 end
-    local me = state.self_npc
-    if not me then return 0 end
-    local list = Heroes.InRadius(pos, 1400, Entity.GetTeamNum(me), Enum.TeamType.TEAM_ENEMY)
-    if not list then return 0 end
-    local score = 0
-    for i = 1, #list do
-        local e = list[i]
-        if e and Target.IsAlive(e) and Target.NotIllusion(e) then
-            local ep = NPCLib.origin(e)
-            if ep then
-                local d = pos:Distance2D(ep)
-                if d < 1400 then score = score + (1 - d / 1400) * 30 end
-            end
-        end
-    end
-    return score
-end
-
--- E10: Force / Pike self-cast push Lina `push_dist` in her CURRENT FACING.
--- Return the destination if firing is safe; nil to skip (lesson 61): refuse if
--- the push goes INTO the threat, if the path is impassable (GridNav), or if the
--- destination is meaningfully more crowded than where Lina stands now.
-state.safe_push_destination = function(threat_caster, push_dist)
-    local me = state.self_npc
-    if not me then return nil end
-    local me_pos = NPCLib.origin(me)
-    local fwd    = NPC.GetForwardVector and NPC.GetForwardVector(me)
-    if not me_pos or not fwd then return nil end
-    local dest = me_pos + fwd * push_dist
-    if threat_caster and Entity.IsEntity(threat_caster) and Target.IsAlive(threat_caster) then
-        local cp = NPCLib.origin(threat_caster)
-        if cp and dest:Distance2D(cp) <= me_pos:Distance2D(cp) then
-            tlog(3, "safe_push_rejects_toward_threat", {})
-            return nil
-        end
-    end
-    if GridNav and GridNav.IsTraversableFromTo and not GridNav.IsTraversableFromTo(me_pos, dest) then
-        return nil
-    end
-    if state.danger_at_pos(dest) > state.danger_at_pos(me_pos) + 12 then
-        return nil
-    end
-    return dest
-end
+-- v0.5.75 dead-code deletion: state.danger_at_pos + state.safe_push_destination
+-- (the older permissive shape pre-dating the lib/escape extraction at v0.5.57)
+-- removed. Only call sites were each other; Force / Pike self-cast switched to
+-- state.try_self_push (lib's Escape.PickDir + ComputeSafeDest path) in v0.5.58.
+-- Lib has Escape.DangerAtPos + Escape.SafePushDestination for any caller that
+-- needs them.
 
 -- Hurricane Pike enemy cast range (live KV; 425 in 7.41C). Gates the
 -- enemy-target Pike escape (the Sniper-style facing-independent push).
@@ -8850,6 +8596,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.74 (lib-first lift): compute_arrival_time + ETA factories + generic resolver moved to lib. User: 'check if all lina uses and can be shared by multiple characters are on our libs'. **Audit lift bucket A+E+F+G shipped**: (A) state.compute_arrival_time body lifted to ThreatData.ComputeArrivalTime in lib/threat_data.lua; Lina-side keeps a 3-line state.* alias that passes state.item_kv as the kv_lookup callback. (F) the 4 _lina_eta_make_* factories (CastPoint, Remaining, DistSpeed, Line) lifted to Defense.EtaResolvers.* in lib/defense.lua. (E) _lina_eta_default lifted to Defense.MakeGenericEtaResolver(TD); registration now Defense.MakeGenericEtaResolver(TD) -- closure factory binds TD without a lib<-->lib require cycle. (G) _lina_eta_dist deleted (was only used by the 4 factories; lib defense.lua has its own inline _dist2d, lib/geometry has dist_between for future use). **Lib API surface added**: ThreatData.ComputeArrivalTime(threat_mod, caster, target, modifier_handle, kv_lookup). Defense.EtaResolvers.CastPoint/Remaining/DistSpeed/Line factory functions. Defense.MakeGenericEtaResolver(TD, opts) closure factory. lib/threat_data.lua requires lib/target now (for Target.IsAlive inside ComputeArrivalTime; same lesson v0.5.61 taught with lib/escape -- lib modules dont inherit hero-script upvalues). **Lina-side change**: LINA_ETA_RESOLVERS table rewritten to use EtaR.X factory calls (local EtaR = Defense.EtaResolvers, ~30 line entries swapped). The 4 inline custom resolvers (disruptor_static_storm_thinker, witch_doctor_death_ward, disruptor_kinetic_field_remnant, lina_light_strike_array) and the FC offensive synthetic resolver stay Lina-side (hero-specific patterns). **Zero behaviour change**: factory bodies are byte-equivalent ports; the same closures get built with the same inputs. **Files**: lib/threat_data.lua +120 lines (ComputeArrivalTime function + Target require). lib/defense.lua +180 lines (EtaResolvers + MakeGenericEtaResolver before return). Lina.lua -140 lines net (4 factories + default + dist + compute body deleted; 30 table entries shortened; alias added). lib/escape.lua + Sniper.lua unchanged. **Audit lift bucket B+C (compute_safe_dest + try_self_push) deferred** -- would touch Sniper.lua to collapse its byte-identical port (~30 lines), but user direction earlier this session was 'do not change Sniper for now'. Once that constraint relaxes, those are next. **Sniper benefit when he migrates**: Defense.EtaResolvers + Defense.MakeGenericEtaResolver + ThreatData.ComputeArrivalTime all available; Sniper picks them up via require with zero brain rewrite. **Verification on next demo**: identical lock_acquired ttl values for all 30 LINA_ETA_RESOLVERS-keyed mods. catalog mods without per-mod resolver get same TTL as v0.5.72-73 (Defense.MakeGenericEtaResolver is byte-equivalent to _lina_eta_default). W .fire / armed_chain_peek catalog gate still works (state.compute_arrival_time alias preserves API).")
+LOG:info("Lina brain v0.5.75 (lib-first lift bucket B+C+D): self-displacement save helpers moved to lib/escape.lua. User: '1- but we dont need to change sniper script. We can just extract what we need without breaking it.' **The lift**: 5 helpers + ESCAPE_CFG callback bundle. (B) state.compute_safe_dest body -> Escape.ComputeSafeDest(me, threat_caster, push_dist). (C) state.try_self_push -> Escape.TrySelfPush(me, intent, item, item_name, push_dist, threat_caster, cfg) returns (pending_or_nil, ok); state.pending_self_push_tick -> Escape.SelfPushTick(me, pending, cfg). (D) state.queue_safe_post_move -> Escape.QueueSafePostMove(me, intent, push_dist, threat_caster, modifier_name, moves_during_airborne, cfg); state.pending_post_airborne_move_tick -> Escape.PostAirborneMoveTick(me, pending, cfg). **Lina-side**: each becomes a 3-5 line alias passing state.self_npc as me and state.escape_cfg as the callback bundle (safe_issue / issue_item_self / tlog / now / uname / hero_key / item_get / item_ready / on_self_cast). Pikes pike_reissue stamp lives in the on_self_cast closure so the lib has no idea Pike exists beyond using the item_hurricane_pike string as a tlog short-name selector. Pattern mirrors v0.5.74s state.compute_arrival_time alias. **Sniper untouched per user direction**: Sniper.lua keeps its byte-identical pike_self_reposition duplicate at ~5790-5910 + 5835-5910 (~60 lines). Sniper migration is a separate future slice (install his own cfg + switch call sites to Escape.* calls; zero brain rewrite needed once he opts in). **Dead-code deletion ride-along**: state.danger_at_pos + state.safe_push_destination (older permissive shape pre-dating the v0.5.57 lib/escape extraction) removed -- only call sites were each other. lib has Escape.DangerAtPos + Escape.SafePushDestination for any future caller. **Files**: lib/escape.lua +350 lines (5 new entry points + EscapeCfg annotation + UO local). Lina.lua -250 lines net (5 helpers + 2 dead helpers deleted; ESCAPE_CFG + 5 aliases added). lib/threat_data + lib/defense + Sniper.lua unchanged. **Zero behaviour change**: lib bodies are byte-equivalent ports; same orders issued with same tlog names (pike_self_fired / force_self_fired / *_turnaway / *_turnaway_timeout / *_post_move / *_post_move_fired / *_post_move_arrived / *_post_move_expired). **Verification on next demo**: identical Pike + Force self-cast (immediate fire within 30deg facing, turn-then-fire otherwise, 0.7s timeout drop). Identical EUL + WW post-airborne (WW reissues during airborne movable=y, EUL waits for airborne-end movable=n, both within 7s deadline).")
 
 return callbacks

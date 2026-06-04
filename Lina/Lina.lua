@@ -1299,7 +1299,14 @@ local SAVE_FIRE = {
     -- always-reflect targets (Lina R, Lion Finger, +v0.5.2 Sniper Assassinate).
     -- Returning false lets the chain fall through to BKB / WW / Glimmer / etc.
     item_lotus_orb    = {
-        short = "lotus",
+        short           = "lotus",
+        -- v0.5.51 Phase 3 slice 1: prep_time per project spec
+        -- ("W 1.12s, Lotus 0.3s, BKB ~50ms server, etc."). Lotus has
+        -- no cast point; 0.3s is the conservative buffer for the
+        -- shield being up when the threat lands. active_duration
+        -- informational (Lotus reflective shield 6s).
+        prep_time       = 0.3,
+        active_duration = 6.0,
         fire  = function(intent, threat_caster, threat_mod)
             -- v0.5.21 IMP-A8: HP-fraction gate replaced with expected-damage
             -- gate keyed on threat_mod (full modifier_* name; matches the
@@ -1350,7 +1357,13 @@ local SAVE_FIRE = {
     },
     item_manta        = { short = "manta",     fire = function(intent) return issue_item_no_target(intent, "def", NPCLib.item(state.self_npc, "item_manta")) end },
     item_black_king_bar = {
-        short = "bkb",
+        short           = "bkb",
+        -- v0.5.51 Phase 3 slice 1: prep_time per project spec
+        -- (server tick ~50ms; BKB is instant-cast). active_duration
+        -- informational (lvl 1 = 7s; -1s per consecutive use,
+        -- floor 5s; not modeled in v0.5.51).
+        prep_time       = 0.05,
+        active_duration = 7.0,
         fire  = function(intent)
             local guarded = NPC.HasModifier(state.self_npc, "modifier_black_king_bar_immune")
             tlog(1, "save_fire_invoked", { item = "item_black_king_bar", intent = tostring(intent),
@@ -1376,7 +1389,18 @@ local SAVE_FIRE = {
     -- safe_push_destination (lesson 61). This is the v0.2.3 fix for Pike
     -- self-refusing vs a faced melee attacker (fire_returned_false).
     item_hurricane_pike = {
-        short = "pike",
+        short           = "pike",
+        -- v0.5.51 Phase 3 slice 1: prep_time = Pike cast point 0.5s
+        -- (KV item_hurricane_pike CastPoint). Pike has both a time
+        -- gate (this) AND a distance gate (the dist_to(caster) <=
+        -- pike_enemy_range() check inside .fire); the gate here
+        -- handles the time dimension, .fire's gate handles range.
+        -- If both pass: Pike fires AT the right moment AND in range.
+        -- If time matches but caster out of range: .fire returns
+        -- false, chain walker falls through to next save (D3 x rule).
+        -- active_duration informational (knockback 0.4s).
+        prep_time       = 0.5,
+        active_duration = 0.4,
         -- v0.5.11 PE-03 (Sniper S29 port): the engine silently drops the FIRST
         -- cast of a freshly-acquired item (Pike included) -- the order reaches
         -- ExecuteOrder, cooldown stays 0, and Lina's first real Pike save of the
@@ -1492,7 +1516,21 @@ local SAVE_FIRE = {
     -- next entry (which is empty for tail position; chain ends with
     -- no_effective_save_for_threat if W also skipped).
     lina_w_anti_gap = {
-        short = "w_stun",
+        short           = "w_stun",
+        -- v0.5.51 Phase 3 slice 1: per-save catalog gate fields.
+        -- prep_time: W cast point 0.6 + delay 0.5 + anim 0.02 = 1.12s
+        -- from order issue to AoE detonation. The gate fires W when
+        -- impact_t >= prep_time (cast point completes before caster
+        -- arrival) and impact_t <= prep_time + catch_radius/speed
+        -- (caster still within AoE at detonation; see v0.5.50.8 banner
+        -- for the full derivation).
+        -- active_duration: W AoE stun duration (informational; not used
+        -- by v0.5.51 gate per D3, reserved for Phase 4 chain compose).
+        -- catch_radius: light_strike_array AoE radius (KV). Drives the
+        -- geometric upper for homing kinds.
+        prep_time       = 1.12,
+        active_duration = 1.6,
+        catch_radius    = 225,
         -- v0.5.47.1: .fire signature now consumes threat_caster + threat_mod
         -- which the chain walker passes (lib/defense.lua L566:
         -- fire_entry.fire(issue_intent, threat_caster, threat_mod)). The
@@ -2496,163 +2534,144 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
             reserved = penalty < RESERVE_SKIP_FLOOR
         end
         if ready and not reserved then
-            -- v0.5.47 Phase 1: live-MS precision gate for W. Replaces the
-            -- static SAVE_FIRE_DISTANCE / stamped-eta_speed gates for
-            -- lina_w_anti_gap with a real-eta computation using live
-            -- caster MS via NPC.GetMoveSpeed. Stamped eta_speed=600 for
-            -- Bara was conservative (real charge MS with talents + Phase
-            -- Boots hits 900-1100); the v0.5.46.3 SAVE_FIRE_DISTANCE=1200
-            -- bump papered over the static-speed mismatch but still misses
-            -- the moving target on edge cases. Live MS fires W at the
-            -- exact moment real_eta crosses W_LEAD=1.12s (Lina's W prep:
-            -- 0.6 cast point + 0.5 delay + ~0.02 cast animation). Window:
-            -- real_eta in [W_LEAD - 0.05, W_LEAD + 0.20] = W detonates
-            -- 0.05s BEFORE to 0.20s AFTER impact (the 1.6s stun radius
-            -- covers the 0.20s slack for hit-and-stop threats like Bara;
-            -- for carry-Lina the v0.5.46.3 predict-aim covers the snowball
-            -- endpoint regardless of when W lands). Falls back to the
-            -- existing dist gate if NPC.GetMoveSpeed is unavailable or
-            -- returns 0 (caster stationary). Phase 2 (v0.5.48) extends
-            -- the per-save live-eta gate to a per-mod arrival-timing
-            -- catalog in lib/threat_data.lua.
-            if sn == "lina_w_anti_gap" then
-                local W_LEAD       = 1.12
-                -- v0.5.48 Phase 2: try the per-mod catalog first; if a
-                -- catalog entry exists, use its precise impact_t for the
-                -- in_window check. The catalog encodes KV-derived travel
-                -- speed (Tusk snowball uses snowball_movement_speed=1675)
-                -- + cast point + carry/aim distinction. Falls back to
-                -- v0.5.47.2 max(stamped, live) when no catalog entry.
-                if state.compute_arrival_time then
-                    local impact_t, impact_pos, cat_entry, cat_speed =
-                        state.compute_arrival_time(entry.threat_mod, entry.caster, state.self_npc)
-                    if impact_t then
-                        -- v0.5.49: per-mod fire window from catalog kind +
-                        -- speed (replaces hardcoded [1.07, 1.32]). Carry-
-                        -- Lina is tight symmetric ±225/speed; hit-and-stop
-                        -- is wide lower bound = cast_point_floor 0.6s.
-                        -- Lua multi-return gotcha: `a and f() or x, y` does NOT
-                        -- assign both returns from f() to both targets. Use
-                        -- explicit if/else so the second return value lands in `upper`.
-                        --
-                        -- v0.5.50.8: turn_s removed (v0.5.50.7 demo log
-                        -- confirmed Dota's cast point absorbs turn time
-                        -- for W's 0.6s cast point; adding turn linearly
-                        -- shifted the window into "Bara too far at fire,
-                        -- miss at detonation" territory). The brain does
-                        -- not need to model facing; the engine rotates
-                        -- Lina during cast point automatically.
-                        local lower, upper
-                        if state.compute_w_fire_window then
-                            lower, upper = state.compute_w_fire_window(cat_entry, cat_speed)
-                        else
-                            lower, upper = W_LEAD - 0.05, W_LEAD + 0.20
-                        end
-                        local in_window = impact_t >= lower and impact_t <= upper
-                        tlog(3, "w_catalog_eta_gate", {
-                            d         = string.format("%.0f", d),
-                            speed     = string.format("%.0f", cat_speed or 0),
-                            impact_t  = string.format("%.2f", impact_t),
-                            lower     = string.format("%.2f", lower),
-                            upper     = (upper == math.huge) and "inf" or string.format("%.2f", upper),
-                            in_window = in_window and "y" or "n",
-                            mod       = tostring(entry.threat_mod),
-                            kind      = tostring(cat_entry and cat_entry.kind or "-"),
-                            -- v0.5.50.2 diag: surface speed_source so we can
-                            -- tell at a glance whether the lib catalog has
-                            -- the new ramp fields (live_with_ramp) or stale
-                            -- cached pre-v0.5.50 values (live_or_fallback).
-                            source    = tostring(cat_entry and cat_entry.speed_source or "-"),
-                        })
-                        if in_window then
-                            entry._fire_dist_eff   = -3  -- sentinel: catalog path
-                            entry._fire_save_eff   = sn
-                            entry._catalog_aim_pos = impact_pos
-                            return true, "w_catalog_eta", eta_trigger_eff
-                        end
-                        -- Catalog hit but out of window: defer, block legacy.
-                        return false, nil, -1
-                    end
-                end
-                -- v0.5.47.2 fallback: no catalog entry, use max(stamped, live).
-                local live_speed   = NPC.GetMoveSpeed and NPC.GetMoveSpeed(entry.caster) or 0
-                local stamped_spd  = entry.eta_speed or 0
-                local eff_speed    = math.max(live_speed, stamped_spd)
-                if eff_speed > 0 then
-                    local real_eta  = d / eff_speed
-                    local stamped_e = stamped_spd > 0 and (d / stamped_spd) or -1
-                    local in_window = real_eta >= (W_LEAD - 0.05)
-                                      and real_eta <= (W_LEAD + 0.20)
-                    tlog(3, "w_live_eta_gate", {
+            -- v0.5.51 Phase 3 slice 1: GENERIC per-save catalog gate
+            -- (generalized from the v0.5.47-v0.5.50.8 W-only gate).
+            -- For any save whose SAVE_FIRE entry has prep_time > 0
+            -- AND the catalog has a THREAT_ARRIVAL_TIMING entry for
+            -- this threat, gate the fire on impact_t in [prep_time,
+            -- prep_time + upper_margin] per state.compute_save_fire_
+            -- window. Upper margin is geometric (catch_radius/speed)
+            -- for AoE-catch saves on homing kinds (W's old behavior);
+            -- tight tolerance (0.10s) for others.
+            -- D3 chosen in v0.5.51 design discussion:
+            --   in_window     -> fire (return true)
+            --   above upper   -> STOP chain walk (return false,nil,-1)
+            --                    Lower-priority saves have smaller
+            --                    prep_time so their moments are also
+            --                    further out; nothing fires this tick.
+            --   below lower   -> CONTINUE to next save in chain (set
+            --                    catalog_too_late flag, skip rest of
+            --                    this iteration's gates).
+            -- For W (prep_time=1.12, catch_radius=225) this matches
+            -- v0.5.50.8 exactly. For Lotus/BKB/Pike (prep_time set,
+            -- no catch_radius) the upper is prep_time + 0.10. For
+            -- saves without prep_time: no gate, legacy distance path.
+            local catalog_too_late = false
+            local save_entry_sf = SAVE_FIRE[sn]
+            if save_entry_sf and save_entry_sf.prep_time
+               and save_entry_sf.prep_time > 0
+               and state.compute_arrival_time then
+                local impact_t, impact_pos, cat_entry, cat_speed =
+                    state.compute_arrival_time(entry.threat_mod, entry.caster, state.self_npc)
+                if impact_t and cat_entry then
+                    local lower, upper = state.compute_save_fire_window(
+                        cat_entry, cat_speed, save_entry_sf)
+                    local in_window = impact_t >= lower and impact_t <= upper
+                    tlog(3, "catalog_eta_gate", {
+                        save      = tostring(save_entry_sf.short or sn),
                         d         = string.format("%.0f", d),
-                        speed     = string.format("%.0f", eff_speed),
-                        live      = string.format("%.0f", live_speed),
-                        stamped   = string.format("%.0f", stamped_spd),
-                        real_eta  = string.format("%.2f", real_eta),
-                        stamped_e = string.format("%.2f", stamped_e),
+                        speed     = string.format("%.0f", cat_speed or 0),
+                        impact_t  = string.format("%.2f", impact_t),
+                        lower     = string.format("%.2f", lower),
+                        upper     = (upper == math.huge) and "inf" or string.format("%.2f", upper),
                         in_window = in_window and "y" or "n",
+                        mod       = tostring(entry.threat_mod),
+                        kind      = tostring(cat_entry.kind or "-"),
+                        source    = tostring(cat_entry.speed_source or "-"),
                     })
                     if in_window then
-                        entry._fire_dist_eff = -2  -- sentinel: live-eta path
-                        entry._fire_save_eff = sn
-                        return true, "w_live_eta", eta_trigger_eff
+                        entry._fire_dist_eff   = -3  -- sentinel: catalog path
+                        entry._fire_save_eff   = sn
+                        entry._catalog_aim_pos = impact_pos
+                        return true, "catalog_eta_" .. tostring(save_entry_sf.short or sn),
+                               eta_trigger_eff
                     end
-                    -- v0.5.47.1: out of live-eta window. Block both the
-                    -- static dist gate AND the eta_trigger fallback in
-                    -- armed_threats_tick by returning eta_trigger_eff=-1
-                    -- (sentinel). v0.5.47 returned eta_trigger_eff=1.20
-                    -- (W's SAVE_ETA_TRIGGER) which let armed_threats_tick
-                    -- fire W via the legacy eta_trigger path using the
-                    -- stamped eta=d/600. v0.5.47 demo log L4350-4378
-                    -- showed Bara fired at stamped eta=1.18 (via=eta_trigger)
-                    -- but real_eta was 1.37 (speed=515 d=707) -- live gate
-                    -- correctly said "wait" but legacy path overrode.
-                    -- eta_trigger_eff=-1 makes `eta <= -1` false in
-                    -- armed_threats_tick so no eta_trigger fire happens;
-                    -- next frame's chain peek re-evaluates with new d/speed.
-                    return false, nil, -1
+                    if impact_t > upper then
+                        -- D3 (y): too early. STOP chain walk.
+                        return false, nil, -1
+                    end
+                    -- D3 (x): impact_t < lower. Too late for THIS
+                    -- save; continue to next chain iteration.
+                    catalog_too_late = true
                 end
-                -- live_speed unavailable or zero: fall through to the
-                -- standard dist + eta_trigger gates below (stamped path,
-                -- pre-v0.5.47 behavior).
+                -- impact_t nil OR cat_entry nil = no catalog entry
+                -- for this threat. Fall through to legacy paths
+                -- (W's live-eta fallback for W; distance gate
+                -- otherwise).
             end
-            -- v0.5.10: PROXIMITY GATE first. User design
-            -- principle: fire defense when the threat is almost
-            -- hitting, not when it starts/charging. Spatial
-            -- distance is concrete; cast-point times vary with
-            -- talents/items. If this save has a SAVE_FIRE_DISTANCE
-            -- entry and the caster has closed inside it, fire NOW
-            -- via=save_dist. Pike enemy-cast path bypasses (its
-            -- own pike_enemy_range gate inside SAVE_FIRE.fire);
-            -- self-displacement saves (Pike-self / Force-self)
-            -- additionally refuse below SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR
-            -- so we never push Lina INTO the impact zone of a
-            -- threat that already crossed her position.
-            local is_pike_enemy_cast = (sn == "item_hurricane_pike"
-                and entry.caster and Target.IsAlive(entry.caster)
-                and not (NPC.HasState and NPC.HasState(entry.caster, MS.MODIFIER_STATE_MAGIC_IMMUNE))
-                and dist_to(entry.caster) <= state.pike_enemy_range())
-            local dov = SAVE_FIRE_DISTANCE[sn]
-            local is_self_push = (sn == "item_force_staff" or sn == "item_hurricane_pike")
-            local under_floor = is_self_push and d < SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR
-            if dov and not is_pike_enemy_cast and not under_floor and d <= dov then
-                entry._fire_dist_eff = dov
-                entry._fire_save_eff = sn
-                return true, "save_dist", eta_trigger_eff
-            end
-            -- Fallback: v0.5.6 SAVE_ETA_TRIGGER time-gate.
-            local ov = SAVE_ETA_TRIGGER[sn]
-            if ov then
-                -- Pike: enemy-target path needs lead. Use the
-                -- override only if the self-cast branch will
-                -- run (no enemy in pike_enemy_range).
-                if is_pike_enemy_cast then
-                    -- enemy-cast path: keep the 0.8s lead from entry default
-                else
-                    eta_trigger_eff = ov
+
+            if not catalog_too_late then
+                -- v0.5.47.2 W-specific legacy live-eta fallback.
+                -- Only runs when sn == lina_w_anti_gap AND the
+                -- catalog had no entry for this threat (so the
+                -- generic gate above did nothing). Catalog-covered
+                -- threats reach the W fire via the generic gate.
+                if sn == "lina_w_anti_gap" then
+                    local W_LEAD       = 1.12
+                    local live_speed   = NPC.GetMoveSpeed and NPC.GetMoveSpeed(entry.caster) or 0
+                    local stamped_spd  = entry.eta_speed or 0
+                    local eff_speed    = math.max(live_speed, stamped_spd)
+                    if eff_speed > 0 then
+                        local real_eta  = d / eff_speed
+                        local stamped_e = stamped_spd > 0 and (d / stamped_spd) or -1
+                        local in_window = real_eta >= (W_LEAD - 0.05)
+                                          and real_eta <= (W_LEAD + 0.20)
+                        tlog(3, "w_live_eta_gate", {
+                            d         = string.format("%.0f", d),
+                            speed     = string.format("%.0f", eff_speed),
+                            live      = string.format("%.0f", live_speed),
+                            stamped   = string.format("%.0f", stamped_spd),
+                            real_eta  = string.format("%.2f", real_eta),
+                            stamped_e = string.format("%.2f", stamped_e),
+                            in_window = in_window and "y" or "n",
+                        })
+                        if in_window then
+                            entry._fire_dist_eff = -2  -- sentinel: live-eta path
+                            entry._fire_save_eff = sn
+                            return true, "w_live_eta", eta_trigger_eff
+                        end
+                        -- v0.5.47.1: out of live-eta window. Block both
+                        -- the static dist gate AND the eta_trigger
+                        -- fallback by returning eta_trigger_eff=-1.
+                        return false, nil, -1
+                    end
+                    -- live_speed unavailable or zero: fall through to
+                    -- standard dist + eta_trigger gates (stamped path).
                 end
+
+                -- v0.5.10: PROXIMITY GATE. Spatial distance is
+                -- concrete; cast-point times vary with talents/items.
+                -- Pike enemy-cast path bypasses (its own
+                -- pike_enemy_range gate inside SAVE_FIRE.fire);
+                -- self-displacement saves additionally refuse below
+                -- SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR so we never push
+                -- Lina INTO the impact zone of a threat that already
+                -- crossed her position.
+                local is_pike_enemy_cast = (sn == "item_hurricane_pike"
+                    and entry.caster and Target.IsAlive(entry.caster)
+                    and not (NPC.HasState and NPC.HasState(entry.caster, MS.MODIFIER_STATE_MAGIC_IMMUNE))
+                    and dist_to(entry.caster) <= state.pike_enemy_range())
+                local dov = SAVE_FIRE_DISTANCE[sn]
+                local is_self_push = (sn == "item_force_staff" or sn == "item_hurricane_pike")
+                local under_floor = is_self_push and d < SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR
+                if dov and not is_pike_enemy_cast and not under_floor and d <= dov then
+                    entry._fire_dist_eff = dov
+                    entry._fire_save_eff = sn
+                    return true, "save_dist", eta_trigger_eff
+                end
+                -- Fallback: v0.5.6 SAVE_ETA_TRIGGER time-gate.
+                local ov = SAVE_ETA_TRIGGER[sn]
+                if ov then
+                    if is_pike_enemy_cast then
+                        -- enemy-cast path: keep the 0.8s lead from entry default
+                    else
+                        eta_trigger_eff = ov
+                    end
+                end
+                return false, nil, eta_trigger_eff
             end
-            return false, nil, eta_trigger_eff
+            -- catalog_too_late: this save's moment has passed; the
+            -- for loop continues to the next save in chain (D3 x).
         end
     end
     return false, nil, eta_trigger_eff
@@ -3786,50 +3805,48 @@ end
 --   channel_at_caster / cast_point_targeted (WD, Lion; stationary
 --   caster; fire-timing handled by other paths):
 --     window = [0, infty] (always passes; aim still applies).
-state.compute_w_fire_window = function(entry, speed)
-    -- v0.5.50.8: drop the v0.5.50.7 turn_s addition. The v0.5.50.7 demo
-    -- log (w_catalog_eta_gate turn=0.41 lower=1.53 upper=1.99 d=964
-    -- speed=488) confirmed Dota's cast point ABSORBS turn time for
-    -- Lina's W (0.6s cast point > typical 0-0.45s turn). Adding turn_s
-    -- linearly shifted the window so the gate fired with Bara at
-    -- d=964u, but Lina's actual detonation was at W_LEAD=1.12s (not
-    -- W_LEAD + turn), leaving Bara at 964 - 488*1.12 = 417u from Lina
-    -- = 192u OUTSIDE the 225r AoE -> miss. User: "we do not need to
-    -- make the character turn just calculate" (engine handles facing
-    -- during cast point; brain only needs to issue the cast order).
-    -- The Sniper.lua:6343 precedent (lead_s = turn + cast_pt + travel)
-    -- holds for Sniper's 0.1s grenade cast point because turn dominates;
-    -- it does NOT generalize to a 0.6s W cast point that absorbs turn.
-    --
-    -- Window restored to v0.5.49's geometric derivation (without the
-    -- v0.5.50.3 visual tightening that left ~6 frames at 60Hz):
-    --   lower = W_LEAD                       (stun before impact)
-    --   upper = W_LEAD + W_AOE_RADIUS/speed  (caster in AoE at detonation)
-    -- At lower: caster at d=0 from Lina at detonation (dead-center).
-    -- At upper: caster at d=W_AOE_RADIUS=225u from Lina at detonation
-    -- (AT the AoE edge with aim-at-self). v0.5.50.6's predict-aim
-    -- (restored in v0.5.50.8) keeps the caster at the AoE CENTER
-    -- across the entire window, removing the v0.5.50.3 visual-miss
-    -- concern that motivated the 0.10s tightening.
-    --
-    -- Other kinds:
-    --   homing_carry (Tusk): same geometric formula.
-    --   channel_at_caster (WD) + cast_point_targeted (Lion): window
-    --     [0, inf] unchanged. Aim at the caster, not at self;
-    --     fire-timing handled by other paths.
-    local W_LEAD = 1.12
-    local W_AOE_RADIUS = 225
-    if not entry then return W_LEAD, W_LEAD + 0.20 end
-    local k = entry.kind or ""
-    if k == "channel_at_caster" or k == "cast_point_targeted" then
-        return 0, math.huge
+-- v0.5.51 (Phase 3 slice 1): generalized from compute_w_fire_window. Reads
+-- save_entry.prep_time as the lower bound (per spec "fire moment as
+-- impact_t - prep_t"). Upper bound depends on save + threat kind:
+--   For homing_charge / homing_carry with save_entry.catch_radius:
+--     upper = prep + catch_radius / speed (geometric, as in v0.5.50.8 for W).
+--     W has catch_radius = 225 (AoE radius); other saves leave it nil.
+--   For channel_at_caster / cast_point_targeted: window [0, inf] preserved
+--     for backward compat; fire-timing handled by other paths in v0.5.51.
+--     Phase 3 slice 2 (v0.5.52) will revisit once the gate logic moves
+--     into lib/defense.lua.
+--   Default upper: prep + UPPER_TOLERANCE (= 0.10s, just frame-rate slack
+--     for non-AoE saves). Per D3 (chosen v0.5.51): active_duration is
+--     stored on save_entry as informational data but is NOT used as the
+--     upper bound; the singular fire-moment per spec means a tight upper.
+--     D3 also chose "above upper STOPS the chain walk; below lower
+--     CONTINUES to the next save"; that logic lives at the call site, not
+--     here.
+-- Backwards-compat alias state.compute_w_fire_window exposed below for
+-- callers that haven't been migrated (Phase 3 slice 2 will retire them).
+state.compute_save_fire_window = function(threat_entry, speed, save_entry)
+    local prep = (save_entry and save_entry.prep_time) or 0
+    local UPPER_TOLERANCE = 0.10
+    if threat_entry then
+        local k = threat_entry.kind or ""
+        if k == "channel_at_caster" or k == "cast_point_targeted" then
+            return 0, math.huge
+        end
+        if (k == "homing_charge" or k == "homing_carry")
+           and save_entry and save_entry.catch_radius
+           and speed and speed > 0 then
+            return prep, prep + save_entry.catch_radius / speed
+        end
     end
-    if speed and speed > 0 then
-        return W_LEAD, W_LEAD + W_AOE_RADIUS / speed
-    end
-    -- Fallback when speed unknown (catalog mid-load, ramp model not
-    -- yet engaged): conservative 0.20s upper margin.
-    return W_LEAD, W_LEAD + 0.20
+    return prep, prep + UPPER_TOLERANCE
+end
+-- v0.5.51 transition alias: the v0.5.49-v0.5.50.8 helper that was W-only
+-- now wraps the generalized helper. Synthesizes a W-shaped save_entry
+-- (prep_time=1.12, catch_radius=225) so any unmigrated caller still gets
+-- the v0.5.50.8 W window. Retired in Phase 3 slice 2.
+state.compute_w_fire_window = function(threat_entry, speed)
+    return state.compute_save_fire_window(threat_entry, speed,
+        { prep_time = 1.12, catch_radius = 225 })
 end
 
 -- Q (Dragon Slave) is a traveling line wave (KV dragon_slave_speed = 1200 u/s,
@@ -8344,6 +8361,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.50.8 drop turn_s, restore v0.5.50.6 predict-aim, keep wide geometric upper. User: 'First thing we do not need to make the character turn just calculate. Do the proposed fix' (engine handles facing during W's 0.6s cast point; brain only computes timing). **v0.5.50.7 demo log proved the bug**: w_catalog_eta_gate turn=0.41 lower=1.53 upper=1.99 d=964 speed=488 -> gate fired at impact_t=1.98 with Bara at 964u from Lina, but actual detonation was W_LEAD=1.12s (turn absorbed by cast point) not W_LEAD + turn = 1.53s -> Bara at detonation = 964 - 488*1.12 = 417u from Lina = 192u OUTSIDE the 225r AoE -> miss. The Sniper.lua:6343 precedent (lead_s = turn + cast_pt + travel) is valid for Sniper's 0.1s grenade cast point because turn dominates; for Lina's 0.6s W cast point, turn is absorbed into the cast point itself and adds nothing to W_LEAD. **Three changes**: (1) compute_w_fire_window drops turn_s param. lower = W_LEAD = 1.12 (stun before impact). upper = W_LEAD + W_AOE_RADIUS/speed (caster in AoE at detonation; geometric derivation from v0.5.49 retained; v0.5.50.3's 0.10s visual tightening stays retired). (2) Call site drops the FindRotationAngle/400 block and the turn tlog field. (3) Predict-aim block RESTORED in lina_w_anti_gap.fire (Vector(x,y,z) constructor from v0.5.50.5, full math from v0.5.50.6). With the WIDE geometric upper (~0.36s at speed=630), the aim-at-self upper-bound fires put caster at 225u from Lina at detonation = AT AoE edge = fragile to position lag + caster collision radius. Predict-aim re-centers the AoE on caster's predicted position at detonation, so caster is at the AoE CENTER for every in-window fire regardless of impact_t. **Math (restored)**: d_at_det = max(0, d_now - eff_speed * W_LEAD); aim = lina + unit(lina to caster) * d_at_det. eff_speed = avg-during-prep from the v0.5.50 ramp model; self-consistent with gate's impact_t. max(0, ...) caps at Lina because homing_charge stops at target. **For the v0.5.50.7 demo scenario re-played in v0.5.50.8**: gate now fires at impact_t in [1.12, 1.58] (= [1.12, 1.12 + 225/488]), Bara at d in [547, 773] from Lina at fire. At detonation T+1.12s, Bara at d in [0, 225]. Predict-aim places AoE center on Bara's predicted position = Bara dead-center in AoE = caught. **aim_via**: catalog_predict for homing_charge (predict ran); catalog_self for other homing kinds; catalog_caster for channel_at_caster. w_defensive_fire gains d_now / d_det / speed fields when predict branch ran. **Scope**: only homing_charge (Bara). Tusk homing_carry stays on plain catalog_self pending demo (snowball carries Lina, different predict needed). WD/Lion unchanged. **Lina.lua 8335 -> 8347 lines (+12; restored predict-aim block + debug fields - removed turn_s plumbing). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara w_catalog_eta_gate has NO turn field. lower=1.12 fixed. upper varies by speed (e.g. upper=1.58 at speed=488). w_defensive_fire aim=catalog_predict with d_now/d_det/speed fields populated; d_det in [0, ~70] for typical impact_t; speed matches gate's catalog speed. Bara stunned at his predicted impact point along approach axis = dead-center in AoE; no edge cases.")
+LOG:info("Lina brain v0.5.51 Phase 3 slice 1: per-save prep_time + generalized catalog gate. User: 'Sure lets make the best plan possible to apply phase 3' -> picked D3 semantics (tight upper tolerance, active_duration informational only; above upper STOPS chain walk, below lower CONTINUES to next save). **Architectural shift**: today the chain walker fires the first ready save when its single gate trips. Phase 3 turns each save into its own timing gate: a save fires when impact_t in [prep_time, prep_time + upper_margin]. Chain order stays as preference; prep_time controls when each save's moment is. Earlier-priority saves with smaller prep_time will fire their moment LATER in the encounter (saves stack as ladder W -> Pike -> Lotus -> BKB as Bara closes). **Three changes** (Lina.lua only): (1) state.compute_w_fire_window renamed to state.compute_save_fire_window(threat_entry, speed, save_entry). Reads save_entry.prep_time as lower; upper is save_entry.catch_radius/speed for AoE-catch saves on homing kinds (W's old geometric upper), or prep_time + 0.10 tolerance otherwise. Backwards-compat alias compute_w_fire_window synthesizes W-shaped save_entry. (2) Four SAVE_FIRE entries gain prep_time + active_duration (+ catch_radius for W): lina_w_anti_gap (1.12/1.6/225), item_lotus_orb (0.3/6.0), item_black_king_bar (0.05/7.0), item_hurricane_pike (0.5/0.4). active_duration is informational only in v0.5.51 (D3 chose tight tolerance over wide active-duration upper because the spec specifies a singular fire moment). Other saves keep prep_time=nil = no gate, legacy behavior. (3) armed_chain_peek's W-only catalog gate generalized to per-save. For any save with prep_time > 0 AND catalog entry: in_window -> fire; impact_t > upper -> STOP chain (D3 y); impact_t < lower -> set catalog_too_late, continue to next save (D3 x). W-specific legacy live-eta fallback retained for threats with no catalog entry. Standard distance + eta_trigger gates wrapped in if not catalog_too_late. **Tlog rename**: w_catalog_eta_gate -> catalog_eta_gate with new save field showing which save the gate is for. **Scope**: only homing_charge / homing_carry kinds use the per-save gate's geometric upper; channel_at_caster / cast_point_targeted keep [0, inf] for v0.5.51 (revisit in slice 2 when gate moves into lib/defense.lua). Cast-point-armed branches still use hardcoded cast_point literals (slice 3 = v0.5.53 catalog cast_point). **Lina.lua 8347 -> 8364 lines (+17; expanded compute_save_fire_window, added SAVE_FIRE prep fields, expanded armed_chain_peek catalog branch + wrapped legacy gates). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara w_catalog_eta_gate replaced with catalog_eta_gate save=w_stun. Same lower=1.12 upper geometric as v0.5.50.8 (W gate behavior unchanged). If W on CD, next save in chain (likely Pike at 0.5 or Lotus at 0.3) has catalog_eta_gate with save=pike/lotus and tight upper tolerance 0.10. Lotus would fire at impact_t in [0.3, 0.4], BKB at [0.05, 0.15]. Chain ladders naturally as Bara closes.")
 
 return callbacks

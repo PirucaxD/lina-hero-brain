@@ -599,6 +599,43 @@ local function run_chain_walk(self, intent, threat_mod, threat_caster,
         -- handle their own timing (Lina's lina_w_anti_gap.fire now does
         -- the impact_t window check internally). Defense.ComputeSaveFireWindow
         -- stays as a public helper for hero .fire bodies that want the math.
+        --
+        -- v0.5.70: opt-in catalog impact_t defer + severity-aware skip for
+        -- high-CD saves (Lotus / BKB / Aeon). Hero registers
+        -- cfg.high_cd_saves + cfg.compute_arrival_time + cfg.self_hp_fraction
+        -- to enable. Without these registrations the chain walker is
+        -- byte-equivalent to pre-v0.5.70 behaviour.
+        --   - catalog_defer: if the threat has a THREAT_ARRIVAL_TIMING entry
+        --     and impact_t > cfg.cast_point_defer_threshold (default 0.5s),
+        --     skip the high-CD save with reason=cast_point_too_early. The
+        --     armed-threats tick re-evaluates each frame; the save fires
+        --     when impact_t crosses the threshold.
+        --   - severity_skip: if severity == "low" AND HP fraction >
+        --     cfg.severity_skip_hp_threshold (default 0.75), skip with
+        --     reason=low_severity_high_hp. Avoids burning a 60s BKB on a
+        --     CM Frostbite when Lina is at full HP.
+        local is_high_cd = fire_entry and c.high_cd_saves
+                           and c.high_cd_saves[save_name] or false
+        local catalog_defer_t
+        if is_high_cd and c.compute_arrival_time and threat_mod
+           and threat_caster and c.self_npc then
+            local me = c.self_npc()
+            if me then
+                local impact_t = c.compute_arrival_time(threat_mod, threat_caster, me)
+                if impact_t and impact_t > (c.cast_point_defer_threshold or 0.5) then
+                    catalog_defer_t = impact_t
+                end
+            end
+        end
+        local sev_skip_hp
+        if is_high_cd and not catalog_defer_t
+           and severity == "low" and c.self_hp_fraction then
+            local hp_frac = c.self_hp_fraction()
+            local threshold = c.severity_skip_hp_threshold or 0.75
+            if hp_frac and hp_frac > threshold then
+                sev_skip_hp = hp_frac
+            end
+        end
         if not fire_entry then
             c.tlog(3, "save_chain_skip", { save = save_name, reason = "no_entry" })
         elseif c.ability_saves[save_name] and not c.self_can_cast_abilities() then
@@ -611,6 +648,18 @@ local function run_chain_walk(self, intent, threat_mod, threat_caster,
             c.tlog(3, "save_chain_skip", { save = fire_entry.short, reason = "tether_unreachable" })
         elseif not c.save_is_ready(save_name) then
             c.tlog(3, "save_chain_skip", { save = fire_entry.short, reason = "not_ready" })
+        elseif catalog_defer_t then
+            c.tlog(3, "save_chain_skip", {
+                save = fire_entry.short, reason = "cast_point_too_early",
+                impact_t = string.format("%.2f", catalog_defer_t),
+                threshold = string.format("%.2f", c.cast_point_defer_threshold or 0.5),
+            })
+        elseif sev_skip_hp then
+            c.tlog(3, "save_chain_skip", {
+                save = fire_entry.short, reason = "low_severity_high_hp",
+                hp = string.format("%.2f", sev_skip_hp),
+                threshold = string.format("%.2f", c.severity_skip_hp_threshold or 0.75),
+            })
         else
             local penalty = (c.TD.SaveReservePenalty and c.TD.SaveReservePenalty(save_name, threat_mod)) or 0
             local concurrent = self:CountConcurrentExcluding(armed_entry)

@@ -2580,6 +2580,44 @@ defense_dispatcher = Defense.New {
     -- state.compute_arrival_time directly (not through cfg). The
     -- catalog data + helper stay reachable on the hero side; only
     -- the cfg plumbing into lib is removed.
+    -- v0.5.70 Phase 4 slice 5: REINTRODUCED for the new chain-walker
+    -- skip branches (cast_point_too_early + low_severity_high_hp).
+    -- The defer / skip gates only activate for saves listed in
+    -- high_cd_saves so unrelated chain decisions stay byte-equivalent
+    -- to v0.5.69. Catalog source of truth is THREAT_ARRIVAL_TIMING
+    -- (40 entries after slices 1-4); compute_arrival_time returns
+    -- impact_t = cast_point + travel + post_cast_delay.
+    compute_arrival_time = state.compute_arrival_time,
+    -- Lina HP fraction for the severity skip. Per
+    -- reference_uczone_hp_api memory HP lives on Entity, not NPC.
+    self_hp_fraction = function()
+        local me = state.self_npc
+        if not me or not Entity.IsAlive(me) then return nil end
+        local hp_ok, hp     = pcall(Entity.GetHealth, me)
+        local hpm_ok, hpmax = pcall(Entity.GetMaxHealth, me)
+        if not (hp_ok and hpm_ok and hp and hpmax and hpmax > 0) then return nil end
+        return hp / hpmax
+    end,
+    -- High-CD save set for the v0.5.70 defer/skip gates. Saves listed
+    -- here get the cast_point_too_early + low_severity_high_hp checks
+    -- before fire. Others (Force, Pike, W, FC, Manta, Shadow Blade,
+    -- Silver Edge, Ghost Scepter) skip the gates entirely -- their
+    -- CDs are short enough that burning early isn't a meaningful loss.
+    high_cd_saves = {
+        item_lotus_orb       = true,  -- 14s CD, reflect
+        item_black_king_bar  = true,  -- 60s CD (depleting), magic-immune
+        item_aeon_disk       = true,  -- 90+s CD, time-stop on lethal
+        item_pipe_of_insight = true,  -- 30s CD, magic-shield + ally aura
+        item_glimmer_cape    = true,  -- 25s CD, invis + magic-resist
+        item_wind_waker      = true,  -- 30s CD, self-cyclone movable
+        item_cyclone         = true,  -- 23s CD, self-cyclone immunity
+    },
+    -- v0.5.70 tuning. cast_point_defer_threshold = how late to wait
+    -- before firing a high-CD save (0.5s = save fires when impact is
+    -- 0.5s away). severity_skip_hp_threshold = HP fraction above which
+    -- low-severity threats don't warrant burning a high-CD save.
+    cast_point_defer_threshold   = 0.5,
+    severity_skip_hp_threshold   = 0.75,
     -- v0.5.41 GAP-3-GENERIC: hero-supplied chain rewriter (was hardcoded
     -- inside lib/defense.lua ResolveSaveOrder pre-v0.5.41). Demotes
     -- lina_flame_cloak to chain tail under ctx.fs_shard_window so a
@@ -8846,6 +8884,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.69 (Phase 4 slice 4): catalog 32 -> 40 (more projectiles + late-stage threats). User: 'go on with our slices and check how sniper 217 can be used on our favor if it can'. **8 new entries** in lib/threat_data.lua THREAT_ARRIVAL_TIMING: modifier_pudge_meat_hook (cp 0.3 self, skill-shot drag), modifier_mirana_arrow (cp 0.3 self, long-range projectile stun), modifier_skywrath_mage_mystic_flare_thinker (cp 0.5 self, AoE-at-ground thinker 2s damage), modifier_ogre_magi_fireblast (cp 0.4 self, projectile stun), modifier_crystal_maiden_frostbite (cp 0.3 self, root + DoT), modifier_jakiro_macropyre_thinker (cp 0.5 self, line-of-fire thinker 7-9s), modifier_witch_doctor_maledict (cp 0.3 self, prophylactic curse), modifier_dazzle_poison_touch (cp 0.3 self, chain stun). All cast_point_targeted (kind taxonomy still lacks projectile_homing / cast_point_aoe variants). **Behavioural impact on Lina**: still minimal-to-none (consumer gap unchanged from v0.5.66 / .67 / .68). W gate only consumes homing kinds; Pike / Force / EUL / WW dont read compute_arrival_time. Catalog now at 40 entries -- approaches the realistic ceiling for prep-time-save-relevant threats (the full ABILITY_TO_THREAT lib table has 195 entries but most are simple respond-immediately threats where impact_t precision doesn't matter). **Parallel investigation** launched: how Lina can better leverage Snipers existing 217-skill awareness in lib (audit running as Explore agent in background). Results will inform whether the next move is (a) keep expanding catalog, (b) wire a consumer that USES the 40-entry catalog, or (c) add Lina-specific OVERRIDES for high-impact threats where the default chain is suboptimal. **Files**: lib/threat_data.lua +~110 lines (8 entries). Lina.lua banner only. lib/escape.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.61 / v6.15.278. **Sniper audit (v6.15.278) clean**: nothing dropped except documented level-3 diagnostic tlog (per Explore agent report). 217-skills reference = ABILITY_TO_THREAT (195) + THREATS_ON_SELF (185) overlapping; no single table has exactly 217. Lina already pulls these via shared lib so the awareness is intact.")
+LOG:info("Lina brain v0.5.70 (Phase 4 slice 5): CATALOG CONSUMER WIRED. User: 'Both #1 and #2 in one slice' on the audit recommendations. **The unlock**: until now, 33 of 40 THREAT_ARRIVAL_TIMING entries were idle (only the W gate at L1646 consumed homing_charge / homing_carry kinds; cast_point_targeted entries from slices 1-4 had zero consumers). v0.5.70 adds the first cross-cutting consumer in lib/defense.lua run_chain_walk: two new opt-in skip branches before the existing fire logic. **Branch 1 (cast_point_too_early)**: when a high-CD save (Lotus, BKB, Aeon, Pipe, Glimmer, WW, Cyclone) is being considered AND the threat has a catalog entry AND impact_t > cast_point_defer_threshold (default 0.5s), skip with reason=cast_point_too_early + impact_t + threshold logged. The armed-threats tick re-evaluates each frame; the save fires when impact_t crosses the threshold. Fixes the audit-flagged 'Lotus/BKB burns at cast-start on slow casts (Lion Finger 0.6s, OD Sanity Eclipse 1.7s, Sand King Epicenter 2.0s) and is on CD when the actual impact lands' class of bug. **Branch 2 (low_severity_high_hp)**: when a high-CD save is being considered AND severity (from TD.SeverityOf, 180 entries) == 'low' AND HP fraction > severity_skip_hp_threshold (default 0.75), skip with reason=low_severity_high_hp. Avoids burning a 60s BKB on a CM Frostbite when Lina is at full HP. **Lib changes opt-in**: gated on cfg.compute_arrival_time + cfg.self_hp_fraction + cfg.high_cd_saves registrations. Without these (Sniper does not register them), run_chain_walk is byte-equivalent to v0.5.69. **Lina registrations**: reintroduced cfg.compute_arrival_time (was removed in v0.5.55 when last consumer was deleted), added cfg.self_hp_fraction (Entity.GetHealth / GetMaxHealth per reference_uczone_hp_api), cfg.high_cd_saves (7-item set: Lotus, BKB, Aeon, Pipe, Glimmer, WW, Cyclone), cfg.cast_point_defer_threshold=0.5, cfg.severity_skip_hp_threshold=0.75. **Files**: lib/defense.lua +50 lines (two skip branches + 24 lines comment in run_chain_walk). Lina.lua +35 lines (5 cfg additions in Defense.New). lib/threat_data.lua + lib/escape.lua + Sniper.lua unchanged. **Verification on next demo**: new tlogs save_chain_skip reason=cast_point_too_early impact_t=N.NN should fire on slow-cast threats (Doom 0.5s, AA Ice Blast 0.5s, OD 1.7s, Sand King 2.0s, FV Chrono 0.4s) when the chain is walked early. save_chain_skip reason=low_severity_high_hp should fire for low-severity threats at full HP (e.g. CM Frostbite, WD Maledict). Bara/Tusk homing behavior UNCHANGED. Pike/Force/EUL/WW .fire bodies UNCHANGED.")
 
 return callbacks

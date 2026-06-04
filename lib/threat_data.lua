@@ -1491,6 +1491,23 @@ ThreatData.THREAT_ARRIVAL_TIMING = {
     },
 }
 
+-- v0.5.56: cast_point single source of truth.
+-- The compute_arrival_time catalog (THREAT_ARRIVAL_TIMING) is the
+-- authoritative static cast_point per threat. CAST_POINT_THREATS.cp_default
+-- (the fallback used by Lina's arming sites when Ability.GetCastPoint
+-- returns 0 / unavailable) is synced from there at load time so future
+-- catalog edits propagate without touching two tables. Entries present in
+-- CAST_POINT_THREATS but absent from THREAT_ARRIVAL_TIMING (Doom, Tinker
+-- Laser, AA Ice Blast, OD Sanity Eclipse, Zeus Thundergods Wrath, Sand
+-- King Epicenter) keep their existing cp_default literal -- the catalog
+-- covers only the 7 entries Phase 2 seeded.
+for _mod, _t in pairs(ThreatData.THREAT_ARRIVAL_TIMING) do
+    local _cp_entry = ThreatData.CAST_POINT_THREATS[_mod]
+    if _cp_entry and _t.cast_point and _t.cast_point > 0 then
+        _cp_entry.cp_default = _t.cast_point
+    end
+end
+
 ----------------------------------------------------------------------------
 -- THREAT_TIMING - when to fire the save relative to the threat
 ----------------------------------------------------------------------------

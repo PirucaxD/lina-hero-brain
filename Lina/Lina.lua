@@ -2452,165 +2452,16 @@ for k, v in pairs(LINA_EXTRA_THREATS) do combined_threats_on_self[k] = v end
 -- literal stays self-contained.
 K.PERSISTENT_LOCK_CAP_S = 1.7  -- v0.5.42: = K.PERSISTENT_THREAT_TICK_INTERVAL - 0.1 - lock_buffer_s
 
--- Helper: nil-tolerant distance between two units. Mirrors dist_to() at L278
--- but does not depend on state.self_npc (resolvers receive both units).
-local function _lina_eta_dist(a_unit, b_unit)
-    if not a_unit or not b_unit then return 0 end
-    if Entity.IsEntity and (not Entity.IsEntity(a_unit) or not Entity.IsEntity(b_unit)) then return 0 end
-    local a = NPCLib.origin(a_unit)
-    local b = NPCLib.origin(b_unit)
-    if not a or not b then return 0 end
-    local dx, dy = (a.x or 0) - (b.x or 0), (a.y or 0) - (b.y or 0)
-    return math.sqrt(dx * dx + dy * dy)
-end
-
--- Helper: cast_point resolver factory. Used by entries (1)-(8), (24), (25).
--- Prefers armed.cast_point + armed.arm_t (stamped at arm-time, drift-free);
--- falls back to a pcall-wrapped live Ability.GetCastPoint, then cp_default.
-local function _lina_eta_make_cast_point(cp_default, floor_s)
-    floor_s = floor_s or 0.1
-    return function(_caster, _target, armed, ab, now_t)
-        if armed and armed.cast_point and armed.arm_t then
-            local rem = armed.cast_point - ((now_t or 0) - armed.arm_t)
-            if rem < floor_s then rem = floor_s end
-            return rem
-        end
-        if ab and Ability.GetCastPoint then
-            local ok, cp = pcall(Ability.GetCastPoint, ab, true)
-            if ok and type(cp) == "number" and cp > 0 then
-                if cp < floor_s then cp = floor_s end
-                return cp
-            end
-        end
-        local d = cp_default or 0.5
-        if d < floor_s then d = floor_s end
-        return d
-    end
-end
-
--- Helper: dist/speed resolver factory for armed_chain (Bara, Tusk, Slark) +
--- instant_blink (PA, QoP). blink_cap clamps the result to BLINK_ARRIVE_
--- TIMEOUT_S (L1217 = 2.0s) for blink classes; nil means no cap.
-local function _lina_eta_make_dist_speed(default_speed, blink_cap)
-    return function(caster, target, armed, _ab, _now_t)
-        local v = (armed and armed.eta_speed) or default_speed
-        if not v or v <= 0 then v = default_speed end
-        local d = _lina_eta_dist(caster, target)
-        local eta = d / v
-        if blink_cap and eta > blink_cap then eta = blink_cap end
-        if eta < 0.05 then eta = 0.05 end
-        return eta
-    end
-end
-
--- Helper: NPC.GetModifierRemaining-based resolver. cap_s clamps so the
--- persistent_threats_tick path (L1739, K.PERSISTENT_THREAT_TICK_INTERVAL=2.1)
--- can re-acquire before the lock TTL elapses. NPC.GetModifierRemaining is
--- pcall-wrapped because the binding is not used elsewhere in Lina.lua; if
--- absent the rem stays at 0 and floors to floor_s (safe, minimal lock).
-local function _lina_eta_make_remaining(mod_name, cap_s, floor_s)
-    floor_s = floor_s or 0.1
-    return function(_caster, target, _armed, _ab, _now_t)
-        local rem = 0
-        if target and Entity.IsEntity and Entity.IsEntity(target) and NPC.GetModifierRemaining then
-            local ok, v = pcall(NPC.GetModifierRemaining, target, mod_name)
-            if ok and type(v) == "number" then rem = v end
-        end
-        if cap_s and rem > cap_s then rem = cap_s end
-        if rem < floor_s then rem = floor_s end
-        return rem
-    end
-end
-
--- Helper: line_projectile resolver factory (meat hook, mirana arrow, sven
--- bolt). Returns d/speed when caster + target both exist; falls back to
--- armed.eta_trigger or fog_fallback when caster is in FoW (caster nil).
-local function _lina_eta_make_line(speed, fog_fallback)
-    return function(caster, target, armed, _ab, _now_t)
-        if not caster or not target or (Entity.IsEntity and not Entity.IsEntity(caster)) then
-            local fb = (armed and armed.eta_trigger) or fog_fallback or 1.0
-            if fb < 0.1 then fb = 0.1 end
-            return fb
-        end
-        local d = _lina_eta_dist(caster, target)
-        local eta = d / (speed or 1100)
-        if eta < 0.1 then eta = 0.1 end
-        return eta
-    end
-end
-
--- Helper: Layer-1 FC offensive synthetic resolver (S1-S4). The 4 synthetic
--- mod keys ride the same lock domain so an offensive FC fire blocks a
--- subsequent defensive FC fire within ~2.2s (single-spend invariant across
--- offensive + defensive FC use). Fixed 1.9s -> 2.2s post-buffer lock TTL.
+-- v0.5.74 lib-first lift: factory helpers + generic ETA resolver moved to
+-- lib/defense.lua (Defense.EtaResolvers.{CastPoint,Remaining,DistSpeed,Line}
+-- + Defense.MakeGenericEtaResolver). _lina_eta_dist moved to inline use of
+-- the lib equivalent. compute_arrival_time lifted to lib/threat_data.lua
+-- as ThreatData.ComputeArrivalTime. The Lina-only Layer-1 FC offensive
+-- synthetic resolver stays here because it is a hero-specific single-spend
+-- invariant (offensive FC fire blocks a subsequent defensive FC fire within
+-- ~2.2s; not a pattern shared with other heroes).
+local EtaR = Defense.EtaResolvers
 local function _lina_eta_fc_offensive(_c, _t, _a, _ab, _now_t) return 1.9 end
-
--- v0.5.72 Phase 4 slice 7: generic ETA fallback for mods not in
--- LINA_ETA_RESOLVERS. Audit rec #3. Reads TD.THREAT_ARRIVAL_TIMING for
--- catalog-aware TTL (cast_point + post_cast_delay for cast-point threats,
--- GetModifierRemaining for channels, dist/speed for homing kinds). The
--- per-mod entries in LINA_ETA_RESOLVERS still win because cfg.eta_resolver
--- is checked first; this fallback covers the ~14 catalog mods from slices
--- 1-4 + 6 that don't have a hand-tuned per-mod entry (Sand King Epicenter,
--- CM FF, Enigma BH, FV Chrono, ES Echo Slam / Earth Splitter, Magnus RP,
--- Slardar Crush, Lich Chain Frost, Tiny Avalanche, Skywrath MF, Ogre
--- Fireblast, CM Frostbite, Jakiro Macropyre, WD Maledict, Dazzle Poison
--- Touch, Beastmaster PR, Tide Ravage). Requires v0.5.72 lib API extension
--- (canonical_mod passed as 6th arg).
-local function _lina_eta_default(caster, target, _armed, _ab, _now_t, mod_name)
-    if not mod_name then return nil end
-    local entry = TD.THREAT_ARRIVAL_TIMING and TD.THREAT_ARRIVAL_TIMING[mod_name]
-    if entry then
-        -- Channel: prefer caster-side GetModifierRemaining (matches WD Death
-        -- Ward + Bane Grip + Pugna Drain catalog convention; channel lives
-        -- on the caster, target may have a different _target variant).
-        if entry.kind == "channel_at_caster" then
-            local rem = 0
-            if caster and Entity.IsEntity and Entity.IsEntity(caster)
-               and NPC.GetModifierRemaining then
-                local ok, v = pcall(NPC.GetModifierRemaining, caster, mod_name)
-                if ok and type(v) == "number" and v > 0 then rem = v end
-            end
-            if rem > 0 then
-                if rem > K.PERSISTENT_LOCK_CAP_S then rem = K.PERSISTENT_LOCK_CAP_S end
-                if rem < 0.1 then rem = 0.1 end
-                return rem
-            end
-            -- fall through to cast_point if remaining unavailable
-        end
-        -- Cast-point class: cast_point + post_cast_delay covers cast_point_
-        -- targeted nukes + AoEs + projectile dispatch windows.
-        if entry.cast_point and entry.cast_point > 0 then
-            local total = entry.cast_point + (entry.post_cast_delay or 0)
-            if total < 0.1 then total = 0.1 end
-            return total
-        end
-        -- Homing kinds: dist/speed_fallback.
-        if entry.speed_fallback and entry.speed_fallback > 0
-           and (entry.kind == "homing_charge" or entry.kind == "homing_carry"
-                or entry.kind == "instant_blink") then
-            local d = _lina_eta_dist(caster, target)
-            local eta = d / entry.speed_fallback
-            if eta < 0.05 then eta = 0.05 end
-            return eta
-        end
-    end
-    -- No catalog entry. Try target-side GetModifierRemaining as a last
-    -- resort (covers debuffs the lib classifies as mid_channel / reactive
-    -- but doesn't have catalog entries for).
-    if target and Entity.IsEntity and Entity.IsEntity(target)
-       and NPC.GetModifierRemaining then
-        local ok, v = pcall(NPC.GetModifierRemaining, target, mod_name)
-        if ok and type(v) == "number" and v > 0 then
-            local rem = v
-            if rem > K.PERSISTENT_LOCK_CAP_S then rem = K.PERSISTENT_LOCK_CAP_S end
-            if rem < 0.1 then rem = 0.1 end
-            return rem
-        end
-    end
-    -- No data; return nil so lib falls back to cfg.fallback_lock_ttl_s.
-    return nil
-end
 
 -- The 30 per-mod + 4 synthetic FC resolvers, keyed by canonical mod string.
 -- The dispatcher canonicalizes the threat_mod via cfg.canonicalize_mod
@@ -2618,20 +2469,23 @@ end
 -- only need one entry on the canonical side; both are listed here for
 -- belt-and-braces in case the alias table grows later.
 local LINA_ETA_RESOLVERS = {
-    -- (1)-(9) cast_point class
-    modifier_sniper_assassinate                = _lina_eta_make_cast_point(2.0),
-    modifier_lion_finger_of_death              = _lina_eta_make_cast_point(0.6),
-    modifier_lina_laguna_blade                 = _lina_eta_make_cast_point(0.45),
-    modifier_ice_blast                         = _lina_eta_make_cast_point(0.5),
-    modifier_ancient_apparition_ice_blast      = _lina_eta_make_cast_point(0.5),
-    modifier_obsidian_destroyer_sanity_eclipse = _lina_eta_make_cast_point(1.7),
-    modifier_tinker_laser                      = _lina_eta_make_cast_point(0.45),
-    modifier_zuus_thundergods_wrath            = _lina_eta_make_cast_point(0.6),
-    modifier_doom_bringer_doom                 = _lina_eta_make_cast_point(0.5),
+    -- (1)-(9) cast_point class (Defense.EtaResolvers.CastPoint)
+    modifier_sniper_assassinate                = EtaR.CastPoint(2.0),
+    modifier_lion_finger_of_death              = EtaR.CastPoint(0.6),
+    modifier_lina_laguna_blade                 = EtaR.CastPoint(0.45),
+    modifier_ice_blast                         = EtaR.CastPoint(0.5),
+    modifier_ancient_apparition_ice_blast      = EtaR.CastPoint(0.5),
+    modifier_obsidian_destroyer_sanity_eclipse = EtaR.CastPoint(1.7),
+    modifier_tinker_laser                      = EtaR.CastPoint(0.45),
+    modifier_zuus_thundergods_wrath            = EtaR.CastPoint(0.6),
+    modifier_doom_bringer_doom                 = EtaR.CastPoint(0.5),
     -- (10) hard_disable voodoo (floor 0.5s per catalog)
-    modifier_lion_voodoo          = _lina_eta_make_remaining("modifier_lion_voodoo",          nil, 0.5),
-    modifier_shadow_shaman_voodoo = _lina_eta_make_remaining("modifier_shadow_shaman_voodoo", nil, 0.5),
-    -- (11) static storm thinker channel (cap 1.9s)
+    modifier_lion_voodoo          = EtaR.Remaining("modifier_lion_voodoo",          nil, 0.5),
+    modifier_shadow_shaman_voodoo = EtaR.Remaining("modifier_shadow_shaman_voodoo", nil, 0.5),
+    -- (11) static storm thinker channel (cap 1.9s) -- ad-hoc channel-time
+    -- resolver, kept inline because lib/defense doesn't have a
+    -- Ability.GetChannelTime factory yet (queued cleanup if a second hero
+    -- needs the same pattern).
     modifier_disruptor_static_storm_thinker = function(_c, _t, armed, ab, now_t)
         if ab and Ability.GetChannelTime then
             local ok, total = pcall(Ability.GetChannelTime, ab)
@@ -2645,13 +2499,14 @@ local LINA_ETA_RESOLVERS = {
         end
         return K.PERSISTENT_LOCK_CAP_S
     end,
-    -- (12)-(16) channel_on_self / pugna / wd
-    modifier_legion_commander_duel = _lina_eta_make_remaining("modifier_legion_commander_duel", K.PERSISTENT_LOCK_CAP_S),
-    modifier_pudge_dismember_pull  = _lina_eta_make_remaining("modifier_pudge_dismember_pull",  nil),
-    modifier_pudge_dismember       = _lina_eta_make_remaining("modifier_pudge_dismember",       nil),
-    modifier_bane_fiends_grip      = _lina_eta_make_remaining("modifier_bane_fiends_grip",      nil),
-    modifier_pugna_life_drain      = _lina_eta_make_remaining("modifier_pugna_life_drain",      K.PERSISTENT_LOCK_CAP_S),
+    -- (12)-(16) channel_on_self / pugna / wd (Defense.EtaResolvers.Remaining)
+    modifier_legion_commander_duel = EtaR.Remaining("modifier_legion_commander_duel", K.PERSISTENT_LOCK_CAP_S),
+    modifier_pudge_dismember_pull  = EtaR.Remaining("modifier_pudge_dismember_pull",  nil),
+    modifier_pudge_dismember       = EtaR.Remaining("modifier_pudge_dismember",       nil),
+    modifier_bane_fiends_grip      = EtaR.Remaining("modifier_bane_fiends_grip",      nil),
+    modifier_pugna_life_drain      = EtaR.Remaining("modifier_pugna_life_drain",      K.PERSISTENT_LOCK_CAP_S),
     modifier_witch_doctor_death_ward = function(_c, _t, _armed, ab, _now_t)
+        -- Same Ability.GetChannelTime pattern as static_storm_thinker above.
         if ab and Ability.GetChannelTime then
             local ok, total = pcall(Ability.GetChannelTime, ab)
             if ok and type(total) == "number" and total > 0 then
@@ -2663,26 +2518,31 @@ local LINA_ETA_RESOLVERS = {
         return K.PERSISTENT_LOCK_CAP_S
     end,
     -- (17)-(18) armed_chain gap-closers (default speed 600u/s)
-    modifier_spirit_breaker_charge_of_darkness = _lina_eta_make_dist_speed(600, nil),
-    modifier_tusk_snowball_movement            = _lina_eta_make_dist_speed(600, nil),
-    -- (19)-(20) instant_blink (cap K.BLINK_ARRIVE_TIMEOUT_S = 2.0s @L1217)
-    modifier_phantom_assassin_phantom_strike_target = _lina_eta_make_dist_speed(1500, K.BLINK_ARRIVE_TIMEOUT_S),
-    modifier_queenofpain_blink                      = _lina_eta_make_dist_speed(1500, K.BLINK_ARRIVE_TIMEOUT_S),
+    modifier_spirit_breaker_charge_of_darkness = EtaR.DistSpeed(600, nil),
+    modifier_tusk_snowball_movement            = EtaR.DistSpeed(600, nil),
+    -- (19)-(20) instant_blink (cap K.BLINK_ARRIVE_TIMEOUT_S = 2.0s)
+    modifier_phantom_assassin_phantom_strike_target = EtaR.DistSpeed(1500, K.BLINK_ARRIVE_TIMEOUT_S),
+    modifier_queenofpain_blink                      = EtaR.DistSpeed(1500, K.BLINK_ARRIVE_TIMEOUT_S),
     -- (21) slark pounce (default speed 900u/s)
-    modifier_slark_pounce = _lina_eta_make_dist_speed(900, nil),
+    modifier_slark_pounce = EtaR.DistSpeed(900, nil),
     -- (22)-(24) line_projectile
-    modifier_pudge_meat_hook = _lina_eta_make_line(1450, 0.8),
-    modifier_mirana_arrow    = _lina_eta_make_line(900,  1.0),
-    modifier_sven_storm_bolt = _lina_eta_make_line(1100, 0.8),
+    modifier_pudge_meat_hook = EtaR.Line(1450, 0.8),
+    modifier_mirana_arrow    = EtaR.Line(900,  1.0),
+    modifier_sven_storm_bolt = EtaR.Line(1100, 0.8),
     -- (25)-(26) cast_point semantics for pre-impact window
-    modifier_earthshaker_fissure_stun = _lina_eta_make_cast_point(0.46),
-    modifier_magnataur_skewer         = _lina_eta_make_cast_point(0.3),
+    modifier_earthshaker_fissure_stun = EtaR.CastPoint(0.46),
+    modifier_magnataur_skewer         = EtaR.CastPoint(0.3),
     -- (27)-(30) persistent / delayed_aoe / buffs
     modifier_lina_light_strike_array = function(_c, _t, _armed, _ab, _now_t) return 0.5 end,
-    modifier_naga_siren_ensnare       = _lina_eta_make_remaining("modifier_naga_siren_ensnare",       K.PERSISTENT_LOCK_CAP_S),
-    modifier_bane_nightmare           = _lina_eta_make_remaining("modifier_bane_nightmare",           K.PERSISTENT_LOCK_CAP_S),
-    modifier_doom_bringer_doom_debuff = _lina_eta_make_remaining("modifier_doom_bringer_doom_debuff", K.PERSISTENT_LOCK_CAP_S),
+    modifier_naga_siren_ensnare       = EtaR.Remaining("modifier_naga_siren_ensnare",       K.PERSISTENT_LOCK_CAP_S),
+    modifier_bane_nightmare           = EtaR.Remaining("modifier_bane_nightmare",           K.PERSISTENT_LOCK_CAP_S),
+    modifier_doom_bringer_doom_debuff = EtaR.Remaining("modifier_doom_bringer_doom_debuff", K.PERSISTENT_LOCK_CAP_S),
     modifier_disruptor_kinetic_field_remnant = function(_c, target, _armed, _ab, _now_t)
+        -- Custom: uses 2.6s fallback when GetModifierRemaining returns 0
+        -- (the Kinetic Field thinker often outlives the modifier read window
+        -- by a tick; 2.6s matches the v6 lifetime). Kept inline because the
+        -- generic Remaining factory floors at 0.1s rather than substituting
+        -- a default.
         local rem = 0
         if target and Entity.IsEntity and Entity.IsEntity(target) and NPC.GetModifierRemaining then
             local ok, v = pcall(NPC.GetModifierRemaining, target, "modifier_disruptor_kinetic_field_remnant")
@@ -2738,14 +2598,12 @@ defense_dispatcher = Defense.New {
     canonicalize_mod        = TD.CanonicalMod,
     eta_resolver            = LINA_ETA_RESOLVERS,
     -- v0.5.72 Phase 4 slice 7 (audit rec #3): generic fallback resolver
-    -- for mods not in LINA_ETA_RESOLVERS. Reads TD.THREAT_ARRIVAL_TIMING
-    -- (catalog) for cast_point + post_cast_delay (cast-point class),
-    -- GetModifierRemaining (channels), or dist/speed (homing kinds).
-    -- Requires v0.5.72 lib API extension passing canonical_mod as the
-    -- 6th arg to resolvers. Per-mod LINA_ETA_RESOLVERS entries still win
-    -- (cfg.eta_resolver checked first); this only covers the ~14 catalog
-    -- mods from Phase 4 slices that don't have hand-tuned entries.
-    eta_resolver_default    = _lina_eta_default,
+    -- for mods not in LINA_ETA_RESOLVERS. v0.5.74 lib-first lift: the body
+    -- moved to Defense.MakeGenericEtaResolver(TD); registration is now a
+    -- factory call binding TD via closure. Per-mod LINA_ETA_RESOLVERS
+    -- entries still win (cfg.eta_resolver checked first); this only covers
+    -- the ~14 catalog mods from Phase 4 slices without hand-tuned entries.
+    eta_resolver_default    = Defense.MakeGenericEtaResolver(TD),
     lock_buffer_s           = 0.3,
     fallback_lock_ttl_s     = 2.0,
     -- v0.5.40.1 HOTFIX: self_npc closure was missing from v0.5.40 cfg, so
@@ -4292,101 +4150,13 @@ end
 -- this should be on threat data." The catalog encodes the liquipedia-
 -- confirmed timing data per-mod; the compute helper reads live KV via
 -- state.item_kv when the entry asks for it.
+-- v0.5.74 lib-first lift: body moved to ThreatData.ComputeArrivalTime
+-- (lib/threat_data.lua). state.* alias retained for the 3 in-tree call
+-- sites (W .fire body, armed_chain_peek W gate, W gate's hp/speed read).
+-- state.item_kv passed as the kv_lookup callback so the kv_or_fallback
+-- speed_source (Tusk Snowball only today) keeps working.
 state.compute_arrival_time = function(threat_mod, caster, target, modifier_handle)
-    if not (threat_mod and caster and target) then return nil end
-    if not (TD.THREAT_ARRIVAL_TIMING and TD.THREAT_ARRIVAL_TIMING[threat_mod]) then
-        return nil
-    end
-    if not (Entity.IsEntity and Entity.IsEntity(caster) and Entity.IsEntity(target)) then
-        return nil
-    end
-    if not (Target.IsAlive and Target.IsAlive(caster) and Target.IsAlive(target)) then
-        return nil
-    end
-    local entry = TD.THREAT_ARRIVAL_TIMING[threat_mod]
-
-    -- Derive effective travel speed.
-    local speed = entry.speed_fallback or 0
-    if entry.speed_source == "live_or_fallback" then
-        -- v0.5.48.1: use LIVE exclusively when live > 0; fallback ONLY
-        -- if live API failed.
-        local live = NPC.GetMoveSpeed and NPC.GetMoveSpeed(caster)
-        if live and live > 0 then speed = live end
-    elseif entry.speed_source == "live_with_ramp" then
-        -- v0.5.50: ramp model for accelerating threats (Bara Charge of
-        -- Darkness per Liquipedia: 1.5s linear wind-up from min MS
-        -- bonus to max MS bonus). NPC.GetMoveSpeed at fire moment is
-        -- the CURRENT ramped speed; the threat continues ramping during
-        -- W's 1.12s prep window. Predict the average speed during prep:
-        --   predicted_end = min(peak_speed_cap, live + ramp_accel * W_LEAD)
-        --   avg           = (live + predicted_end) / 2
-        -- Catalog provides ramp_accel (u/s^2) and peak_speed_cap (u/s).
-        -- Handles BOTH early-charge (still ramping; predicted_end < peak,
-        -- avg captures the ramp) AND late-charge (already at peak;
-        -- predicted_end clamps to peak_speed_cap, avg approaches live).
-        -- Replaces v0.5.49.x flat acceleration_buffer which over-
-        -- corrected for low-live and didn't adapt for high-live. Per-
-        -- level KV-driven accel + cap queued for v0.5.50.1 (needs
-        -- modifier_handle threading).
-        local W_LEAD = 1.12
-        local live   = NPC.GetMoveSpeed and NPC.GetMoveSpeed(caster) or 0
-        if live and live > 0 then
-            local accel = entry.ramp_accel or 0
-            local cap   = math.max(live, entry.peak_speed_cap or 0)
-            local predicted_end = math.min(cap, live + accel * W_LEAD)
-            speed = (live + predicted_end) / 2
-        end
-    elseif entry.speed_source == "kv_or_fallback" then
-        local abil
-        if modifier_handle and Modifier and Modifier.GetAbility then
-            local ok, a = pcall(Modifier.GetAbility, modifier_handle)
-            if ok then abil = a end
-        end
-        if abil and entry.kv_speed_key then
-            speed = state.item_kv(abil, entry.kv_speed_key, speed)
-        end
-    elseif entry.speed_source == "instant" then
-        speed = 0
-    end
-
-    -- Travel time = dist(caster, target) / speed (0 for instant kinds).
-    local travel_t = 0
-    if speed > 0 then
-        local cpos = Entity.GetAbsOrigin(caster)
-        local tpos = Entity.GetAbsOrigin(target)
-        if cpos and tpos then
-            local dx = (cpos.x or 0) - (tpos.x or 0)
-            local dy = (cpos.y or 0) - (tpos.y or 0)
-            local d  = math.sqrt(dx * dx + dy * dy)
-            travel_t = d / speed
-        end
-    end
-
-    -- Cast point (optionally KV-driven).
-    local cast_pt = entry.cast_point or 0
-    if entry.kv_cast_point_key then
-        local abil
-        if modifier_handle and Modifier and Modifier.GetAbility then
-            local ok, a = pcall(Modifier.GetAbility, modifier_handle)
-            if ok then abil = a end
-        end
-        if abil and Ability.GetCastPoint then
-            local ok, v = pcall(Ability.GetCastPoint, abil, true)
-            if ok and type(v) == "number" and v > 0 then cast_pt = v end
-        end
-    end
-
-    local impact_t = cast_pt + travel_t + (entry.post_cast_delay or 0)
-
-    -- Impact position.
-    local impact_pos
-    if entry.impact_pos == "self" then
-        impact_pos = Entity.GetAbsOrigin(target)
-    elseif entry.impact_pos == "caster" then
-        impact_pos = Entity.GetAbsOrigin(caster)
-    end
-
-    return impact_t, impact_pos, entry, speed
+    return TD.ComputeArrivalTime(threat_mod, caster, target, modifier_handle, state.item_kv)
 end
 
 -- v0.5.55: state.compute_save_fire_window + state.compute_w_fire_window
@@ -9080,6 +8850,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.73 (catalog name fix): Beastmaster Primal Roar drops _stun suffix per Sniper-vetted canonical. User: 'The order will be 2, 1 and 3' -- starting with #2 (VPK-grep modifier-name verification). **Cross-check approach**: instead of running grep -ao on Dota VPKs (still searching drives for pak01_009.vpk; both Steam libraries C:\\Program Files (x86)\\Steam + P:\\SteamLibrary), used the already-Sniper-vetted lib tables (THREATS_ON_SELF L347-595 195 entries, ABILITY_TO_THREAT L712-970 195 entries, THREAT_TIMING L1935-2038 98 entries, THREAT_SEVERITY L2309-2512 180 entries, THREAT_CATEGORY L2086-2293 181 entries) as authoritative source. Sniper has been validating these names for ~50 versions; they are canonical. **Cross-check results**: of the 5 speculative names from slices 3-6, only Beastmaster Primal Roar was wrong: I used modifier_beastmaster_primal_roar_stun (with _stun suffix) in v0.5.71 catalog + LINA_SAVE_OVERRIDES. Sniper canonical is modifier_beastmaster_primal_roar (no suffix per lib THREATS_ON_SELF L417 + ABILITY_TO_THREAT L761). The other 4 (modifier_tidehunter_ravage, modifier_magnataur_skewer, modifier_sven_storm_bolt, modifier_lich_chain_frost) were already correct. **Bonus opportunity noted (not in this slice)**: lib has modifier_magnataur_skewer_impact (the actual stun on hit) as a separate, more granular entry vs the base modifier_magnataur_skewer (pre-cast detection). Could add as a separate catalog entry later. **The fix**: rename in 2 places. (1) lib/threat_data.lua THREAT_ARRIVAL_TIMING entry key modifier_beastmaster_primal_roar_stun -> modifier_beastmaster_primal_roar. (2) Lina.lua LINA_SAVE_OVERRIDES['modifier_beastmaster_primal_roar_stun'] -> ['modifier_beastmaster_primal_roar']. CH.BEASTMASTER_PR chain table unchanged. **Behavioural impact**: previously Beastmaster Primal Roar threats fell through to category_default chain because the override key didn't match the actual modifier name landing on Lina. Now the CH.BEASTMASTER_PR chain (BKB head + airborne dodges) fires correctly. Catalog impact_t defer (v0.5.70) and ETA fallback (v0.5.72) also now activate for BPR. **Files**: lib/threat_data.lua (key rename, 1 line). Lina.lua (key rename, 1 line + banner bump). lib/escape.lua + lib/defense.lua + Sniper.lua unchanged. **Verification on next demo**: when Beastmaster fires Primal Roar -> resolve_save_order_pick source=hero_override head=item_black_king_bar (was source=category_default in v0.5.71-72). **Next direction #1**: uczone-toolkit publish (split lib/* into standalone repo).")
+LOG:info("Lina brain v0.5.74 (lib-first lift): compute_arrival_time + ETA factories + generic resolver moved to lib. User: 'check if all lina uses and can be shared by multiple characters are on our libs'. **Audit lift bucket A+E+F+G shipped**: (A) state.compute_arrival_time body lifted to ThreatData.ComputeArrivalTime in lib/threat_data.lua; Lina-side keeps a 3-line state.* alias that passes state.item_kv as the kv_lookup callback. (F) the 4 _lina_eta_make_* factories (CastPoint, Remaining, DistSpeed, Line) lifted to Defense.EtaResolvers.* in lib/defense.lua. (E) _lina_eta_default lifted to Defense.MakeGenericEtaResolver(TD); registration now Defense.MakeGenericEtaResolver(TD) -- closure factory binds TD without a lib<-->lib require cycle. (G) _lina_eta_dist deleted (was only used by the 4 factories; lib defense.lua has its own inline _dist2d, lib/geometry has dist_between for future use). **Lib API surface added**: ThreatData.ComputeArrivalTime(threat_mod, caster, target, modifier_handle, kv_lookup). Defense.EtaResolvers.CastPoint/Remaining/DistSpeed/Line factory functions. Defense.MakeGenericEtaResolver(TD, opts) closure factory. lib/threat_data.lua requires lib/target now (for Target.IsAlive inside ComputeArrivalTime; same lesson v0.5.61 taught with lib/escape -- lib modules dont inherit hero-script upvalues). **Lina-side change**: LINA_ETA_RESOLVERS table rewritten to use EtaR.X factory calls (local EtaR = Defense.EtaResolvers, ~30 line entries swapped). The 4 inline custom resolvers (disruptor_static_storm_thinker, witch_doctor_death_ward, disruptor_kinetic_field_remnant, lina_light_strike_array) and the FC offensive synthetic resolver stay Lina-side (hero-specific patterns). **Zero behaviour change**: factory bodies are byte-equivalent ports; the same closures get built with the same inputs. **Files**: lib/threat_data.lua +120 lines (ComputeArrivalTime function + Target require). lib/defense.lua +180 lines (EtaResolvers + MakeGenericEtaResolver before return). Lina.lua -140 lines net (4 factories + default + dist + compute body deleted; 30 table entries shortened; alias added). lib/escape.lua + Sniper.lua unchanged. **Audit lift bucket B+C (compute_safe_dest + try_self_push) deferred** -- would touch Sniper.lua to collapse its byte-identical port (~30 lines), but user direction earlier this session was 'do not change Sniper for now'. Once that constraint relaxes, those are next. **Sniper benefit when he migrates**: Defense.EtaResolvers + Defense.MakeGenericEtaResolver + ThreatData.ComputeArrivalTime all available; Sniper picks them up via require with zero brain rewrite. **Verification on next demo**: identical lock_acquired ttl values for all 30 LINA_ETA_RESOLVERS-keyed mods. catalog mods without per-mod resolver get same TTL as v0.5.72-73 (Defense.MakeGenericEtaResolver is byte-equivalent to _lina_eta_default). W .fire / armed_chain_peek catalog gate still works (state.compute_arrival_time alias preserves API).")
 
 return callbacks

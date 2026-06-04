@@ -1283,11 +1283,13 @@ local SAVE_FIRE = {
         -- v0.5.16 Group 4 guard + v0.5.20 instrumentation: log every closure
         -- invocation regardless of guard/fire outcome so we can correlate
         -- user-observed in-game saves against actual brain dispatch.
-        -- v0.5.60 Phase 5 slice 3: cast in place (WW lifts Lina airborne
-        -- 3s untargetable), then queue a post-airborne MOVE_TO_POSITION to
-        -- a danger-aware landing via state.queue_safe_post_move. When Lina
-        -- lands she walks 600u toward safety automatically. User spec: "We
-        -- can move after cast eul and WW on self."
+        -- v0.5.60 Phase 5 slice 3 / v0.5.62 fix: cast in place (WW lifts
+        -- Lina airborne 3s untargetable), then arm the tick-driven
+        -- state.pending_post_airborne_move which (a) pauses Native HR/OW
+        -- so the baseline orbwalker cannot preempt and (b) issues the
+        -- MOVE_TO_POSITION when the modifier_wind_waker clears. v0.5.60
+        -- queue=true alone was preempted by USER-tagged baseline orders
+        -- the moment cyclone ended (per v0.5.61 demo log L3254 etc.).
         fire  = function(intent, threat_caster)
             local guarded = NPC.HasModifier(state.self_npc, "modifier_wind_waker")
             tlog(1, "save_fire_invoked", { item = "item_wind_waker", intent = tostring(intent),
@@ -1295,16 +1297,17 @@ local SAVE_FIRE = {
             if guarded then return false end
             local ok = issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_wind_waker"))
             if ok then
-                state.queue_safe_post_move("ww", 600, threat_caster)
+                state.queue_safe_post_move("ww", 600, threat_caster, "modifier_wind_waker")
             end
             return ok
         end,
     },
     item_cyclone      = {
         short = "eul",
-        -- v0.5.60 Phase 5 slice 3: cast in place (EUL lifts Lina airborne
-        -- 2.5s untargetable), then queue a post-airborne MOVE_TO_POSITION
-        -- via state.queue_safe_post_move. Same shape as WW.
+        -- v0.5.60 Phase 5 slice 3 / v0.5.62 fix: cast in place (EUL lifts
+        -- Lina airborne 2.5s untargetable), then arm the tick-driven
+        -- post-airborne move via state.queue_safe_post_move. Same shape
+        -- as WW; modifier_name = "modifier_eul_cyclone".
         fire  = function(intent, threat_caster)
             local guarded = NPC.HasModifier(state.self_npc, "modifier_eul_cyclone")
             tlog(1, "save_fire_invoked", { item = "item_cyclone", intent = tostring(intent),
@@ -1312,7 +1315,7 @@ local SAVE_FIRE = {
             if guarded then return false end
             local ok = issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_cyclone"))
             if ok then
-                state.queue_safe_post_move("eul", 600, threat_caster)
+                state.queue_safe_post_move("eul", 600, threat_caster, "modifier_eul_cyclone")
             end
             return ok
         end,
@@ -1823,6 +1826,13 @@ state.pike_reissue    = nil     -- {caster, t, self_cast} stamped by SAVE_FIRE.i
 -- save's turn-then-fire harness (Pike + Force) and consumed by
 -- state.pending_self_push_tick once facing is within 30deg of away_pt.
 state.pending_self_push = nil
+-- v0.5.62 Phase 5 slice 3 fix: armed by state.queue_safe_post_move when EUL
+-- or WW casts. Carries dest + modifier_name + deadline_restore + observed
+-- and issued latches. Consumed by state.pending_post_airborne_move_tick
+-- which waits for the airborne modifier to appear then disappear, then
+-- issues the move. Native HR/OW stays paused for the whole pending lifetime
+-- so the baseline orbwalker cannot preempt the post-airborne MOVE order.
+state.pending_post_airborne_move = nil
 -- GREP: PIKE_PRIME_TICK_DEF (call site lives in callbacks.OnUpdateEx).
 state.pike_prime_tick = function()
     local me = state.self_npc
@@ -1972,21 +1982,46 @@ state.try_self_push = function(intent, item, item_name, push_dist, threat_caster
     return moved
 end
 
--- v0.5.60 Phase 5 slice 3: post-airborne move helper for EUL / WW. Issues a
--- QUEUED MOVE_TO_POSITION order toward a danger-aware landing computed via
--- state.compute_safe_dest. The queue=true flag tells the engine to run the
--- order after current actions complete; since Lina is airborne (untargetable
--- for 2.5s / 3s) for the duration of the lift, the move starts the moment
--- she lands. push_dist=600 matches Pike/Force; tunable per-item if a future
--- slice wants tighter / looser displacement after airborne.
--- Returns true if a queued move was issued, false if no safe destination
--- was found (in which case Lina just lands in place after airborne, the
--- save still served its purpose by surviving the threat).
-state.queue_safe_post_move = function(intent, push_dist, threat_caster)
+-- v0.5.60 Phase 5 slice 3 (rewritten v0.5.62): post-airborne move helper for
+-- EUL / WW. v0.5.60 used Order.Issue(queue=true) and assumed the engine
+-- would dispatch the queued move when cyclone ended. The v0.5.61 demo log
+-- proved that wrong: the queue=true order is sent, but the moment the
+-- modifier expires the baseline UCZone Hit&Run / Orbwalker wakes up and
+-- issues a USER-tagged MOVE_TO_POSITION that REPLACES the queued move
+-- (L3254, L3267, L3304 of debug.log all show USER orders within 1s of
+-- airborne-end, all overriding the brain dest with local kite positions).
+--
+-- v0.5.62 design:
+--   1. Pause Native HR/OW (lib/native) so the baseline cannot issue
+--      USER moves during the airborne + post-move window.
+--   2. Arm state.pending_post_airborne_move with dest + modifier_name +
+--      deadline_restore.
+--   3. state.pending_post_airborne_move_tick (hooked into OnUpdateEx)
+--      waits for the modifier to be observed at least once (cast resolved)
+--      then disappear (airborne ended), then issues the MOVE_TO_POSITION.
+--      Native is restored on deadline_restore (~1.5s after expected
+--      airborne end) so baseline orbwalker resumes for any subsequent
+--      micro-positioning.
+--   4. Belt-and-suspenders: ALSO issue the queue=true move at .fire time,
+--      in case the engine honours it. Doubles up but harmless (tick's
+--      reissue replaces it at airborne end, same destination).
+--
+-- Returns true if pending was armed (cast can proceed and tick will move
+-- her), false if no safe destination was found (in which case Lina just
+-- lands in place after airborne; the save still served its purpose by
+-- surviving the threat).
+state.queue_safe_post_move = function(intent, push_dist, threat_caster, modifier_name)
     local me = state.self_npc
     if not me then return false end
     local _, landing = state.compute_safe_dest(threat_caster, push_dist)
     if not landing then return false end
+    -- Pause native HR/OW for the airborne + post-move window. RestoreHitRun
+    -- happens in the tick on deadline_restore. Native.PauseHitRun is
+    -- idempotent and respects the v0.5.32 user-config guard (returns false
+    -- if user has hr_override OFF).
+    pcall(Native.PauseHitRun, LINA_MENU)
+    -- Belt: queue=true move. If the engine honours it across the airborne
+    -- window, Lina starts moving the instant she lands.
     safe_issue {
         hero = HERO_KEY, layer = "def",
         intent = intent .. "_post_move",
@@ -1994,12 +2029,78 @@ state.queue_safe_post_move = function(intent, push_dist, threat_caster)
         unit = me, position = landing,
         queue = true,
     }
+    -- Suspenders: tick fires the move after observing modifier appear and
+    -- then disappear. deadline_restore = airborne max (3s for WW) + 1.5s
+    -- grace covers EUL (2.5s) and WW (3s) without leaving the orbwalker
+    -- paused for too long.
+    state.pending_post_airborne_move = {
+        dest              = landing,
+        modifier_name     = modifier_name,
+        deadline_restore  = now() + 4.5,
+        intent            = intent,
+        observed_airborne = false,
+        move_issued       = false,
+    }
     tlog(1, intent .. "_post_move", {
         x = string.format("%.0f", landing.x),
         y = string.format("%.0f", landing.y),
         caster = threat_caster and uname(threat_caster) or "centroid",
     })
     return true
+end
+
+-- v0.5.62: tick driver for state.pending_post_airborne_move. Hooked into
+-- callbacks.OnUpdateEx alongside the other state.*_tick functions. Three
+-- phases:
+--   1. Wait for the airborne modifier to be observed at least once. The
+--      cast itself takes a few frames to resolve into the modifier; an
+--      "is modifier absent?" check immediately after .fire would fire
+--      the move BEFORE the cast lands. observed_airborne latches true
+--      the first tick the modifier is present.
+--   2. Wait for the modifier to disappear. While airborne, defer.
+--   3. Issue the move (once). Keep Native paused until deadline_restore
+--      so the post-move can stick before baseline orbwalker resumes.
+state.pending_post_airborne_move_tick = function()
+    local p = state.pending_post_airborne_move
+    if not p then return end
+    local me = state.self_npc
+    if not me or not Target.IsAlive(me) then
+        pcall(Native.RestoreHitRun, LINA_MENU)
+        state.pending_post_airborne_move = nil
+        return
+    end
+    if now() > p.deadline_restore then
+        pcall(Native.RestoreHitRun, LINA_MENU)
+        state.pending_post_airborne_move = nil
+        return
+    end
+    local airborne = NPC.HasModifier and NPC.HasModifier(me, p.modifier_name) or false
+    if airborne then
+        p.observed_airborne = true
+        return
+    end
+    -- Not airborne now. If we never observed airborne, the cast has not
+    -- resolved yet; wait. (Without this latch the tick would fire the
+    -- move IMMEDIATELY between .fire and the cast taking effect.)
+    if not p.observed_airborne then
+        return
+    end
+    -- Airborne ended. Issue the move once.
+    if not p.move_issued then
+        safe_issue {
+            hero = HERO_KEY, layer = "def",
+            intent = p.intent .. "_post_move_fire",
+            order_type = UO.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
+            unit = me, position = p.dest,
+        }
+        p.move_issued = true
+        tlog(1, p.intent .. "_post_move_fired", {
+            x = string.format("%.0f", p.dest.x),
+            y = string.format("%.0f", p.dest.y),
+        })
+    end
+    -- Native stays paused until deadline_restore so the post-move can land
+    -- without the baseline orbwalker preempting it.
 end
 
 -- v0.5.58 Phase 5 slice 2: generalized from v0.5.57's pending_pike_self_tick.
@@ -7828,6 +7929,10 @@ function callbacks.OnUpdateEx()
                                          -- fire Pike OR Force once the
                                          -- turn-then-fire harness reaches
                                          -- alignment (or timeout drops it)
+        state.pending_post_airborne_move_tick()  -- v0.5.62 Phase 5 slice 3 fix:
+                                         -- fire EUL / WW post-move once
+                                         -- the airborne modifier clears
+                                         -- (or restore Native on timeout)
         pre_face_tick()            -- E12: opt-in pre-face incoming threats
         -- Layer 1 offense (Phase F): latch -> scheduled steps -> R-abort ->
         -- auto-R kill-steal -> HOLD/TAP combo-key dispatch.
@@ -8707,6 +8812,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.61 (hotfix): lib/escape requires lib/target. User: 'Check the log, EUL did not move lina to a safer position'. **The bug**: v0.5.60 demo emitted save_fire_invoked for item_cyclone and the cast verified fired=y, but immediately after the brain hit [Lua error] lib/escape.lua:106: attempt to index a nil value (global Target) inside Escape.SafePushDestination. queue_safe_post_move's call to compute_safe_dest -> Escape.PickDir -> Escape.SafePushDestination -> Target.IsAlive(threat_caster_hint) crashed because Target was undefined in the lib's scope. lib modules do not inherit the hero script's upvalues; the v0.5.57 extraction assumed Target would be a global but it is a hero-side `local Target = require('lib.target')` upvalue. No eul_post_move tlog was ever emitted because the helper threw before getting to safe_issue. **The fix**: add `local Target = require('lib.target')` at the top of lib/escape.lua. **Same bug affects Pike + Force self-cast paths** via state.try_self_push -> compute_safe_dest -> same Escape calls. v0.5.58 demo never triggered Pike's self-cast (all Pike fires went enemy-target via the unchanged primary branch) so it stayed latent until EUL exercised it in v0.5.60. **Audit confirmed**: the 4 self-displacement saves I wired (Pike + Force + EUL + WW) are exhaustive in Lina's SAVE_FIRE. item_lotus_orb / item_glimmer_cape / item_black_king_bar / item_manta / item_invis_sword / item_silver_edge are buffs/reflects/invis, not displacements. **Sniper benefits too once Umbrella restarts** (Sniper.lua has no package.loaded[lib.escape]=nil cache-clear so a Sniper-only reload would keep the cached broken version). Lina has the cache-clear and reload propagates the fix. **Files**: lib/escape.lua +3 lines (require + comment). Lina.lua banner only. lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.58 / v6.15.278. **Verification on next demo**: EUL or WW fires -> save_fire_invoked, cast issued, NO Lua error, eul_post_move or ww_post_move tlog with landing x/y + caster. Lina walks toward landing after airborne ends. Pike + Force self-cast also clean (no crash); pike_self_turnaway / force_self_turnaway etc. emit correctly when triggered.")
+LOG:info("Lina brain v0.5.62 (hotfix): EUL/WW post-move via tick + Native pause (queue=true alone preempted by baseline). User: 'Check the log, EUL still not moving'. **The diagnosis**: v0.5.61 demo log L3105+ showed save_fire_invoked + cast_verify fired=y for item_cyclone AND eul_post_move tlog with valid dest (-2980, 935). The queued MOVE_TO_POSITION (Q:1) was sent to the engine at L3109. But L3254 at time 73.95s (right after cyclone ends at ~73.23s) shows a USER-tagged MOVE_TO_POSITION (Q:0, front) toward (-1882, 1118) -- the baseline UCZone Hit&Run / Orbwalker waking up and immediately replacing the queued move with a local kite. L3267 + L3304 show more USER-tagged kite orders in rapid succession. The queue=true mechanism either does not survive the cyclone airborne state OR the baseline preempts at airborne-end. **The fix**: tick-driven post-move with Native HR/OW paused. (1) state.queue_safe_post_move now also calls Native.PauseHitRun(LINA_MENU) and arms state.pending_post_airborne_move = {dest, modifier_name, deadline_restore=4.5s, observed_airborne=false, move_issued=false}. (2) New state.pending_post_airborne_move_tick (hooked into OnUpdateEx) waits for the modifier to appear at least once (cast resolved) then disappear (airborne ended), THEN issues a fresh MOVE_TO_POSITION. Native stays paused until deadline_restore so the baseline orbwalker cannot preempt the post-move during its critical first ~1.5s. (3) The queue=true issue at .fire stays as belt-and-suspenders; if the engine honours it, Lina moves at airborne-end with no tick delay. The tick's reissue then replaces it (same dest, harmless). **EUL .fire passes modifier_name='modifier_eul_cyclone'; WW passes 'modifier_wind_waker'**. Pike + Force unchanged from v0.5.58 (turn-then-push has no airborne state). **New tlogs**: <intent>_post_move_fired x= y= when the tick actually issues the move (separate from <intent>_post_move at arm time). **Files**: Lina.lua only (+50 lines: tick fn + Native pause + state decl + tick wiring + .fire modifier param). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.61. **Verification on next demo**: EUL or WW fires -> save_fire_invoked + cast verified + eul_post_move tlog (arm). Within 1-3s: airborne modifier observed by tick (observed_airborne latches true). At airborne end: tick fires eul_post_move_fired tlog with same x/y. Lina walks toward landing. ZERO USER-tagged MOVE_TO_POSITION orders should appear in the 1.5s window after airborne ends (Native paused). Baseline orbwalker resumes after deadline_restore (~4.5s after .fire).")
 
 return callbacks

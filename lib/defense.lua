@@ -593,59 +593,14 @@ local function run_chain_walk(self, intent, threat_mod, threat_caster,
 
     for _, save_name in ipairs(order) do
         local fire_entry = c.save_fire[save_name]
-
-        -- v0.5.53 Phase 3 slice 3: per-save catalog gate.
-        -- When the hero registered cfg.threat_catalog + cfg.compute_arrival_time
-        -- AND this save has prep_time > 0 AND the threat is in the catalog,
-        -- gate the fire moment on impact_t in [prep_time, upper] per
-        -- Defense.ComputeSaveFireWindow. D3 semantics from the v0.5.51
-        -- design discussion:
-        --   in_window  -> fall through to the existing skip/fire chain
-        --   too early  -> STOP the entire chain walk (lower-priority saves
-        --                  have even smaller prep_time so their moments are
-        --                  also further out; nothing fires this dispatch)
-        --   too late   -> skip this save, continue to next
-        -- Hero opt-in via cfg.threat_catalog registration. Sniper doesn't
-        -- register, so the gate is no-op (legacy behavior preserved).
-        local catalog_too_late = false
-        if fire_entry and c.threat_catalog and c.compute_arrival_time
-           and fire_entry.prep_time and fire_entry.prep_time > 0
-           and threat_mod and c.threat_catalog[threat_mod] then
-            local target_unit = c.self_npc and c.self_npc() or nil
-            local impact_t, _, cat_entry, cat_speed =
-                c.compute_arrival_time(threat_mod, threat_caster, target_unit)
-            if impact_t and cat_entry then
-                local lower, upper = Defense.ComputeSaveFireWindow(
-                    cat_entry, cat_speed, fire_entry)
-                c.tlog(3, "lib_catalog_gate", {
-                    save      = fire_entry.short or save_name,
-                    impact_t  = string.format("%.2f", impact_t),
-                    lower     = string.format("%.2f", lower),
-                    upper     = (upper == math.huge) and "inf" or string.format("%.2f", upper),
-                    kind      = tostring(cat_entry.kind or "-"),
-                })
-                if impact_t > upper then
-                    -- D3 (y): caster too far / impact too distant. This
-                    -- save's moment hasn't arrived, and any lower-priority
-                    -- save in the chain has an EVEN smaller prep_time, so
-                    -- its moment is also further out. STOP walking.
-                    c.tlog(3, "save_chain_stop", {
-                        save = fire_entry.short or save_name,
-                        reason = "catalog_too_early",
-                    })
-                    return false
-                end
-                if impact_t < lower then
-                    -- D3 (x): too late for this save. Skip and continue.
-                    catalog_too_late = true
-                end
-            end
-        end
-
+        -- v0.5.55: removed the v0.5.53 per-save catalog gate. Chain walker
+        -- returns to its pre-v0.5.53 dumb-walk shape per the refactor that
+        -- matches Sniper's proven single-chain pattern. Hero .fire bodies
+        -- handle their own timing (Lina's lina_w_anti_gap.fire now does
+        -- the impact_t window check internally). Defense.ComputeSaveFireWindow
+        -- stays as a public helper for hero .fire bodies that want the math.
         if not fire_entry then
             c.tlog(3, "save_chain_skip", { save = save_name, reason = "no_entry" })
-        elseif catalog_too_late then
-            c.tlog(3, "save_chain_skip", { save = fire_entry.short, reason = "catalog_too_late" })
         elseif c.ability_saves[save_name] and not c.self_can_cast_abilities() then
             c.tlog(3, "save_chain_skip", { save = save_name, reason = "ability_muted" })
         elseif homing and c.self_displacement_saves[save_name] then

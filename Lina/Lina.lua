@@ -2521,6 +2521,56 @@ local SAVE_FIRE_DISTANCE = {
 -- shove her into the impact zone. Only consulted on the self-cast branch.
 K.SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR = 250
 
+-- v0.5.54.1: W skip-as-fallback support. Per user spec "W now is
+-- double firing after pike. We should gate W as a fallback after
+-- items": if any displacement / CC item save fired within the last
+-- ~5s (covering a typical Bara charge), W's catalog-gated fire is
+-- redundant and double-fires on top of the item save (e.g.,
+-- AutoDisabler.lua casts Pike on Bara at d=569 / d=473 then brain
+-- catalog gate fires W at impact_t=1.12-1.48 = combo).
+--
+-- Cooldown-based detection works for BOTH brain-fired and AD-fired
+-- items: their cooldown reflects the cast regardless of which
+-- subsystem issued the order. No modifier-create timing race (which
+-- happens too late -- after W's chain-peek tick in the same frame).
+--
+-- The 5s window is sized to cover the typical Bara charge duration:
+-- AD usually fires Pike at d~500-600 (early in the charge), brain
+-- catalog gate would fire W at impact_t=1.12-1.48 which is 1-1.5s
+-- pre-impact (mid-to-late in the charge). Pike CD elapsed at W's
+-- moment is 2-5s of its 15s CD = cur_cd > max_cd - 5.
+--
+-- Item list bundles AD-owned (Pike + Force in AutoDisabler/Force
+-- Interrupt) AND brain-owned dodges (Cyclone, WW, Glimmer, BKB,
+-- Lotus). If any fired, the threat is already mitigated and W's
+-- late stun is wasted.
+state.W_FALLBACK_BLOCK_ITEMS = {
+    "item_hurricane_pike",
+    "item_force_staff",
+    "item_cyclone",
+    "item_wind_waker",
+    "item_glimmer_cape",
+    "item_black_king_bar",
+    "item_lotus_orb",
+}
+state.W_FALLBACK_BLOCK_WINDOW_S = 5.0
+state.w_fallback_item_just_fired = function()
+    if not state.self_npc or not state.W_FALLBACK_BLOCK_ITEMS then return false end
+    local win = state.W_FALLBACK_BLOCK_WINDOW_S or 5.0
+    for i = 1, #state.W_FALLBACK_BLOCK_ITEMS do
+        local name = state.W_FALLBACK_BLOCK_ITEMS[i]
+        local it = NPCLib.item(state.self_npc, name)
+        if it and Ability.GetCooldown and Ability.GetCooldownLength then
+            local cur_cd = Ability.GetCooldown(it) or 0
+            local max_cd = Ability.GetCooldownLength(it) or 0
+            if max_cd > 0 and cur_cd > max_cd - win then
+                return true, name, cur_cd, max_cd
+            end
+        end
+    end
+    return false
+end
+
 -- v0.5.38 MAINT-11.2: chain-peek helper extracted from armed_threats_tick.
 -- Behaviour-neutral. Walks the resolved save order, mirrors the dispatcher's
 -- reserve / concurrent-penalty gate (RESERVE_SKIP_FLOOR / CONCURRENT_PENALTY
@@ -2577,8 +2627,28 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
             -- no catch_radius) the upper is prep_time + 0.10. For
             -- saves without prep_time: no gate, legacy distance path.
             local catalog_too_late = false
+
+            -- v0.5.54.1: W skip-as-fallback. If any displacement/CC
+            -- item save fired within the last 5s, W is redundant.
+            -- Detected via item cooldown (works for both brain and
+            -- AD fires; no modifier-create timing race). See
+            -- state.w_fallback_item_just_fired above for rationale.
+            if sn == "lina_w_anti_gap" and state.w_fallback_item_just_fired then
+                local item_fired, item_name, cur_cd, max_cd = state.w_fallback_item_just_fired()
+                if item_fired then
+                    catalog_too_late = true
+                    tlog(3, "w_skip_after_item", {
+                        item     = tostring(item_name),
+                        cur_cd   = string.format("%.1f", cur_cd or 0),
+                        max_cd   = string.format("%.1f", max_cd or 0),
+                        window_s = string.format("%.1f", state.W_FALLBACK_BLOCK_WINDOW_S or 5.0),
+                    })
+                end
+            end
+
             local save_entry_sf = SAVE_FIRE[sn]
-            if save_entry_sf and save_entry_sf.prep_time
+            if not catalog_too_late
+               and save_entry_sf and save_entry_sf.prep_time
                and save_entry_sf.prep_time > 0
                and state.compute_arrival_time then
                 local impact_t, impact_pos, cat_entry, cat_speed =
@@ -8537,6 +8607,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.54: gate AutoDisabler instead of disabling (drop Pike prep_time). User: 'AutoDisabler is a native script that is 100% verified and working. The best way to make our script is not to disable it but live with it. Instead of disabling we can just gate it. Disabling it might mean that we are giving up a wide range of disables that are already working, this means extra working for low to no profit'. User category clarification: Glimmer ~100% dodge (brain), BKB ~100% dodge (brain), Pike skill disable (AD), Ghost/Eul/WW dual-category. **Reverses v0.5.52's approach**: v0.5.52 zeroed AutoDisabler's Force Interrupt items (Pike + Force Staff) at GAME_IN_PROGRESS to prevent brain-vs-framework double-fire on Bara charge. That sacrificed AD's broad coverage for one local conflict. **v0.5.54 inversion**: AD stays active per its native config; brain stays out of AD's lane by dropping prep_time from Pike in SAVE_FIRE. Neither v0.5.51 hero-side catalog gate nor v0.5.53 lib catalog gate triggers on Pike; AD handles Pike's fire timing. The chain still passes through Pike via legacy distance gate as fallback when AD hasn't / can't, but the catalog-pattern double-fire (brain catalog_eta_pike on top of AutoDisabler.lua casts at d=569 / d=473) is gone. **Brain-owned saves keep prep_time**: Glimmer, BKB, Lotus, WW (Wind Waker), Eul (Cyclone), FC (Flame Cloak), W (Light Strike Array). These are dodges / escape / arrival-stuns, not skill disables. **Three Lina.lua changes**: (1) item_hurricane_pike: drop prep_time=0.5 + active_duration=0.4. Lina-side catalog gate skips Pike (prep_time nil). Lib-side run_chain_walk gate also skips Pike (cfg.threat_catalog gate's prep_time>0 condition false). Both layers consistent. (2) OnUpdateEx hook: replaced v0.5.52 GAME_IN_PROGRESS state.AD.disable() + POST_GAME state.AD.restore() block with a single auto-restore line that runs if state.autodisabler_disabled==true (idempotent via AD.restore's internal guard). Covers users who had v0.5.52 deployed mid-match and hot-swap to v0.5.54: the framework AutoDisabler menu items get un-zeroed on first OnUpdateEx tick. (3) Menu toggle override_autodisabler default flipped true->false. Toggle preserved for compat but the OnUpdateEx hook no longer calls disable(), so the toggle is effectively no-op in v0.5.54+. Tooltip updated to DEPRECATED. **state.AD module STAYS** (read/write/disable/restore helpers) as dormant infrastructure. Future debug / manual override can call state.AD.disable() from console if needed. **Scope adjustment**: v0.5.54 was originally 'cast-point-armed branches use catalog cast_point'. That work moves to v0.5.55. **No code changes to v0.5.53 lib catalog gate** -- pure data + hook change. **Lina.lua 8526 -> 8540 lines (+14). lib/threat_data.lua unchanged from v0.5.50. lib/defense.lua unchanged from v0.5.53**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara charge -> AutoDisabler.lua casts Pike at AD's timing (visible as AutoDisabler.lua:NNN in ExecuteOrder stamp); brain DOES NOT emit catalog_eta_pike or lib_catalog_gate save=pike. Other catalog mods (W vs charge, Lotus vs Lion Finger, BKB vs Sniper Assassinate etc.) still produce catalog_eta_gate + lib_catalog_gate as in v0.5.53. Users who had v0.5.52 deployed see one autodisabler_chain_restored tlog on first v0.5.54 tick.")
+LOG:info("Lina brain v0.5.54.1 hotfix: W skip-as-fallback after items. User: 'Test made, W now is double firing after pike. We should gate w a fallback after itens'. **The regression**: v0.5.54 dropped Pike's prep_time so AutoDisabler owns Pike's fire timing. But brain's W still fires via catalog_eta_w_stun at impact_t in [1.12, 1.48] independently -- after AD fires Pike at d=569/473, brain still fires W ~1s later at d=720-940 = double save on Bara. User spec: gate W as a fallback after items. **Fix**: cooldown-based detection of recently-fired item saves. state.w_fallback_item_just_fired walks state.W_FALLBACK_BLOCK_ITEMS (Pike, Force, Cyclone, WW, Glimmer, BKB, Lotus) and returns true if any item's cur_cd > max_cd - 5s. Works for AD-fired items because cooldowns reflect the cast regardless of which subsystem issued the order; no modifier-create timing race (which fires too late, after W's chain-peek tick in the same frame). The 5s window covers the typical Bara charge duration: AD fires Pike at d~500 (early); brain catalog gate would fire W at impact_t=1.12-1.48 (mid-to-late) = 2-5s of Pike's 15s CD elapsed = cur_cd > max - 5 captures the case. **Insertion point**: armed_chain_peek per-save loop. At sn == lina_w_anti_gap, check state.w_fallback_item_just_fired BEFORE the v0.5.51 catalog gate. If item fired: set catalog_too_late = true; gate skipped; fall through to next chain save (no more saves after W); function returns false; armed_threats_tick doesn't fire anything. New tlog w_skip_after_item v=3 with item / cur_cd / max_cd / window_s fields. **Item list rationale**: bundles AD-owned (Pike + Force in AutoDisabler/Force Interrupt) AND brain-owned dodges (Cyclone, WW, Glimmer, BKB, Lotus). If any fired, the threat is mitigated; W's late stun is wasted. Glimmer + BKB + Lotus + Cyclone + WW are brain-owned (dodges/escape per user category clarification); fire via Dispatch which sets their CD; same cooldown detection applies. **State.* placement**: state.W_FALLBACK_BLOCK_ITEMS, state.W_FALLBACK_BLOCK_WINDOW_S, state.w_fallback_item_just_fired all on state (not module-local) per the 200-locals memory rule (post-v0.5.52.1 cleanup left ~40 free slots but adding state.* fields is free and consistent with v0.5.52 state.AD pattern). **Lina.lua 8540 -> 8610 lines (+70: helper + check + comments). lib/threat_data.lua + lib/defense.lua unchanged from v0.5.53**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara charge -> AD casts Pike (visible as AutoDisabler.lua:NNN in ExecuteOrder); ~1s later brain emits w_skip_after_item tlog (item=item_hurricane_pike cur_cd=14.x max_cd=15.0); brain DOES NOT emit catalog_eta_gate save=w_stun in_window=y or w_defensive_fire on this charge. If no item fires (e.g., all on CD from prior fight), W's catalog gate fires normally at impact_t in [1.12, 1.48]. lib_catalog_gate from v0.5.53 unaffected (the skip happens before armed_chain_peek decides to fire = run_chain_walk never invoked for this entry).")
 
 return callbacks

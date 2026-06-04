@@ -2600,6 +2600,55 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
             -- save's .fire body now; see lina_w_anti_gap.fire below
             -- for the W-specific catalog timing.
             --
+            -- v0.5.55.2: W-specific catalog gate (scoped, not the
+            -- v0.5.51 generic per-save pattern). Per user spec:
+            -- "use the ETA > time to cast and if this is the case we
+            -- can cast to stun bara as soon as he hits lina". Fixed
+            -- SAVE_FIRE_DISTANCE / SAVE_ETA_TRIGGER values don't
+            -- track real speed (eta = d/600 misses fast and slow
+            -- Bara). The catalog impact_t IS the real ETA. Fire W
+            -- when impact_t in [W_LEAD, W_LEAD + W_AOE_RADIUS/speed]
+            -- = W detonates at or just before Bara arrives. Outside:
+            -- skip, block legacy gates from firing W via
+            -- eta_trigger_eff = -1 sentinel.
+            if sn == "lina_w_anti_gap" and state.compute_arrival_time
+               and entry.threat_mod and entry.caster then
+                local _w_impact_t, _, _w_cat_entry, _w_speed =
+                    state.compute_arrival_time(entry.threat_mod, entry.caster, state.self_npc)
+                if _w_impact_t and _w_cat_entry then
+                    local _w_kind = _w_cat_entry.kind or ""
+                    if _w_kind == "homing_charge" or _w_kind == "homing_carry" then
+                        local W_LEAD = 1.12
+                        local W_AOE_RADIUS = 225
+                        local _w_lower = W_LEAD
+                        local _w_upper = (_w_speed and _w_speed > 0)
+                            and (W_LEAD + W_AOE_RADIUS / _w_speed)
+                            or (W_LEAD + 0.20)
+                        local _w_in_window = _w_impact_t >= _w_lower and _w_impact_t <= _w_upper
+                        tlog(3, "w_catalog_eta_gate", {
+                            d         = string.format("%.0f", d),
+                            speed     = string.format("%.0f", _w_speed or 0),
+                            impact_t  = string.format("%.2f", _w_impact_t),
+                            lower     = string.format("%.2f", _w_lower),
+                            upper     = string.format("%.2f", _w_upper),
+                            in_window = _w_in_window and "y" or "n",
+                            kind      = _w_kind,
+                        })
+                        if _w_in_window then
+                            entry._fire_save_eff = sn
+                            return true, "w_catalog_eta", eta_trigger_eff
+                        end
+                        -- Out of window: block legacy gates from
+                        -- firing W. Return -1 sentinel so eta <= -1
+                        -- in armed_threats_tick is always false.
+                        return false, nil, -1
+                    end
+                end
+                -- impact_t nil OR non-homing kind: fall through to
+                -- legacy gates (W can still fire as last-resort
+                -- fallback for non-catalog threats).
+            end
+
             -- v0.5.10: PROXIMITY GATE. Spatial distance is
             -- concrete; cast-point times vary with talents/items.
             -- Pike enemy-cast path bypasses (its own
@@ -8443,6 +8492,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.55.1 hotfix: drop SAVE_FIRE_DISTANCE[lina_w_anti_gap]. User: 'It is working better regard double firing, lina W fire extremely late. Check the log'. **The bug**: v0.5.55 demo log L601 showed armed_chain_peek fired W via save_dist at d=1193 because SAVE_FIRE_DISTANCE[W]=1200 (v0.5.46.3 wide-net value). At d=1193 with actual speed=506, real impact_t=2.36 -- WAY above W's window [1.12, 1.56]. W's .fire body's window check (v0.5.55 Step 4) correctly returned w_defensive_skip_window. But armed_post_fire had ALREADY cleared state.armed_threats[bara_charge], so the brain could not re-attempt as Bara closed. W eventually fired LATE via committed_attacker path (L705) after Bara hit Lina. **Fix**: remove SAVE_FIRE_DISTANCE[lina_w_anti_gap]. The chain peek now falls through to SAVE_ETA_TRIGGER[W]=1.20; armed_threats_tick fires W at eta=1.20 (d=720 for fixed eta_speed=600). At d=720 with real speed=506, impact_t=1.42 = inside W's window [1.12, 1.56] -> W actually fires (not too late, not too early). For faster Bara (real speed=750): at d=720, impact_t=0.96 < window lower 1.12 -> W still skips (correctly; W cannot stun before Bara at that speed). For slower Bara (real speed=400): at d=720, impact_t=1.80 > upper 1.68 -> W still skips (correctly; window expires before Bara arrives). **The v0.5.46.3 rationale for 1200 (compensating for missing timing precision) is obsolete** -- W's .fire body's impact_t window check is the precision the distance gate was trying to fake. **One-line hotfix**: just remove the lina_w_anti_gap entry from the SAVE_FIRE_DISTANCE table. No code changes to armed_chain_peek, armed_threats_tick, defer-for-Pike, or W's .fire body. **Lina.lua 8442 -> 8444 lines (net +2 from comment expansion). lib/defense.lua + lib/threat_data.lua unchanged**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara approach -> bara_charge_armed at modseen. armed_threats_tick re-evaluates each tick. NO save_dist trigger for W at d>720. When Bara reaches eta=1.20 (d=720): armed_threat_fire via=eta_trigger (was via=save_dist in v0.5.55). W's .fire window check passes for typical speeds 450-650 -> w_defensive_fire with predict-aim. armed_post_fire consumes entry. Bara mitigated by W's stun before arrival. defer-for-Pike still active: if Pike ready when Bara at d~600, brain defers; AD casts Pike; brain chain stays deferred. The two paths (Pike via AD + W via brain) don't conflict because Bara doesn't reach W's eta=1.20 trigger before Pike fires (Pike's range gate at d=425 hits earlier in the encounter).")
+LOG:info("Lina brain v0.5.55.2 hotfix: W-specific catalog gate in armed_chain_peek. User: 'Those are fixed values which means nothing the correct approach is use the ETA > time to cast and if this is the case we can cast to stun bara as soon as he hits lina'. **The diagnosis**: v0.5.55.1 still used fixed values (SAVE_ETA_TRIGGER[W]=1.20s with fixed eta_speed=600 -> fires at d=720 regardless of real speed). For slow Bara (real=400) at d=720, real impact_t=1.80 > W's upper 1.68 -> W.fire skips, entry consumed, late fire. For fast Bara (real=1000) at d=720, real impact_t=0.72 < W's lower 1.12 -> W.fire skips, late fire. Fixed eta misses both ends. **Fix**: replace W's fixed gates with a catalog impact_t check. armed_chain_peek for sn=lina_w_anti_gap calls state.compute_arrival_time, computes the REAL impact_t (catalog ramp model for Bara, real speed). Fire W when impact_t in [W_LEAD=1.12, W_LEAD + W_AOE_RADIUS/eff_speed] -- the geometric window from v0.5.50.8. Out of window: return -1 sentinel so legacy eta_trigger fallback in armed_threats_tick also blocks W. Adaptive to real speed: at speed 506, window [1.12, 1.56]; at 600, [1.12, 1.50]; at 750, [1.12, 1.42]; at 400, [1.12, 1.68]. Fire moment = 'as soon as W's prep matches Bara's arrival' = impact_t crosses W_LEAD. **Scoped to W only** (not the v0.5.51 generic per-save catalog gate). Other saves (WW, FC, Glimmer, Pike, etc.) keep their legacy SAVE_FIRE_DISTANCE / SAVE_ETA_TRIGGER gates -- AutoDisabler handles Pike for catalog mods anyway. For homing_charge / homing_carry only; other kinds + non-catalog mods fall through to legacy. **W's .fire body window check (v0.5.55 Step 4) becomes defense-in-depth** -- redundant but kept as a safety net for non-armed dispatch paths (proactive Dispatch, channel-start, etc.). New tlog w_catalog_eta_gate (matches v0.5.51 name for log-grep continuity). **Files**: Lina.lua only (~45 line insertion). lib/defense.lua + lib/threat_data.lua unchanged. **Lina.lua 8444 -> 8489 lines (+45)**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara approach -> bara_charge_armed. armed_chain_peek's W gate fires w_catalog_eta_gate tlog each tick with real impact_t / lower / upper. Fires W when impact_t enters [1.12, 1.12+225/speed] window. At slow speed=506 the window opens at d=566 (1.12*506); at fast speed=1000 the window opens at d=1120. Auto-adaptive. armed_threat_fire via=w_catalog_eta (not save_dist or eta_trigger). W detonates at Bara's arrival -> stun at moment of impact. Bara mitigated. defer-for-Pike still active.")
 
 return callbacks

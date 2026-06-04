@@ -1400,17 +1400,19 @@ local SAVE_FIRE = {
     -- self-refusing vs a faced melee attacker (fire_returned_false).
     item_hurricane_pike = {
         short           = "pike",
-        -- v0.5.51 Phase 3 slice 1: prep_time = Pike cast point 0.5s
-        -- (KV item_hurricane_pike CastPoint). Pike has both a time
-        -- gate (this) AND a distance gate (the dist_to(caster) <=
-        -- pike_enemy_range() check inside .fire); the gate here
-        -- handles the time dimension, .fire's gate handles range.
-        -- If both pass: Pike fires AT the right moment AND in range.
-        -- If time matches but caster out of range: .fire returns
-        -- false, chain walker falls through to next save (D3 x rule).
-        -- active_duration informational (knockback 0.4s).
-        prep_time       = 0.5,
-        active_duration = 0.4,
+        -- v0.5.54: prep_time + active_duration REMOVED. Per user spec
+        -- "AutoDisabler is a native script that is 100% verified and
+        -- working ... Pike is a skill disable", Pike belongs to the
+        -- framework AutoDisabler's Force Interrupt path. Brain stays
+        -- out of AD's lane: no prep_time = neither v0.5.51 hero-side
+        -- catalog gate nor v0.5.53 lib catalog gate triggers on Pike,
+        -- and AD handles Pike's fire timing. The chain still passes
+        -- through Pike (via legacy distance gate) as a fallback when
+        -- AD hasn't / can't, but the v0.5.51 catalog double-fire
+        -- pattern (brain catalog_eta_pike on top of AutoDisabler.lua
+        -- casts) is gone. Glimmer / BKB / Lotus / WW / Eul / FC / W
+        -- KEEP their prep_time -- they're brain-owned saves (dodges /
+        -- escape / arrival-stun), not AD-owned disables.
         -- v0.5.11 PE-03 (Sniper S29 port): the engine silently drops the FIRST
         -- cast of a freshly-acquired item (Pike included) -- the order reaches
         -- ExecuteOrder, cooldown stays 0, and Lina's first real Pike save of the
@@ -6772,23 +6774,28 @@ local function setup_menu()
         .. "Edge/Ether/Wind Waker). Restored at POST_GAME so the change is "
         .. "scoped to one match. Off = Dodger and brain both fire (causes "
         .. "double-fires on Bara WW+Pike etc. observed in v0.5.42 demo).")
-    -- v0.5.52 Phase 3 slice 2: AutoDisabler Force Interrupt override.
-    -- v0.5.51 demo log proved brain-vs-framework double-fire on Pike
-    -- when both the brain catalog gate AND AutoDisabler.lua targeted
-    -- Bara charge (modifier_spirit_breaker_charge_of_darkness is in
-    -- AutoDisabler/Force Interrupt/Versus list). Zero AutoDisabler's
-    -- Pike + Force Staff at match start so brain has sole control of
-    -- those saves; v0.5.51's prep_time-based ladder works without
-    -- competing with the framework's force-interrupt path.
-    m.override_autodisabler = gDef:Switch('Override AutoDisabler Force Interrupt items', true)
-    m.override_autodisabler:ToolTip("On match start (GAME_IN_PROGRESS), "
-        .. "capture and zero the 2 chain-overlap items in the framework's "
-        .. "AutoDisabler Force Interrupt subsystem (Pike + Force Staff). "
-        .. "Restored at POST_GAME so the change is scoped to one match. "
-        .. "Off = AutoDisabler and brain both fire Pike on Bara charge "
-        .. "(the v0.5.51 double-fire pattern: brain catalog_eta_pike at "
-        .. "impact_t=0.59 fired AFTER AutoDisabler already cast Pike on "
-        .. "Bara at d=569 / d=473 in the same encounter).")
+    -- v0.5.54: AutoDisabler override is now OPT-IN (was default ON in
+    -- v0.5.52). Per user spec, AutoDisabler is a verified native
+    -- script with broad coverage; disabling it gave up that coverage
+    -- for one local Pike-on-Bara conflict. The brain now gates the
+    -- conflict at the data layer (Pike has no prep_time so the brain
+    -- catalog gate doesn't fire it) instead of zeroing the framework
+    -- subsystem. The toggle is preserved for users who explicitly
+    -- want the v0.5.52 override behavior (not recommended).
+    m.override_autodisabler = gDef:Switch('Override AutoDisabler Force Interrupt items', false)
+    m.override_autodisabler:ToolTip("DEPRECATED (default OFF in v0.5.54). "
+        .. "v0.5.52 default ON zeroed AutoDisabler's Force Interrupt "
+        .. "items (Pike + Force Staff) at GAME_IN_PROGRESS to prevent "
+        .. "brain-vs-framework double-fire on Bara charge. v0.5.54 "
+        .. "reverses this: AutoDisabler stays active per its native "
+        .. "config and the brain stays out of its lane by dropping "
+        .. "prep_time from Pike. The toggle is preserved for users "
+        .. "who explicitly want the v0.5.52 override behavior but is "
+        .. "now no-op by default. To re-enable: turn this on, then "
+        .. "Pike + Force Staff in AutoDisabler/Force Interrupt/Usage "
+        .. "are zeroed at GAME_IN_PROGRESS (state.AD.disable is gone "
+        .. "from OnUpdateEx; this toggle's ON state has no effect in "
+        .. "v0.5.54+ -- it is preserved for menu compatibility only).")
     m.preface_enable = gDef:Switch("Pre-face incoming threats", false)
     m.preface_enable:ToolTip("Turn to face an approaching enemy that has a "
         .. "ready targeted threat, so Lina's 0.6 turn rate does not delay her "
@@ -7571,23 +7578,22 @@ function callbacks.OnUpdateEx()
         end
     end
 
-    -- v0.5.52 Phase 3 slice 2: AutoDisabler Force Interrupt override.
-    -- Same transition hook + idempotent latch pattern as Dodger / LB,
-    -- but state.AD lives on state (not a module local) per the 200-
-    -- locals limit. No new locals in this hook block either: the
-    -- GameRules.GetGameState() call is cheap and inlined to keep this
-    -- block from pushing OnUpdateEx over the function-local ceiling.
-    if state.menu and state.menu.override_autodisabler
-       and state.menu.override_autodisabler:Get()
-       and GameRules and GameRules.GetGameState
-       and Enum and Enum.GameState then
-        if GameRules.GetGameState() == Enum.GameState.DOTA_GAMERULES_STATE_GAME_IN_PROGRESS
-           and not state.autodisabler_disabled then
-            state.AD.disable()
-        elseif GameRules.GetGameState() == Enum.GameState.DOTA_GAMERULES_STATE_POST_GAME
-           and state.autodisabler_disabled then
-            state.AD.restore()
-        end
+    -- v0.5.54: AutoDisabler stays active. v0.5.52 disabled AD's Force
+    -- Interrupt items (Pike + Force Staff) to prevent brain-vs-AD
+    -- double-fire on Bara charge. Per user spec "AutoDisabler is a
+    -- native script that is 100% verified and working. Best way to
+    -- make our script is not to disable it but live with it. Instead
+    -- of disabling we can just gate it. Disabling it might mean that
+    -- we are giving up a wide range of disables that are already
+    -- working, this means extra working for low to no profit". The
+    -- new approach: brain stays out of AD's lane by dropping
+    -- prep_time on AD-owned saves (Pike in v0.5.54). The v0.5.52
+    -- hook that called state.AD.disable() is gone. Auto-restore once
+    -- if a prior v0.5.52 game left the framework AutoDisabler menu
+    -- items zeroed (idempotent via state.AD.restore's internal
+    -- state.autodisabler_disabled guard).
+    if state.AD and state.autodisabler_disabled then
+        state.AD.restore()
     end
 
     if not state.seen_modifiers_dumped and state.seen_modifiers
@@ -8531,6 +8537,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.53 Phase 3 slice 3: lib/defense.lua consumes catalog via Dispatcher. User: 'go on start' on the v0.5.53 lib dispatcher integration. **Three changes**: (1) lib/defense.lua gains Defense.ComputeSaveFireWindow(threat_entry, speed, save_entry) -- public lib helper for the per-save fire-window math, identical semantics to v0.5.51 Lina state.compute_save_fire_window. Shared source of truth between Lina-side armed_chain_peek preview and lib-side run_chain_walk gate. (2) lib/defense.lua run_chain_walk gains a per-save catalog gate between `not_ready` skip and the existing reserved/concurrent checks. Hero opts in via cfg.threat_catalog + cfg.compute_arrival_time. D3 semantics: above upper -> STOP whole chain walk (lower-priority saves have smaller prep_time = even earlier moments, none will fire this tick); below lower -> skip this save, continue to next; in_window -> fall through to existing ready/reserved/.fire chain. New tlogs: lib_catalog_gate (v=3, per gate evaluation), save_chain_stop (v=3, on STOP), save_chain_skip reason=catalog_too_late (v=3, on skip). (3) Lina.lua Defense.New registration adds threat_catalog = TD.THREAT_ARRIVAL_TIMING + compute_arrival_time = state.compute_arrival_time. Lina now opts in to the lib gate. **Defense-in-depth**: Lina armed_chain_peek catalog gate from v0.5.51 KEPT (not removed in v0.5.53). Both layers run; both should agree on the per-save fire decision since they use the same math. The lib gate catches cases where armed_chain_peek picked one save but run_chain_walk falls through to a wrong-window save (e.g., v0.5.51 demo: Pike picked by peek, Pike returned false out-of-range, W fired late at impact_t=0.59). With v0.5.53 lib gate, W's catalog window [1.12, 1.48] blocks it at impact_t=0.59 -> save_chain_skip reason=catalog_too_late -> chain falls through to end -> no_effective_save_for_threat. This enforces the v0.5.49.1 'no W is better than late W' design intent. **Sniper unaffected**: doesn't register threat_catalog/compute_arrival_time so the lib gate is no-op for Sniper -- legacy behavior preserved. **Files**: lib/defense.lua +88 lines (Defense.ComputeSaveFireWindow helper + cfg docs + per-save gate in run_chain_walk). Lina.lua +10 lines (Defense.New registration). lib/threat_data.lua unchanged from v0.5.50. SHA refreshed both. luac clean both, no BOM, lesson 15 verified Lina. **Verification on next demo**: lib_catalog_gate tlogs appear alongside Lina-side catalog_eta_gate tlogs for any save with prep_time>0 on Bara/Tusk/PA/WD/Lion catalog mods. Save fire decisions should match between the two gates. For W at impact_t<1.12 with all earlier saves on CD: save_chain_skip reason=catalog_too_late (W blocked); chain falls through; no fire this dispatch. Compare with v0.5.52.1: would have fired W late.")
+LOG:info("Lina brain v0.5.54: gate AutoDisabler instead of disabling (drop Pike prep_time). User: 'AutoDisabler is a native script that is 100% verified and working. The best way to make our script is not to disable it but live with it. Instead of disabling we can just gate it. Disabling it might mean that we are giving up a wide range of disables that are already working, this means extra working for low to no profit'. User category clarification: Glimmer ~100% dodge (brain), BKB ~100% dodge (brain), Pike skill disable (AD), Ghost/Eul/WW dual-category. **Reverses v0.5.52's approach**: v0.5.52 zeroed AutoDisabler's Force Interrupt items (Pike + Force Staff) at GAME_IN_PROGRESS to prevent brain-vs-framework double-fire on Bara charge. That sacrificed AD's broad coverage for one local conflict. **v0.5.54 inversion**: AD stays active per its native config; brain stays out of AD's lane by dropping prep_time from Pike in SAVE_FIRE. Neither v0.5.51 hero-side catalog gate nor v0.5.53 lib catalog gate triggers on Pike; AD handles Pike's fire timing. The chain still passes through Pike via legacy distance gate as fallback when AD hasn't / can't, but the catalog-pattern double-fire (brain catalog_eta_pike on top of AutoDisabler.lua casts at d=569 / d=473) is gone. **Brain-owned saves keep prep_time**: Glimmer, BKB, Lotus, WW (Wind Waker), Eul (Cyclone), FC (Flame Cloak), W (Light Strike Array). These are dodges / escape / arrival-stuns, not skill disables. **Three Lina.lua changes**: (1) item_hurricane_pike: drop prep_time=0.5 + active_duration=0.4. Lina-side catalog gate skips Pike (prep_time nil). Lib-side run_chain_walk gate also skips Pike (cfg.threat_catalog gate's prep_time>0 condition false). Both layers consistent. (2) OnUpdateEx hook: replaced v0.5.52 GAME_IN_PROGRESS state.AD.disable() + POST_GAME state.AD.restore() block with a single auto-restore line that runs if state.autodisabler_disabled==true (idempotent via AD.restore's internal guard). Covers users who had v0.5.52 deployed mid-match and hot-swap to v0.5.54: the framework AutoDisabler menu items get un-zeroed on first OnUpdateEx tick. (3) Menu toggle override_autodisabler default flipped true->false. Toggle preserved for compat but the OnUpdateEx hook no longer calls disable(), so the toggle is effectively no-op in v0.5.54+. Tooltip updated to DEPRECATED. **state.AD module STAYS** (read/write/disable/restore helpers) as dormant infrastructure. Future debug / manual override can call state.AD.disable() from console if needed. **Scope adjustment**: v0.5.54 was originally 'cast-point-armed branches use catalog cast_point'. That work moves to v0.5.55. **No code changes to v0.5.53 lib catalog gate** -- pure data + hook change. **Lina.lua 8526 -> 8540 lines (+14). lib/threat_data.lua unchanged from v0.5.50. lib/defense.lua unchanged from v0.5.53**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara charge -> AutoDisabler.lua casts Pike at AD's timing (visible as AutoDisabler.lua:NNN in ExecuteOrder stamp); brain DOES NOT emit catalog_eta_pike or lib_catalog_gate save=pike. Other catalog mods (W vs charge, Lotus vs Lion Finger, BKB vs Sniper Assassinate etc.) still produce catalog_eta_gate + lib_catalog_gate as in v0.5.53. Users who had v0.5.52 deployed see one autodisabler_chain_restored tlog on first v0.5.54 tick.")
 
 return callbacks

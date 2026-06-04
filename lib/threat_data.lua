@@ -2018,6 +2018,41 @@ ThreatData.THREAT_ARRIVAL_TIMING = {
         post_cast_delay = 0,
         impact_pos      = "self",
     },
+
+    -- v0.5.71 Phase 4 slice 6: Beastmaster Primal Roar + Tide Ravage.
+    -- Both are LINA_SAVE_OVERRIDES targets (high-impact hard-disable ults
+    -- that previously fell through to the generic lockdown chain). Adding
+    -- them here so the v0.5.70 cast_point_too_early defer gate covers
+    -- them with the precise catalog cast_point rather than the coarse
+    -- CAST_POINT_THREATS.cp_default fallback (which neither has anyway).
+
+    -- Beastmaster Primal Roar: line skillshot, primary target 4s stun +
+    -- cone 2s slow. Cast point 0.4s. impact_pos=self (Lina is the primary
+    -- target if she's at the line center). BKB blocks; airborne dodges.
+    modifier_beastmaster_primal_roar_stun = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "beastmaster_primal_roar",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.4,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Tide Ravage: PBAoE 4s stun + damage centered on Tide. Cast point
+    -- 0.55s. impact_pos=caster (the AoE radiates from Tide's position).
+    -- BKB blocks; airborne dodges.
+    modifier_tidehunter_ravage = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "tidehunter_ravage",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.55,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
 }
 
 -- v0.5.56: cast_point single source of truth.

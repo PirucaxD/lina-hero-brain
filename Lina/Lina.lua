@@ -737,6 +737,13 @@ state.lina_chains = {
     disruptor_kfr   = CH.DISRUPTOR_KFR,
     wd_death_ward   = CH.WD_DEATH_WARD,    -- v0.5.47
     underlord_pit   = CH.UNDERLORD_PIT,    -- v0.5.47
+    -- v0.5.71 Phase 4 slice 6 high-impact ult chains
+    doom            = CH.DOOM,
+    magnus_rp       = CH.MAGNUS_RP,
+    fv_chrono       = CH.FV_CHRONO,
+    enigma_bh       = CH.ENIGMA_BH,
+    beastmaster_pr  = CH.BEASTMASTER_PR,
+    tide_ravage     = CH.TIDE_RAVAGE,
 }
 
 -- v0.5.47 Phase 1: WD Death Ward + Underlord Pit of Malice chains. Both
@@ -788,6 +795,91 @@ CH.UNDERLORD_PIT = {
     "lina_w_anti_gap",
 }
 
+-- v0.5.71 Phase 4 slice 6: tuned chains for the 6 hard-disable ults the
+-- audit (Explore agent post-v0.5.69) flagged as routed through the
+-- generic CATEGORY_PATCHES.lockdown chain with no per-threat tuning.
+-- "These are the threats that kill Lina; current chain is throw whatever
+-- lockdown items have." Each entry below picks items by what actually
+-- works for THAT ult (BKB-pierce vs BKB-blocked; reflectable vs not;
+-- airborne dodge vs Aeon lethal-block). Authoritative-override bypass
+-- means kind/tether filters are skipped (per lib/defense.lua
+-- Dispatcher:ResolveSaveOrder hero_override branch).
+
+-- Doom: 16s undispellable silence + DoT. Cast point 0.5s (cast_point_too_early
+-- gate from v0.5.70 fires when chain walks early). Lotus REFLECTS Doom on
+-- apply (single-target debuff). BKB grants magic immunity which dispels
+-- Doom on apply AND prevents recast for the BKB duration. After Doom lands
+-- Lina has no items / abilities -- saves MUST fire pre-cast or in-flight.
+CH.DOOM = {
+    "item_lotus_orb",        -- reflect Doom back on caster; primary save
+    "item_black_king_bar",   -- magic immunity = Doom dispelled / blocked
+    "item_wind_waker",       -- airborne 2.5s = Lina untargetable through cast resolution
+    "item_cyclone",           -- same as WW (EUL true disable but still avoids Doom landing)
+    "item_force_staff",      -- push 600u, may exit Doom's 600u cast range
+    "item_hurricane_pike",   -- self-cast push 425u; enemy-cast disrupts Doom caster
+    "item_glimmer_cape",     -- invis breaks Doom targeting if pre-cast
+}
+
+-- Magnus RP: PBAoE pull + 4s stun. Cast point 0.55s. BKB blocks both pull
+-- AND stun (RP doesn't pierce BKB). Airborne (WW/Eul) dodges entirely. Not
+-- reflectable. Force/Pike push out of pull radius if timing allows.
+CH.MAGNUS_RP = {
+    "item_black_king_bar",   -- blocks pull + stun
+    "item_wind_waker",       -- airborne dodge (movable per Liquipedia, slice 3)
+    "item_cyclone",           -- airborne dodge (full disable but untargetable)
+    "item_force_staff",      -- escape pull radius
+    "item_hurricane_pike",   -- same
+    "item_glimmer_cape",     -- invis pre-cast breaks targeting
+}
+
+-- FV Chronosphere: AoE-at-ground stop-time 4-5s. Cast point 0.4s. BKB does
+-- NOT help INSIDE Chrono (Lina still frozen; FV moves freely). Airborne
+-- (WW/Eul) saves only if pre-cast / cast point. Aeon Disk DOES go off
+-- inside Chrono on lethal damage. Lotus doesn't reflect.
+CH.FV_CHRONO = {
+    "item_wind_waker",       -- airborne pre-cast OR during; immune to Chrono freeze
+    "item_cyclone",           -- airborne immune
+    "item_force_staff",      -- escape sphere radius (425u) pre-cast
+    "item_hurricane_pike",   -- same
+    "item_aeon_disk",        -- lethal-block during Chrono; last resort
+}
+
+-- Enigma Black Hole: PBAoE channel 4s, hard-disable. Cast point 0.45s.
+-- BKB does NOT block BH (pierces). Airborne (WW/Eul) makes Lina immune to
+-- the lift effect. Force/Pike push out of radius if pre-cast.
+CH.ENIGMA_BH = {
+    "item_wind_waker",       -- airborne immune to BH
+    "item_cyclone",           -- same
+    "item_force_staff",      -- push out of 400u BH radius pre-cast
+    "item_hurricane_pike",   -- same
+    "item_black_king_bar",   -- LAST resort (pierces BKB) -- in chain only for the magic damage component
+    "item_aeon_disk",        -- lethal-block fallback
+}
+
+-- Beastmaster Primal Roar: line skillshot, primary target 4s stun + cone
+-- 2s slow. Cast point 0.4s. BKB blocks the stun. Airborne dodges.
+CH.BEASTMASTER_PR = {
+    "item_black_king_bar",   -- blocks stun
+    "item_wind_waker",       -- airborne dodge
+    "item_cyclone",           -- airborne dodge
+    "item_force_staff",      -- escape line skillshot
+    "item_hurricane_pike",   -- same
+    "item_glimmer_cape",     -- invis pre-cast
+}
+
+-- Tide Ravage: PBAoE 4s stun. Cast point 0.55s. BKB blocks. Airborne
+-- dodges. Lotus MAY reflect on apply (AoE debuff; reflect chance per-target
+-- is unclear, treat as bonus not primary).
+CH.TIDE_RAVAGE = {
+    "item_black_king_bar",   -- blocks stun
+    "item_wind_waker",       -- airborne dodge
+    "item_cyclone",           -- airborne dodge
+    "item_lotus_orb",        -- attempt reflect; not load-bearing
+    "item_force_staff",      -- escape if Tide is in range
+    "item_hurricane_pike",   -- same
+    "item_glimmer_cape",     -- invis pre-cast
+}
+
 -- Modifier-keyed (self path, threat detected via OnModifierCreate).
 LINA_SAVE_OVERRIDES["modifier_pudge_dismember_pull"]            = CH.PUDGE_DISMEMBER
 LINA_SAVE_OVERRIDES["modifier_bane_fiends_grip"]                = CH.BANE_GRIP
@@ -796,6 +888,13 @@ LINA_SAVE_OVERRIDES["modifier_legion_commander_duel"]           = CH.LEGION_DUEL
 LINA_SAVE_OVERRIDES["modifier_disruptor_kinetic_field_remnant"] = CH.DISRUPTOR_KFR
 LINA_SAVE_OVERRIDES["modifier_witch_doctor_death_ward"]         = CH.WD_DEATH_WARD  -- v0.5.47
 LINA_SAVE_OVERRIDES["modifier_abyssal_underlord_pit_of_malice_ensare"] = CH.UNDERLORD_PIT  -- v0.5.47
+-- v0.5.71 Phase 4 slice 6 high-impact ult overrides:
+LINA_SAVE_OVERRIDES["modifier_doom_bringer_doom"]                = CH.DOOM
+LINA_SAVE_OVERRIDES["modifier_magnataur_reverse_polarity_stun"]  = CH.MAGNUS_RP
+LINA_SAVE_OVERRIDES["modifier_faceless_void_chronosphere"]       = CH.FV_CHRONO
+LINA_SAVE_OVERRIDES["modifier_enigma_black_hole"]                = CH.ENIGMA_BH
+LINA_SAVE_OVERRIDES["modifier_beastmaster_primal_roar_stun"]     = CH.BEASTMASTER_PR
+LINA_SAVE_OVERRIDES["modifier_tidehunter_ravage"]                = CH.TIDE_RAVAGE
 
 ----------------------------------------------- commit-attacker close-gap ---
 -- v0.5.45 CA (DEFENSE_PLAN.md sec 4.2 commit-attacker track): port of
@@ -8884,6 +8983,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.70 (Phase 4 slice 5): CATALOG CONSUMER WIRED. User: 'Both #1 and #2 in one slice' on the audit recommendations. **The unlock**: until now, 33 of 40 THREAT_ARRIVAL_TIMING entries were idle (only the W gate at L1646 consumed homing_charge / homing_carry kinds; cast_point_targeted entries from slices 1-4 had zero consumers). v0.5.70 adds the first cross-cutting consumer in lib/defense.lua run_chain_walk: two new opt-in skip branches before the existing fire logic. **Branch 1 (cast_point_too_early)**: when a high-CD save (Lotus, BKB, Aeon, Pipe, Glimmer, WW, Cyclone) is being considered AND the threat has a catalog entry AND impact_t > cast_point_defer_threshold (default 0.5s), skip with reason=cast_point_too_early + impact_t + threshold logged. The armed-threats tick re-evaluates each frame; the save fires when impact_t crosses the threshold. Fixes the audit-flagged 'Lotus/BKB burns at cast-start on slow casts (Lion Finger 0.6s, OD Sanity Eclipse 1.7s, Sand King Epicenter 2.0s) and is on CD when the actual impact lands' class of bug. **Branch 2 (low_severity_high_hp)**: when a high-CD save is being considered AND severity (from TD.SeverityOf, 180 entries) == 'low' AND HP fraction > severity_skip_hp_threshold (default 0.75), skip with reason=low_severity_high_hp. Avoids burning a 60s BKB on a CM Frostbite when Lina is at full HP. **Lib changes opt-in**: gated on cfg.compute_arrival_time + cfg.self_hp_fraction + cfg.high_cd_saves registrations. Without these (Sniper does not register them), run_chain_walk is byte-equivalent to v0.5.69. **Lina registrations**: reintroduced cfg.compute_arrival_time (was removed in v0.5.55 when last consumer was deleted), added cfg.self_hp_fraction (Entity.GetHealth / GetMaxHealth per reference_uczone_hp_api), cfg.high_cd_saves (7-item set: Lotus, BKB, Aeon, Pipe, Glimmer, WW, Cyclone), cfg.cast_point_defer_threshold=0.5, cfg.severity_skip_hp_threshold=0.75. **Files**: lib/defense.lua +50 lines (two skip branches + 24 lines comment in run_chain_walk). Lina.lua +35 lines (5 cfg additions in Defense.New). lib/threat_data.lua + lib/escape.lua + Sniper.lua unchanged. **Verification on next demo**: new tlogs save_chain_skip reason=cast_point_too_early impact_t=N.NN should fire on slow-cast threats (Doom 0.5s, AA Ice Blast 0.5s, OD 1.7s, Sand King 2.0s, FV Chrono 0.4s) when the chain is walked early. save_chain_skip reason=low_severity_high_hp should fire for low-severity threats at full HP (e.g. CM Frostbite, WD Maledict). Bara/Tusk homing behavior UNCHANGED. Pike/Force/EUL/WW .fire bodies UNCHANGED.")
+LOG:info("Lina brain v0.5.71 (Phase 4 slice 6): LINA_SAVE_OVERRIDES for 6 high-impact ults. User: 'Go on' after v0.5.70 catalog consumer ship. **Audit rec #4 addressed**: 6 hard-disable ults previously routed through generic CATEGORY_PATCHES.lockdown chain (audit verbatim: 'These are the threats that kill Lina; current chain is throw whatever lockdown items have'). v0.5.71 adds per-ult tuned chains. **6 new CH.* tables + LINA_SAVE_OVERRIDES entries**: CH.DOOM (Lotus reflect head + BKB magic-immune + airborne dodges + escape items), CH.MAGNUS_RP (BKB blocks pull+stun + airborne dodges), CH.FV_CHRONO (airborne pre-cast + Aeon lethal-block during -- BKB does NOT help inside Chrono), CH.ENIGMA_BH (airborne immune + escape items + BKB last-resort -- BKB does NOT block BH which pierces), CH.BEASTMASTER_PR (BKB blocks + airborne dodges), CH.TIDE_RAVAGE (BKB blocks + airborne dodges + Lotus attempt reflect). Each chain picks items by what actually works for THAT ult: BKB-pierce vs BKB-blocked, reflectable vs not, airborne dodge vs Aeon lethal-block. **2 new catalog entries**: modifier_beastmaster_primal_roar_stun (cp 0.4 self) + modifier_tidehunter_ravage (cp 0.55 caster). Catalog now at 42 entries. The other 4 ult modifiers (Doom, Magnus RP, FV Chrono, Enigma BH) were already in catalog from slices 1-3 so v0.5.70 cast_point_too_early defer gate ALREADY applies. **state.lina_chains test-harness handle** updated to expose the 6 new chains. **Authoritative override bypass**: ResolveSaveOrder returns is_authoritative=true for hero_overrides, so kind_mismatch / tether_unreachable filters skip -- user knows the mechanics better than the kind heuristic. **Combined with v0.5.70 cast_point_too_early defer**: Doom's Lotus reflect (chain head) is deferred until impact_t < 0.5s (cast point 0.5s, threshold 0.5s = fires near end of cast), saving Lotus's 14s CD if the Doom cancels mid-cast. Same for the other 4 catalog-covered ults. **Files**: Lina.lua +95 lines (6 CH.* chains + 6 LINA_SAVE_OVERRIDES entries + state.lina_chains updates). lib/threat_data.lua +30 lines (2 catalog entries). lib/escape.lua + lib/defense.lua + Sniper.lua unchanged. **Verification on next demo**: when these 6 ults trigger, resolve_save_order_pick tlog source=hero_override head=item_lotus_orb (Doom) / item_black_king_bar (Magnus RP / Beastmaster PR / Tide Ravage) / item_wind_waker (FV Chrono / Enigma BH). save_chain_skip reason=cast_point_too_early fires while chain walks early; eventually fire_returned_true on the head save when impact_t crosses 0.5s.")
 
 return callbacks

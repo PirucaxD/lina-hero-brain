@@ -1590,6 +1590,149 @@ ThreatData.THREAT_ARRIVAL_TIMING = {
         post_cast_delay = 0,
         impact_pos      = "caster",
     },
+
+    -- v0.5.67 Phase 4 slice 2: channel modifiers + fast cast-point
+    -- targeted disables. Cast point values from common Dota knowledge;
+    -- consumers are not yet wired (no per-mod pre-fire timing on save
+    -- items), so precise values can be tuned when consumers come online.
+    -- Channel modifiers use the CASTER-side modifier name (matching WD
+    -- Death Ward pattern); the channel itself is what compute_arrival_time
+    -- is asked about. impact_pos=caster so defensive interrupts (stun the
+    -- channeler) aim at the caster.
+
+    -- Bane Fiend's Grip: single-target channel, locks both Bane and Lina.
+    -- Cast point 0.3s. 5.0/5.0/5.0s channel (longer with talent / scepter).
+    -- Stunning Bane breaks the channel; Lotus reflects the projectile but
+    -- not the channel itself; BKB on Lina blocks the magic damage but not
+    -- the disable. impact_pos=caster (aim interrupt at Bane).
+    modifier_bane_fiends_grip = {
+        kind            = "channel_at_caster",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "bane_fiends_grip",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
+
+    -- Pugna Life Drain: single-target channel, dispellable. Cast point
+    -- 0.3s. Stun on Pugna ends the channel. impact_pos=caster.
+    modifier_pugna_life_drain = {
+        kind            = "channel_at_caster",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "pugna_life_drain",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
+
+    -- Pudge Dismember: single-target channel, lifts the target. Cast point
+    -- 0.3s. Stun on Pudge ends the channel. impact_pos=caster.
+    modifier_pudge_dismember = {
+        kind            = "channel_at_caster",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "pudge_dismember",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
+
+    -- Crystal Maiden Freezing Field: PBAoE channel around CM. Cast point
+    -- 0.3s. Stun on CM ends the channel. impact_pos=caster.
+    modifier_crystal_maiden_freezing_field = {
+        kind            = "channel_at_caster",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "crystal_maiden_freezing_field",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
+
+    -- Enigma Black Hole: PBAoE channel around Enigma, single-disable
+    -- multi-target. Cast point 0.45s. Stun on Enigma ends the channel.
+    -- impact_pos=caster.
+    modifier_enigma_black_hole = {
+        kind            = "channel_at_caster",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "enigma_black_hole",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.45,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
+
+    -- Disruptor Static Storm: AoE silence + damage from a thinker entity
+    -- at the cast position. Disruptor himself does NOT channel post-cast;
+    -- the thinker handles the AoE for 6.0s. Cast point 0.3s. The catalog
+    -- key uses the THINKER modifier name (matching ENEMY_CHANNEL_MODIFIERS
+    -- which lists modifier_disruptor_static_storm_thinker). Stun on
+    -- Disruptor during cast point cancels; once thinker is placed it's
+    -- uninterruptible. impact_pos=caster (the thinker position = where
+    -- Disruptor was at cast time).
+    modifier_disruptor_static_storm_thinker = {
+        kind            = "channel_at_caster",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "disruptor_static_storm",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
+
+    -- Lion Voodoo (Hex): cast-point-targeted single-target transform.
+    -- Cast point 0.3s (low because Lion's other ults are 0.6s; Hex is
+    -- snappy). 2.0/2.75/3.5s sheep. impact_pos=self (Lina is the target).
+    modifier_lion_voodoo = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "lion_voodoo",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Bane Nightmare: cast-point-targeted single-target sleep. Cast point
+    -- 0.3s. Wakes up on damage. impact_pos=self.
+    modifier_bane_nightmare = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "bane_nightmare",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Faceless Void Chronosphere: AoE-at-ground stop-time. Cast point
+    -- 0.4s. 4-5s freeze for everyone inside except FV (and his allies
+    -- with Aghs). Defensive interrupts (stun FV during cast point) cancel
+    -- the sphere. impact_pos=caster -- the sphere is centered on FV's
+    -- cast position (he's typically at the center inside). Kind is
+    -- cast_point_targeted as approximation; a future cast_point_aoe kind
+    -- could distinguish (Sand King Epicenter is the other AoE-at-caster
+    -- entry that doesn't perfectly fit this kind).
+    modifier_faceless_void_chronosphere = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "faceless_void_chronosphere",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.4,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
 }
 
 -- v0.5.56: cast_point single source of truth.

@@ -1311,23 +1311,23 @@ local SAVE_FIRE = {
     },
     item_cyclone      = {
         short = "eul",
-        -- v0.5.60 Phase 5 slice 3 / v0.5.62 fix: cast in place (EUL lifts
-        -- Lina airborne 2.5s untargetable), then arm the tick-driven
-        -- post-airborne move via state.queue_safe_post_move. v0.5.64:
-        -- EUL is a FULL disable per Liquipedia (STUNNED + INVULNERABLE,
-        -- no horizontal movement during airborne) so moves_during_airborne
-        -- stays false (default); tick waits for the modifier to clear
-        -- before reissuing. Unlike WW, EUL cannot move during the lift.
+        -- v0.5.65 (user spec: "IF EUL does not move while on air, do
+        -- nothing"): EUL is a FULL disable per Liquipedia (STUNNED +
+        -- INVULNERABLE + NO_HEALTH_BAR, "no horizontal movement is
+        -- possible during the effect"). The brain cannot reposition
+        -- Lina during airborne, and forcing a post-airborne walk in a
+        -- direction Lina did not choose just fights the player's
+        -- positioning intent. So EUL is pure cast-and-survive: fire
+        -- the immunity, land in place, let the player / baseline
+        -- orbwalker handle positioning afterward. Unlike WW (which CAN
+        -- move at 300 MS during airborne and DOES call
+        -- queue_safe_post_move), EUL just casts and returns.
         fire  = function(intent, threat_caster)
             local guarded = NPC.HasModifier(state.self_npc, "modifier_eul_cyclone")
             tlog(1, "save_fire_invoked", { item = "item_cyclone", intent = tostring(intent),
                 guarded = guarded and "y" or "n" })
             if guarded then return false end
-            local ok = issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_cyclone"))
-            if ok then
-                state.queue_safe_post_move("eul", 600, threat_caster, "modifier_eul_cyclone", false)
-            end
-            return ok
+            return issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_cyclone"))
         end,
     },
     -- v0.5.2 C: HP gate on chain-walked Lotus. DEMO 3 showed 5x Lotus fires in
@@ -8846,6 +8846,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.64 (Liquipedia-driven): WW reissues DURING airborne; EUL stays post-airborne. User: 'Check the log, it is moving lina out the ww or eul but. So it is making lina walking instead of making lina moving while on cyclone. Look on liquipedia'. **Liquipedia confirms the asymmetry**: WW (item_wind_waker) self-cast per docs: 'If the target is the wielder, they can move freely at a fixed speed (300), free pathing, ignores turn rates'. Silences/mutes/disarms but NOT a full disable. Lina CAN move at 300 MS during the 2.5s airborne. EUL (item_cyclone) self-cast per docs: 'fully disabling', modifier states STUNNED + INVULNERABLE + NO_HEALTH_BAR, 'no horizontal movement is possible'. EUL Lina cannot move during airborne. **v0.5.63 demo proved the post-airborne walk works** (ww_post_move_arrived reissues=13-33 across 3 fires) but Lina walked AFTER airborne instead of during. User wanted during. **v0.5.64 fix**: add moves_during_airborne flag to state.queue_safe_post_move. When true (WW), tick reissues MOVE while modifier_wind_waker is ACTIVE; Lina moves at 300 MS during the lift, 300 * 2.5 = 750u covers the 600u dest with ~0.5s to spare (she arrives mid-airborne, lands at dest). When false (EUL), tick waits for modifier_eul_cyclone to clear before reissuing (current behavior; orders during EUL would no-op against the full disable). **WW .fire passes moves_during_airborne=true; EUL .fire passes false explicitly**. **Pending struct** gains moves_during_airborne field. **Tick branch**: if airborne AND moves_during_airborne -> fall through to reissue logic; if airborne AND not moves_during_airborne -> defer until modifier clears (EUL path). **New tlog field**: post_move log adds movable=y|n marker so the demo can confirm which branch was taken per save. **Pike + Force unchanged**. **Files**: Lina.lua only (~15 lines: signature param + tick branch + .fire flag pass + new tlog field). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.61. **Verification on next demo**: WW fires -> save_fire_invoked + ww_post_move with movable=y + ww_post_move_fired DURING airborne (within ~100ms of cast not 2.5s later) + ww_post_move_arrived with low reissue count (~5-15, much less than v0.5.63s 13-33). Lina visually traveling during the airborne lift. EUL fires (if it triggers) -> ww_post_move with movable=n, eul_post_move_fired AFTER 2.5s airborne, eul_post_move_arrived as before.")
+LOG:info("Lina brain v0.5.65: EUL fires no post-move. User: 'IF EUL does not move while on air, do nothing'. **Per v0.5.64 Liquipedia lookup**: EUL self-cast is a full disable (STUNNED + INVULNERABLE + NO_HEALTH_BAR, 'no horizontal movement is possible during the effect'). Brain cannot reposition Lina during airborne; forcing a post-airborne walk in a brain-chosen direction just fights the player's positioning intent (player may want to stay where EUL was cast, or move somewhere different from the brain's safe-dest pick). **The change**: SAVE_FIRE.item_cyclone.fire no longer calls state.queue_safe_post_move. EUL becomes cast-and-survive: fire the 2.5s immunity, land in place, let the player / baseline orbwalker handle positioning. **WW stays wired** (item_wind_waker.fire still calls state.queue_safe_post_move with moves_during_airborne=true because WW self-cast IS movable per Liquipedia, 300 MS during the 2.5s airborne; brain pushing toward safe-dest mid-lift is net helpful). **Helper unchanged**: state.queue_safe_post_move + tick + moves_during_airborne flag stay in place for WW and any future hero whose disable allows movement. The moves_during_airborne=false branch is now dead code on Lina side but kept for forward-compat (small cost, no maintenance burden). **No eul_post_move tlogs anymore**. **Files**: Lina.lua only (~10 lines removed from item_cyclone.fire). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.61. **Verification on next demo**: EUL fires -> save_fire_invoked + cast_verify + NOTHING ELSE from the brain. No eul_post_move, no eul_post_move_fired, no eul_post_move_arrived. Lina lifts, lands in place, player takes over. WW fires -> save_fire_invoked + ww_post_move movable=y + ww_post_move_fired within ~100ms + ww_post_move_arrived (low reissue count, walked DURING airborne).")
 
 return callbacks

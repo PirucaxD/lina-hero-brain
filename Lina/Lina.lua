@@ -543,7 +543,13 @@ end
 ------------------------------------------------------- save data + chains --
 -- 7.41C core build is Aghs + Yasha&Kaya + Blink + Ethereal; Eul (item_cyclone)
 -- is NOT core. Wind Waker (19s CD, 2.5s cyclone, strong dispel) tops the chain.
-local DEFAULT_SAVE_CHAIN = {
+-- v0.5.52.1 (200-locals cleanup): bundled the 10 save-chain tables
+-- into a single CH table. Each chain is now CH.<name> instead of
+-- local <name>; saves 9 main-chunk local slots. Declarations stay
+-- in their original positions so the chain-by-chain commentary still
+-- reads top-to-bottom; only the storage form changed.
+local CH = {}
+CH.DEFAULT_SAVE_CHAIN = {
     "item_wind_waker", "item_cyclone", "item_lotus_orb", "item_manta",
     "item_glimmer_cape", "item_invis_sword", "item_silver_edge",
     "item_hurricane_pike", "item_force_staff",
@@ -558,7 +564,7 @@ local DEFAULT_SAVE_CHAIN = {
 -- self-displacement last (homing close-gap skips Force/Pike anyway, lesson 5;
 -- and Force/Pike push in Lina's facing so they self-refuse vs a faced melee
 -- attacker, lesson 61).
-local _GAP_CLOSE_SAVES = {
+CH.GAP_CLOSE_SAVES = {
     "item_wind_waker", "lina_flame_cloak", "item_glimmer_cape",
     "item_invis_sword", "item_silver_edge", "item_black_king_bar",
     "item_cyclone", "item_force_staff", "item_hurricane_pike",
@@ -573,7 +579,7 @@ for _, m in ipairs({
     "modifier_tusk_snowball_movement",
     "modifier_queenofpain_blink",
 }) do
-    LINA_SAVE_OVERRIDES[m] = _GAP_CLOSE_SAVES
+    LINA_SAVE_OVERRIDES[m] = CH.GAP_CLOSE_SAVES
 end
 -- v0.2.2 FIX: also key the override by KV-authoritative ABILITY name.
 -- resolve_save_order checks ANIM_SAVE_OVERRIDES[ability] FIRST, so the armed
@@ -589,7 +595,7 @@ for _, ab in ipairs({
     "tusk_snowball",
     "queenofpain_blink",
 }) do
-    state.ANIM_SAVE_OVERRIDES[ab] = _GAP_CLOSE_SAVES
+    state.ANIM_SAVE_OVERRIDES[ab] = CH.GAP_CLOSE_SAVES
 end
 
 -- v0.5.2: authoritative save chain for Sniper Assassinate (user note
@@ -602,7 +608,7 @@ end
 -- the magic-immune fallback when Lotus is unavailable; cheap displacement
 -- (Force / Pike) third so Lina exits the projectile lock cone when Lotus and
 -- BKB are both on CD; WW as the heavy displacement backstop (longer CD,
--- saved for cases where Force/Pike refuse via SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR);
+-- saved for cases where Force/Pike refuse via K.SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR);
 -- Glimmer (40% MR) next, then Aeon Disk (lethal-damage block backstop) and
 -- Flame Cloak (35% MR + spell amp) as deep MR tails. The lotus_defer_if_close
 -- gate (grep `local function lotus_defer_if_close`) only commits to this chain
@@ -647,7 +653,7 @@ LINA_SAVE_OVERRIDES["modifier_sniper_assassinate"] = {
 -- Item substitutions vs Sniper: drop grenade_at_caster / grenade_self / take_aim
 -- (hero-specific). Lina has no equivalent fast-stun interrupt for the caster, so
 -- the chains lead with displacement / dispel / invuln saves she actually owns.
-local _CHAIN_PUDGE_DISMEMBER  = {
+CH.PUDGE_DISMEMBER  = {
     -- v0.5.15 IMP-A9: WW > Eul > Force/Pike > Manta > BKB. Pudge Dismember is
     -- 200u tether, 0.5s cast point. WW 2.5s cyclone airborne + invuln dispels
     -- and breaks tether trivially. Eul self-cyclone also dispels/displaces and
@@ -662,7 +668,7 @@ local _CHAIN_PUDGE_DISMEMBER  = {
     "item_manta",
     "item_black_king_bar",
 }
-local _CHAIN_BANE_GRIP        = {
+CH.BANE_GRIP        = {
     -- WW > Manta > Eul > BKB (user spec). Bane Fiend Grip pierces magic immunity
     -- (Sniper note line 6459), so BKB is a desperate last-resort that does NOT
     -- end the grip itself -- only buys lockdown-state defense vs concurrent
@@ -673,7 +679,7 @@ local _CHAIN_BANE_GRIP        = {
     "item_cyclone",
     "item_black_king_bar",
 }
-local _CHAIN_PUGNA_DRAIN      = {
+CH.PUGNA_DRAIN      = {
     -- Force > Pike-self > Manta > WW (user spec). Pugna Life Drain tether
     -- 1100u (lib/threat_data line 335; Sniper noted 1300u, take the lib value).
     -- Force/Pike push 600/425u -- alone insufficient vs 1100u, but Pugna typically
@@ -686,7 +692,7 @@ local _CHAIN_PUGNA_DRAIN      = {
     "item_manta",
     "item_wind_waker",
 }
-local _CHAIN_LEGION_DUEL      = {
+CH.LEGION_DUEL      = {
     -- BKB > Manta > Eul > Aeon (user spec). Duel cannot be ended by displacement
     -- (no range limit per Sniper v6.15.16 note line 6601); goal is to survive
     -- the 5s lockdown. BKB grants magic immunity AND blocks the damage_return
@@ -700,7 +706,7 @@ local _CHAIN_LEGION_DUEL      = {
     "item_cyclone",
     "item_aeon_disk",
 }
-local _CHAIN_DISRUPTOR_KFR    = {
+CH.DISRUPTOR_KFR    = {
     -- WW > Eul > Force > Pike-self (user spec). Sniper v6.15.10 / v6.15.247
     -- empirically showed that displacement-over-time (Pike / Force sliding push)
     -- is INTERCEPTED by the Kinetic Field wall -- only instant impulse motions
@@ -718,17 +724,17 @@ local _CHAIN_DISRUPTOR_KFR    = {
 }
 
 -- v0.5.17 Track 1: expose chain tables for the in-Brain test harness
--- (state.tests.*). The chain locals (_CHAIN_PUDGE_DISMEMBER, etc.) are
+-- (state.tests.*). The chain locals (CH.PUDGE_DISMEMBER, etc.) are
 -- module-locals by design; this is the test-only read handle, NOT a
 -- mutation point. Treat state.lina_chains as read-only at runtime.
 state.lina_chains = {
-    pudge_dismember = _CHAIN_PUDGE_DISMEMBER,
-    bane_grip       = _CHAIN_BANE_GRIP,
-    pugna_drain     = _CHAIN_PUGNA_DRAIN,
-    legion_duel     = _CHAIN_LEGION_DUEL,
-    disruptor_kfr   = _CHAIN_DISRUPTOR_KFR,
-    wd_death_ward   = _CHAIN_WD_DEATH_WARD,    -- v0.5.47
-    underlord_pit   = _CHAIN_UNDERLORD_PIT,    -- v0.5.47
+    pudge_dismember = CH.PUDGE_DISMEMBER,
+    bane_grip       = CH.BANE_GRIP,
+    pugna_drain     = CH.PUGNA_DRAIN,
+    legion_duel     = CH.LEGION_DUEL,
+    disruptor_kfr   = CH.DISRUPTOR_KFR,
+    wd_death_ward   = CH.WD_DEATH_WARD,    -- v0.5.47
+    underlord_pit   = CH.UNDERLORD_PIT,    -- v0.5.47
 }
 
 -- v0.5.47 Phase 1: WD Death Ward + Underlord Pit of Malice chains. Both
@@ -752,7 +758,7 @@ state.lina_chains = {
 -- via the threat_caster param (chain walker passes it per lib/defense.lua
 -- L566) which feeds predict_target_pos(WD, 1.12). WD is stationary while
 -- channeling so predict returns WD's current position = aim on WD.
-local _CHAIN_WD_DEATH_WARD = {
+CH.WD_DEATH_WARD = {
     "lina_w_anti_gap",
     "item_hurricane_pike",
     "item_force_staff",
@@ -768,10 +774,10 @@ local _CHAIN_WD_DEATH_WARD = {
 -- cyclone-self goes airborne (immune to ensare while flying); BKB does
 -- NOT break ensare but lets Lina ignore the followup damage; W stuns
 -- Underlord interrupting the channel of subsequent abilities. Same posture
--- as Disruptor Kinetic Field (_CHAIN_DISRUPTOR_KFR) but the pit's
+-- as Disruptor Kinetic Field (CH.DISRUPTOR_KFR) but the pit's
 -- per-tick re-snare means a single successful escape covers the rest of
 -- the duration as long as Lina stays out.
-local _CHAIN_UNDERLORD_PIT = {
+CH.UNDERLORD_PIT = {
     "item_wind_waker",
     "item_cyclone",
     "item_force_staff",
@@ -781,13 +787,13 @@ local _CHAIN_UNDERLORD_PIT = {
 }
 
 -- Modifier-keyed (self path, threat detected via OnModifierCreate).
-LINA_SAVE_OVERRIDES["modifier_pudge_dismember_pull"]            = _CHAIN_PUDGE_DISMEMBER
-LINA_SAVE_OVERRIDES["modifier_bane_fiends_grip"]                = _CHAIN_BANE_GRIP
-LINA_SAVE_OVERRIDES["modifier_pugna_life_drain"]                = _CHAIN_PUGNA_DRAIN
-LINA_SAVE_OVERRIDES["modifier_legion_commander_duel"]           = _CHAIN_LEGION_DUEL
-LINA_SAVE_OVERRIDES["modifier_disruptor_kinetic_field_remnant"] = _CHAIN_DISRUPTOR_KFR
-LINA_SAVE_OVERRIDES["modifier_witch_doctor_death_ward"]         = _CHAIN_WD_DEATH_WARD  -- v0.5.47
-LINA_SAVE_OVERRIDES["modifier_abyssal_underlord_pit_of_malice_ensare"] = _CHAIN_UNDERLORD_PIT  -- v0.5.47
+LINA_SAVE_OVERRIDES["modifier_pudge_dismember_pull"]            = CH.PUDGE_DISMEMBER
+LINA_SAVE_OVERRIDES["modifier_bane_fiends_grip"]                = CH.BANE_GRIP
+LINA_SAVE_OVERRIDES["modifier_pugna_life_drain"]                = CH.PUGNA_DRAIN
+LINA_SAVE_OVERRIDES["modifier_legion_commander_duel"]           = CH.LEGION_DUEL
+LINA_SAVE_OVERRIDES["modifier_disruptor_kinetic_field_remnant"] = CH.DISRUPTOR_KFR
+LINA_SAVE_OVERRIDES["modifier_witch_doctor_death_ward"]         = CH.WD_DEATH_WARD  -- v0.5.47
+LINA_SAVE_OVERRIDES["modifier_abyssal_underlord_pit_of_malice_ensare"] = CH.UNDERLORD_PIT  -- v0.5.47
 
 ----------------------------------------------- commit-attacker close-gap ---
 -- v0.5.45 CA (DEFENSE_PLAN.md sec 4.2 commit-attacker track): port of
@@ -806,29 +812,33 @@ LINA_SAVE_OVERRIDES["modifier_abyssal_underlord_pit_of_malice_ensare"] = _CHAIN_
 --
 -- Detection: NPC.IsAttacking returns true only ~0.3s per ~1.4s attack cycle
 -- (lib gap), so we latch via state.attacking_seen_t[caster_idx] = now and
--- consider attacker "committed" for LINA_COMMITTED_ATTACK_WINDOW_S after the
--- last latch. Proximity gate at LINA_ATTACK_ENGAGE_RADIUS = 700u (matches
+-- v0.5.52.1 (200-locals cleanup): bundled 19 module-level constants
+-- into single K table. Saves 18 main-chunk local slots.
+local K = {}
+
+-- consider attacker "committed" for K.LINA_COMMITTED_ATTACK_WINDOW_S after the
+-- last latch. Proximity gate at K.LINA_ATTACK_ENGAGE_RADIUS = 700u (matches
 -- Sniper). Kiting-away check via Target.IsKitingUs excludes heroes moving
 -- away from us.
 --
 -- Synthesis: when a committed attacker is detected and the per-caster re-arm
--- latch (LINA_COMMITTED_ATTACK_WINDOW_S = 1.6s) has cleared, call
+-- latch (K.LINA_COMMITTED_ATTACK_WINDOW_S = 1.6s) has cleared, call
 -- defense_dispatcher:Dispatch directly with threat_mod="lina_committed_attacker"
 -- threat_caster=<attacker hero> category_hint="close_gap". The dispatcher
 -- lock keyed (state.self_npc, "lina_committed_attacker", caster_idx) keeps
--- one save per attacker per window. Chain table _COMMITTED_ATTACKER_SAVES
+-- one save per attacker per window. Chain table CH.COMMITTED_ATTACKER_SAVES
 -- is slim per user Q (slim chain recommended): displacement + escape + W
 -- tail; no BKB/Lotus/Aeon/FC since attackers are mostly physical not magical
 -- so magic immune / reflect / magic barrier are not useful.
-local LINA_COMMITTED_ATTACK_WINDOW_S = 1.6  -- Sniper L319 parity
-local LINA_ATTACK_ENGAGE_RADIUS      = 700  -- Sniper ATTACK_ENGAGE_RADIUS parity; covers Lina's 670 attack range
-local LINA_COMMITTED_ATTACKER_RETREAT_BUFFER = 200  -- attacker further than 700+200=900 = released
+K.LINA_COMMITTED_ATTACK_WINDOW_S = 1.6  -- Sniper L319 parity
+K.LINA_ATTACK_ENGAGE_RADIUS      = 700  -- Sniper ATTACK_ENGAGE_RADIUS parity; covers Lina's 670 attack range
+K.LINA_COMMITTED_ATTACKER_RETREAT_BUFFER = 200  -- attacker further than 700+200=900 = released
 
-local _COMMITTED_ATTACKER_SAVES = {
+CH.COMMITTED_ATTACKER_SAVES = {
     "item_force_staff", "item_hurricane_pike", "item_wind_waker",
     "item_cyclone", "item_glimmer_cape", "lina_w_anti_gap",
 }
-LINA_SAVE_OVERRIDES["lina_committed_attacker"] = _COMMITTED_ATTACKER_SAVES
+LINA_SAVE_OVERRIDES["lina_committed_attacker"] = CH.COMMITTED_ATTACKER_SAVES
 
 -- State table init (per-tick attacker latches + per-caster re-arm latches).
 -- Declared here adjacent to the helpers so the file stays grep-coherent;
@@ -900,7 +910,7 @@ state.is_committed_attacker_on_self = function(h)
         return false
     end
     local d = dist_to(h) or math.huge
-    if d > LINA_ATTACK_ENGAGE_RADIUS then return false end
+    if d > K.LINA_ATTACK_ENGAGE_RADIUS then return false end
     -- Kiting check: hero moving AWAY is not committing. Target.IsKitingUs
     -- may be absent (older Target lib); treat absence as not-kiting (the
     -- proximity + attack check is then the sole gate, more aggressive
@@ -912,14 +922,14 @@ state.is_committed_attacker_on_self = function(h)
     if not (ok and idx and state.attacking_seen_t) then return false end
     local seen = state.attacking_seen_t[idx]
     if not seen then return false end
-    return (now() - seen) < LINA_COMMITTED_ATTACK_WINDOW_S
+    return (now() - seen) < K.LINA_COMMITTED_ATTACK_WINDOW_S
 end
 
--- Per-tick scan: for each enemy hero in LINA_ATTACK_ENGAGE_RADIUS, if
+-- Per-tick scan: for each enemy hero in K.LINA_ATTACK_ENGAGE_RADIUS, if
 -- is_committed_attacker_on_self AND the per-caster re-arm latch is clear,
 -- call defense_dispatcher:Dispatch directly. The dispatcher's per-(target,
 -- canonical_mod, caster) lock keeps one save per attacker per window; the
--- re-arm latch (LINA_COMMITTED_ATTACK_WINDOW_S) prevents spam if the
+-- re-arm latch (K.LINA_COMMITTED_ATTACK_WINDOW_S) prevents spam if the
 -- dispatcher releases the lock before the attacker stops committing.
 state.scan_and_arm_committed_attackers = function()
     -- v0.5.46.1 Problem Aaa: v0.5.46 placed the diag emit AFTER the
@@ -956,7 +966,7 @@ state.scan_and_arm_committed_attackers = function()
         diag_exit("no_dispatcher")
         return
     end
-    local ok, list = pcall(Entity.GetHeroesInRadius, me, LINA_ATTACK_ENGAGE_RADIUS,
+    local ok, list = pcall(Entity.GetHeroesInRadius, me, K.LINA_ATTACK_ENGAGE_RADIUS,
                            Enum.TeamType.TEAM_ENEMY)
     if not ok then
         diag_exit("pcall_fail")
@@ -1006,9 +1016,9 @@ state.scan_and_arm_committed_attackers = function()
                 local ok2, idx = pcall(Entity.GetIndex, h)
                 if ok2 and idx then
                     local last_arm = state.committed_attacker_armed_t[idx] or 0
-                    if (t - last_arm) >= LINA_COMMITTED_ATTACK_WINDOW_S then
+                    if (t - last_arm) >= K.LINA_COMMITTED_ATTACK_WINDOW_S then
                         diag_armed = diag_armed + 1
-                        local d     = dist_to(h) or LINA_ATTACK_ENGAGE_RADIUS
+                        local d     = dist_to(h) or K.LINA_ATTACK_ENGAGE_RADIUS
                         local speed = (NPC.GetMoveSpeed and NPC.GetMoveSpeed(h)) or 300
                         state.committed_attacker_armed_t[idx] = t
                         tlog(1, "committed_attacker_armed", {
@@ -1035,7 +1045,7 @@ state.scan_and_arm_committed_attackers = function()
                             tlog(3, "commit_attacker_diag_latched", {
                                 h         = uname(h),
                                 latch_age = string.format("%.2f", t - last_arm),
-                                window    = string.format("%.2f", LINA_COMMITTED_ATTACK_WINDOW_S),
+                                window    = string.format("%.2f", K.LINA_COMMITTED_ATTACK_WINDOW_S),
                             })
                         end
                     end
@@ -1068,11 +1078,11 @@ end
 -- omits it from ANIM_SAVE_OVERRIDES (S3 line 6627) -- the cost of an unused
 -- entry is zero, and if a future lib release adds duel to ABILITY_TO_THREAT
 -- the chain is already wired.
-state.ANIM_SAVE_OVERRIDES["pudge_dismember"]         = _CHAIN_PUDGE_DISMEMBER
-state.ANIM_SAVE_OVERRIDES["bane_fiends_grip"]        = _CHAIN_BANE_GRIP
-state.ANIM_SAVE_OVERRIDES["pugna_life_drain"]        = _CHAIN_PUGNA_DRAIN
-state.ANIM_SAVE_OVERRIDES["legion_commander_duel"]   = _CHAIN_LEGION_DUEL
-state.ANIM_SAVE_OVERRIDES["disruptor_kinetic_field"] = _CHAIN_DISRUPTOR_KFR
+state.ANIM_SAVE_OVERRIDES["pudge_dismember"]         = CH.PUDGE_DISMEMBER
+state.ANIM_SAVE_OVERRIDES["bane_fiends_grip"]        = CH.BANE_GRIP
+state.ANIM_SAVE_OVERRIDES["pugna_life_drain"]        = CH.PUGNA_DRAIN
+state.ANIM_SAVE_OVERRIDES["legion_commander_duel"]   = CH.LEGION_DUEL
+state.ANIM_SAVE_OVERRIDES["disruptor_kinetic_field"] = CH.DISRUPTOR_KFR
 
 -- v0.5.2: Hero-side threat entries the lib does not cover. The self path
 -- (OnModifierCreate is_self branch, ~line 2860) gates on THREATS_ON_SELF; if a
@@ -1504,7 +1514,7 @@ local SAVE_FIRE = {
     -- arrival). All 4 high-viability cases land AT Lina position, so aim
     -- is always state.self_npc origin (simplest correct policy; predicted-
     -- landing variant deferred to v0.5.4X+ if evidence emerges). Spec'd
-    -- as chain TAIL of _GAP_CLOSE_SAVES per Q1: items fire first, W only
+    -- as chain TAIL of CH.GAP_CLOSE_SAVES per Q1: items fire first, W only
     -- when WW/Force/Pike/Glimmer all on CD. Mana floor enforces +450
     -- r_reserve so defensive W cannot starve the kill combo. Silenced
     -- check via ABILITY_SAVES = { lina_w_anti_gap = true } (chain walker
@@ -1883,18 +1893,18 @@ local function self_can_cast_abilities()
 end
 
 -- v0.5.0: resolve_save_order moved into lib/defense.lua (Dispatcher:ResolveSaveOrder).
--- Hero-side data tables (DEFAULT_SAVE_CHAIN, LINA_SAVE_OVERRIDES,
+-- Hero-side data tables (CH.DEFAULT_SAVE_CHAIN, LINA_SAVE_OVERRIDES,
 -- PATCHED_RECOMMENDED_SAVES, CATEGORY_CHAINS, state.ANIM_SAVE_OVERRIDES) are
 -- passed to Defense.New below. See Lina/LIB_DEFENSE_EXTRACTION.md.
 
 --------------------------------------------------- Layer 2 firing dispatch --
-local LAYER2_REACTION_WINDOW = 0.1   -- min spacing between any two save dispatches
+K.LAYER2_REACTION_WINDOW = 0.1   -- min spacing between any two save dispatches
 -- v0.5.39 P1-M2: dropped SAVE_CAST_PROTECT_S + state.save_cast_protect_until_t.
 -- The planned DR5 OnPrepareUnitOrders consumer was never wired up (framework
 -- triggerCallBack=false bypassed it), so the constant + write were orphans.
-local BLINK_ARRIVE_DIST_U    = 350   -- instant-blink "arrived" threshold
-local BLINK_SETTLE_S         = 0.1   -- settle before firing on an arrived blink
-local BLINK_ARRIVE_TIMEOUT_S = 2.0   -- drop a never-arrived instant-blink entry
+K.BLINK_ARRIVE_DIST_U    = 350   -- instant-blink "arrived" threshold
+K.BLINK_SETTLE_S         = 0.1   -- settle before firing on an arrived blink
+K.BLINK_ARRIVE_TIMEOUT_S = 2.0   -- drop a never-arrived instant-blink entry
 local SELF_DISPLACEMENT_SAVES = { item_force_staff = true, item_hurricane_pike = true }
 
 local function defense_enabled()
@@ -1919,9 +1929,9 @@ end
 -- (calls mark_layer2_fired -> dispatcher:MarkFired) so the lib does not
 -- double-write. Construction is valid here: all referenced locals
 -- (state.ANIM_SAVE_OVERRIDES @117, LINA_SAVE_OVERRIDES @362,
--- PATCHED_RECOMMENDED_SAVES, CATEGORY_CHAINS, DEFAULT_SAVE_CHAIN, SAVE_FIRE,
+-- PATCHED_RECOMMENDED_SAVES, CATEGORY_CHAINS, CH.DEFAULT_SAVE_CHAIN, SAVE_FIRE,
 -- ABILITY_SAVES, SELF_DISPLACEMENT_SAVES, save_is_ready,
--- self_can_cast_abilities, defense_enabled, LAYER2_REACTION_WINDOW) are
+-- self_can_cast_abilities, defense_enabled, K.LAYER2_REACTION_WINDOW) are
 -- declared above this line. See Lina/LIB_DEFENSE_EXTRACTION.md.
 -- v0.5.7 E12 (B8): merge LINA_EXTRA_THREATS into the lib's THREATS_ON_SELF
 -- before handing it to the dispatcher. The lib's homing flag lookup in
@@ -1943,7 +1953,7 @@ for k, v in pairs(LINA_EXTRA_THREATS) do combined_threats_on_self[k] = v end
 -- The lib pcall-wraps every call, so a stray throw degrades to the catalog
 -- fallback path (cfg.fallback_lock_ttl_s = 2.0s) without crashing dispatch.
 --
--- PERSISTENT_LOCK_CAP_S is the persistent-class cap. v0.5.42 fix: the v0.5.40
+-- K.PERSISTENT_LOCK_CAP_S is the persistent-class cap. v0.5.42 fix: the v0.5.40
 -- math had the 0.1s margin term with the wrong sign, yielding TTL = 1.9 + 0.3
 -- = 2.2s which EXCEEDS the 2.1s tick interval and blocked every other
 -- re-fire with dispatch_blocked. Correct derivation: cap = PERSISTENT_
@@ -1952,7 +1962,7 @@ for k, v in pairs(LINA_EXTRA_THREATS) do combined_threats_on_self[k] = v end
 -- exactly 2.0s, leaving 0.1s headroom before the next 2.1s tick.
 -- Mirrored as a local here (not a forward-reference to L1739) so the table
 -- literal stays self-contained.
-local PERSISTENT_LOCK_CAP_S = 1.7  -- v0.5.42: = PERSISTENT_THREAT_TICK_INTERVAL - 0.1 - lock_buffer_s
+K.PERSISTENT_LOCK_CAP_S = 1.7  -- v0.5.42: = K.PERSISTENT_THREAT_TICK_INTERVAL - 0.1 - lock_buffer_s
 
 -- Helper: nil-tolerant distance between two units. Mirrors dist_to() at L278
 -- but does not depend on state.self_npc (resolvers receive both units).
@@ -2006,7 +2016,7 @@ local function _lina_eta_make_dist_speed(default_speed, blink_cap)
 end
 
 -- Helper: NPC.GetModifierRemaining-based resolver. cap_s clamps so the
--- persistent_threats_tick path (L1739, PERSISTENT_THREAT_TICK_INTERVAL=2.1)
+-- persistent_threats_tick path (L1739, K.PERSISTENT_THREAT_TICK_INTERVAL=2.1)
 -- can re-acquire before the lock TTL elapses. NPC.GetModifierRemaining is
 -- pcall-wrapped because the binding is not used elsewhere in Lina.lua; if
 -- absent the rem stays at 0 and floors to floor_s (safe, minimal lock).
@@ -2073,36 +2083,36 @@ local LINA_ETA_RESOLVERS = {
             if ok and type(total) == "number" and total > 0 then
                 local started = (armed and armed.channel_start_t) or now_t or 0
                 local rem = total - ((now_t or 0) - started)
-                if rem > PERSISTENT_LOCK_CAP_S then rem = PERSISTENT_LOCK_CAP_S end
+                if rem > K.PERSISTENT_LOCK_CAP_S then rem = K.PERSISTENT_LOCK_CAP_S end
                 if rem < 0.1 then rem = 0.1 end
                 return rem
             end
         end
-        return PERSISTENT_LOCK_CAP_S
+        return K.PERSISTENT_LOCK_CAP_S
     end,
     -- (12)-(16) channel_on_self / pugna / wd
-    modifier_legion_commander_duel = _lina_eta_make_remaining("modifier_legion_commander_duel", PERSISTENT_LOCK_CAP_S),
+    modifier_legion_commander_duel = _lina_eta_make_remaining("modifier_legion_commander_duel", K.PERSISTENT_LOCK_CAP_S),
     modifier_pudge_dismember_pull  = _lina_eta_make_remaining("modifier_pudge_dismember_pull",  nil),
     modifier_pudge_dismember       = _lina_eta_make_remaining("modifier_pudge_dismember",       nil),
     modifier_bane_fiends_grip      = _lina_eta_make_remaining("modifier_bane_fiends_grip",      nil),
-    modifier_pugna_life_drain      = _lina_eta_make_remaining("modifier_pugna_life_drain",      PERSISTENT_LOCK_CAP_S),
+    modifier_pugna_life_drain      = _lina_eta_make_remaining("modifier_pugna_life_drain",      K.PERSISTENT_LOCK_CAP_S),
     modifier_witch_doctor_death_ward = function(_c, _t, _armed, ab, _now_t)
         if ab and Ability.GetChannelTime then
             local ok, total = pcall(Ability.GetChannelTime, ab)
             if ok and type(total) == "number" and total > 0 then
-                if total > PERSISTENT_LOCK_CAP_S then total = PERSISTENT_LOCK_CAP_S end
+                if total > K.PERSISTENT_LOCK_CAP_S then total = K.PERSISTENT_LOCK_CAP_S end
                 if total < 0.1 then total = 0.1 end
                 return total
             end
         end
-        return PERSISTENT_LOCK_CAP_S
+        return K.PERSISTENT_LOCK_CAP_S
     end,
     -- (17)-(18) armed_chain gap-closers (default speed 600u/s)
     modifier_spirit_breaker_charge_of_darkness = _lina_eta_make_dist_speed(600, nil),
     modifier_tusk_snowball_movement            = _lina_eta_make_dist_speed(600, nil),
-    -- (19)-(20) instant_blink (cap BLINK_ARRIVE_TIMEOUT_S = 2.0s @L1217)
-    modifier_phantom_assassin_phantom_strike_target = _lina_eta_make_dist_speed(1500, BLINK_ARRIVE_TIMEOUT_S),
-    modifier_queenofpain_blink                      = _lina_eta_make_dist_speed(1500, BLINK_ARRIVE_TIMEOUT_S),
+    -- (19)-(20) instant_blink (cap K.BLINK_ARRIVE_TIMEOUT_S = 2.0s @L1217)
+    modifier_phantom_assassin_phantom_strike_target = _lina_eta_make_dist_speed(1500, K.BLINK_ARRIVE_TIMEOUT_S),
+    modifier_queenofpain_blink                      = _lina_eta_make_dist_speed(1500, K.BLINK_ARRIVE_TIMEOUT_S),
     -- (21) slark pounce (default speed 900u/s)
     modifier_slark_pounce = _lina_eta_make_dist_speed(900, nil),
     -- (22)-(24) line_projectile
@@ -2114,9 +2124,9 @@ local LINA_ETA_RESOLVERS = {
     modifier_magnataur_skewer         = _lina_eta_make_cast_point(0.3),
     -- (27)-(30) persistent / delayed_aoe / buffs
     modifier_lina_light_strike_array = function(_c, _t, _armed, _ab, _now_t) return 0.5 end,
-    modifier_naga_siren_ensnare       = _lina_eta_make_remaining("modifier_naga_siren_ensnare",       PERSISTENT_LOCK_CAP_S),
-    modifier_bane_nightmare           = _lina_eta_make_remaining("modifier_bane_nightmare",           PERSISTENT_LOCK_CAP_S),
-    modifier_doom_bringer_doom_debuff = _lina_eta_make_remaining("modifier_doom_bringer_doom_debuff", PERSISTENT_LOCK_CAP_S),
+    modifier_naga_siren_ensnare       = _lina_eta_make_remaining("modifier_naga_siren_ensnare",       K.PERSISTENT_LOCK_CAP_S),
+    modifier_bane_nightmare           = _lina_eta_make_remaining("modifier_bane_nightmare",           K.PERSISTENT_LOCK_CAP_S),
+    modifier_doom_bringer_doom_debuff = _lina_eta_make_remaining("modifier_doom_bringer_doom_debuff", K.PERSISTENT_LOCK_CAP_S),
     modifier_disruptor_kinetic_field_remnant = function(_c, target, _armed, _ab, _now_t)
         local rem = 0
         if target and Entity.IsEntity and Entity.IsEntity(target) and NPC.GetModifierRemaining then
@@ -2124,7 +2134,7 @@ local LINA_ETA_RESOLVERS = {
             if ok and type(v) == "number" then rem = v end
         end
         if rem <= 0 then rem = 2.6 end
-        if rem > PERSISTENT_LOCK_CAP_S then rem = PERSISTENT_LOCK_CAP_S end
+        if rem > K.PERSISTENT_LOCK_CAP_S then rem = K.PERSISTENT_LOCK_CAP_S end
         if rem < 0.1 then rem = 0.1 end
         return rem
     end,
@@ -2144,7 +2154,7 @@ defense_dispatcher = Defense.New {
     hero_save_overrides     = LINA_SAVE_OVERRIDES,
     patched_recommended     = PATCHED_RECOMMENDED_SAVES,
     category_chains         = CATEGORY_CHAINS,
-    default_chain           = DEFAULT_SAVE_CHAIN,
+    default_chain           = CH.DEFAULT_SAVE_CHAIN,
     save_fire               = SAVE_FIRE,
     ability_saves           = ABILITY_SAVES,
     self_displacement_saves = SELF_DISPLACEMENT_SAVES,
@@ -2152,7 +2162,7 @@ defense_dispatcher = Defense.New {
     self_can_cast_abilities = self_can_cast_abilities,
     TD                      = TD,
     threats_on_self         = combined_threats_on_self,
-    reaction_window         = LAYER2_REACTION_WINDOW,
+    reaction_window         = K.LAYER2_REACTION_WINDOW,
     reserve_skip_floor      = state.RESERVE_SKIP_FLOOR,  -- v0.5.39 P3-LOW-magic
     concurrent_penalty      = state.CONCURRENT_PENALTY,  -- v0.5.39 P3-LOW-magic
     throttle_state          = state,
@@ -2318,7 +2328,7 @@ local function try_save_self(intent, threat_mod, threat_caster, category_hint, a
     -- v0.5.37 MAINT-05 / v0.5.40 A5-HERO: panic-key one-shot bypass.
     --
     -- The panic contract has TWO gates to bypass on the panic frame:
-    --   (1) Dispatcher CanFire / LAYER2_REACTION_WINDOW throttle (last_save_t)
+    --   (1) Dispatcher CanFire / K.LAYER2_REACTION_WINDOW throttle (last_save_t)
     --   (2) Dispatcher per-(target, canonical_mod, caster) lock added in
     --       v0.5.40 to dedupe simultaneous routes against the same threat
     --       (e.g. Bara WW-on-anim + Pike-on-armed-tick).
@@ -2390,7 +2400,7 @@ state.lina_try_save_self = try_save_self
 -- v0.5.4: forward threat_mod / threat_caster / ability_name to the fallback
 -- try_save_self so ResolveSaveOrder consults LINA_SAVE_OVERRIDES (e.g.
 -- modifier_sniper_assassinate, Lion Finger of Death) instead of short-
--- circuiting onto DEFAULT_SAVE_CHAIN when Lotus is unavailable. category_hint
+-- circuiting onto CH.DEFAULT_SAVE_CHAIN when Lotus is unavailable. category_hint
 -- is left nil here: the lotus-worthy path is modifier-keyed and the dispatcher
 -- derives category from threat_mod via TD.CategoryOf.
 local function try_save_lotus_first(intent, threat_mod, threat_caster, ability_name)
@@ -2499,7 +2509,7 @@ local SAVE_FIRE_DISTANCE = {
 -- v0.5.9 (E2): self-displacement saves refuse to fire below this radius --
 -- pushing Lina 600u in facing when the threat already crossed inside would
 -- shove her into the impact zone. Only consulted on the self-cast branch.
-local SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR = 250
+K.SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR = 250
 
 -- v0.5.38 MAINT-11.2: chain-peek helper extracted from armed_threats_tick.
 -- Behaviour-neutral. Walks the resolved save order, mirrors the dispatcher's
@@ -2644,7 +2654,7 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
                 -- Pike enemy-cast path bypasses (its own
                 -- pike_enemy_range gate inside SAVE_FIRE.fire);
                 -- self-displacement saves additionally refuse below
-                -- SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR so we never push
+                -- K.SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR so we never push
                 -- Lina INTO the impact zone of a threat that already
                 -- crossed her position.
                 local is_pike_enemy_cast = (sn == "item_hurricane_pike"
@@ -2653,7 +2663,7 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
                     and dist_to(entry.caster) <= state.pike_enemy_range())
                 local dov = SAVE_FIRE_DISTANCE[sn]
                 local is_self_push = (sn == "item_force_staff" or sn == "item_hurricane_pike")
-                local under_floor = is_self_push and d < SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR
+                local under_floor = is_self_push and d < K.SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR
                 if dov and not is_pike_enemy_cast and not under_floor and d <= dov then
                     entry._fire_dist_eff = dov
                     entry._fire_save_eff = sn
@@ -2846,17 +2856,17 @@ local function armed_threats_tick()
                         armed_post_fire(key, entry, 0, d, fire_reason)
                     end
                 end
-            elseif entry.instant_blink and entry.t and (now() - entry.t) > BLINK_ARRIVE_TIMEOUT_S then
+            elseif entry.instant_blink and entry.t and (now() - entry.t) > K.BLINK_ARRIVE_TIMEOUT_S then
                 tlog(2, "armed_threat_blink_expired", { key = key })
                 state.armed_threats[key] = nil
             else
                 local eta = d / (entry.eta_speed and entry.eta_speed > 0 and entry.eta_speed or 600)
                 local should_fire, fire_reason = false, nil
                 if entry.instant_blink then
-                    if d <= BLINK_ARRIVE_DIST_U then
+                    if d <= K.BLINK_ARRIVE_DIST_U then
                         if not entry.arrived_at then
                             entry.arrived_at = now()
-                        elseif (now() - entry.arrived_at) >= BLINK_SETTLE_S then
+                        elseif (now() - entry.arrived_at) >= K.BLINK_SETTLE_S then
                             should_fire, fire_reason = true, "blink_arrived"
                         end
                     end
@@ -2902,7 +2912,7 @@ end
 -- (Legion Duel restricts targeting not casting; Static Storm silences
 -- abilities but items still fire). Full-disable grips (Bane / Pudge) are NOT
 -- listed -- Lina is helpless during them, so re-fire is pointless.
-local PERSISTENT_THREAT_TICK_INTERVAL = 2.1
+K.PERSISTENT_THREAT_TICK_INTERVAL = 2.1
 local PERSISTENT_THREATS = {
     modifier_legion_commander_duel          = true,
     modifier_disruptor_static_storm_thinker = true,
@@ -2926,7 +2936,7 @@ local function persistent_threats_tick()
     for mod_name in pairs(PERSISTENT_THREATS) do
         if NPC.HasModifier(me, mod_name) then
             local last_t = state.last_persistent_tick_t[mod_name] or 0
-            if (now_t - last_t) >= PERSISTENT_THREAT_TICK_INTERVAL then
+            if (now_t - last_t) >= K.PERSISTENT_THREAT_TICK_INTERVAL then
                 state.last_persistent_tick_t[mod_name] = now_t
                 local mod = NPC.GetModifier(me, mod_name)
                 local caster = mod and Modifier.GetCaster(mod)
@@ -2934,7 +2944,7 @@ local function persistent_threats_tick()
                     -- v0.5.40 A3-4: preserve the deliberate Dedup clear
                     -- (belt-and-suspenders; v0.5.40 resolver-side lock-TTL
                     -- cap of ~2.2s for persistent classes is what actually
-                    -- permits the re-fire each PERSISTENT_THREAT_TICK_INTERVAL
+                    -- permits the re-fire each K.PERSISTENT_THREAT_TICK_INTERVAL
                     -- =2.1s -- the lock has expired by the time we re-enter
                     -- this branch, so no ForceNextDispatch needed).
                     state.responded_threats[tostring(Entity.GetIndex(caster)) .. ":" .. mod_name] = nil
@@ -2993,17 +3003,17 @@ local ALLY_SAVE_RANGE = {
 -- Endangered if low HP (a follow-up can kill) OR being collapsed on (>= 2
 -- enemy heroes inside the focus radius, lethal even at high HP). The THREAT is
 -- still the trigger; HP is one danger factor, not the trigger.
-local ALLY_DANGER_HP_FRAC = 0.65  -- v0.5.21 PT-07: 0.55 -> 0.65. 0.55 missed the danger-window where Glimmer/Force/Lotus would still have prevented a kill. 0.65 widens the trigger without spamming saves on healthy allies.
-local ALLY_FOCUS_RADIUS   = 1100  -- v0.5.21 PT-07: 700 -> 1100. 700u was tighter than most threat cast ranges (Lion Hex 800, Lina R 700, AA Ice Blast 1000+). The danger is the THREAT range, not adjacent combat distance.
-local ALLY_FOCUS_COUNT    = 2
+K.ALLY_DANGER_HP_FRAC = 0.65  -- v0.5.21 PT-07: 0.55 -> 0.65. 0.55 missed the danger-window where Glimmer/Force/Lotus would still have prevented a kill. 0.65 widens the trigger without spamming saves on healthy allies.
+K.ALLY_FOCUS_RADIUS   = 1100  -- v0.5.21 PT-07: 700 -> 1100. 700u was tighter than most threat cast ranges (Lion Hex 800, Lina R 700, AA Ice Blast 1000+). The danger is the THREAT range, not adjacent combat distance.
+K.ALLY_FOCUS_COUNT    = 2
 local function ally_is_endangered(ally)
     local hp    = Entity.GetHealth(ally) or 0
     local hpmax = Entity.GetMaxHealth(ally) or 1
     local hp_frac = (hpmax > 0) and (hp / hpmax) or 1
-    if hp_frac < ALLY_DANGER_HP_FRAC then return true end
+    if hp_frac < K.ALLY_DANGER_HP_FRAC then return true end
     local ally_pos = NPCLib.origin(ally)
     if ally_pos then
-        local foes = Heroes.InRadius(ally_pos, ALLY_FOCUS_RADIUS,
+        local foes = Heroes.InRadius(ally_pos, K.ALLY_FOCUS_RADIUS,
             Entity.GetTeamNum(ally), Enum.TeamType.TEAM_ENEMY)
         if foes then
             local n = 0
@@ -3011,7 +3021,7 @@ local function ally_is_endangered(ally)
                 local e = foes[i]
                 if e and Target.IsAlive(e) and Target.NotIllusion(e) then n = n + 1 end
             end
-            if n >= ALLY_FOCUS_COUNT then return true end
+            if n >= K.ALLY_FOCUS_COUNT then return true end
         end
     end
     return false
@@ -3111,10 +3121,10 @@ end
 -- Lina's save ITEMS are instant and need no facing. Issues a one-frame
 -- ATTACK_TARGET that any user input on the next frame supersedes. DEFAULT OFF
 -- (it overrides movement); enable in the Defense menu. Ported Sniper.lua:7390.
-local PRE_FACE_TTI_THRESHOLD = 2.5  -- v0.5.15 PT-04: bumped 1.0 -> 2.5. 1.0s TTI requires >1000u/s closure which no unboosted hero hits; the gate was effectively dead. 2.5s catches Tusk/Bara/PA-class approaches in time for the 0.6 turn rate to matter.
-local PRE_FACE_COOLDOWN      = 0.4
-local PRE_FACE_ANGLE_OK      = 25
-local PRE_FACE_SCAN_RADIUS   = 1000
+K.PRE_FACE_TTI_THRESHOLD = 2.5  -- v0.5.15 PT-04: bumped 1.0 -> 2.5. 1.0s TTI requires >1000u/s closure which no unboosted hero hits; the gate was effectively dead. 2.5s catches Tusk/Bara/PA-class approaches in time for the 0.6 turn rate to matter.
+K.PRE_FACE_COOLDOWN      = 0.4
+K.PRE_FACE_ANGLE_OK      = 25
+K.PRE_FACE_SCAN_RADIUS   = 1000
 
 local function self_alive_ok()
     local me = state.self_npc
@@ -3177,7 +3187,7 @@ local function pre_face_tick()
     -- pre_face_tick is only called from OnUpdateEx (line 5117); the cooldown
     -- stamp at state.last_preface_t = now_t below uses the same value.
     local now_t = state.frame_t
-    if (now_t - (state.last_preface_t or 0)) < PRE_FACE_COOLDOWN then
+    if (now_t - (state.last_preface_t or 0)) < K.PRE_FACE_COOLDOWN then
         if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "cooldown" }) end
         return
     end
@@ -3187,7 +3197,7 @@ local function pre_face_tick()
         if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "no_me_pos" }) end
         return
     end
-    local enemies = NPCs.InRadius(me_pos, PRE_FACE_SCAN_RADIUS,
+    local enemies = NPCs.InRadius(me_pos, K.PRE_FACE_SCAN_RADIUS,
         Entity.GetTeamNum(me), Enum.TeamType.TEAM_ENEMY, true, true)
     if not enemies or #enemies == 0 then
         if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "no_enemies_in_radius" }) end
@@ -3211,7 +3221,7 @@ local function pre_face_tick()
                 local sp = NPC.GetMoveSpeed(e) or 300
                 if sp < 200 then sp = 200 end
                 local tti = d / sp
-                if tti < PRE_FACE_TTI_THRESHOLD and tti < best_tti then
+                if tti < K.PRE_FACE_TTI_THRESHOLD and tti < best_tti then
                     best_e, best_tti, best_via = e, tti, ability_name
                 end
             end
@@ -3229,7 +3239,7 @@ local function pre_face_tick()
         return
     end
     local angle = math.deg(math.abs(NPC.FindRotationAngle(me, best_pos)))
-    if angle < PRE_FACE_ANGLE_OK then
+    if angle < K.PRE_FACE_ANGLE_OK then
         if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "angle_ok_already" }) end
         return
     end
@@ -4391,13 +4401,13 @@ end
 -- (Eul/WW) a target an ally is attacking makes it INVULNERABLE and saves it from
 -- the ally's kill. Heuristic: an alive ally within 600u of the target that is
 -- mid-attack. Used to refuse the cyclone setups (fall to bare WQR instead).
-local ALLY_COMMIT_RADIUS = 600
+K.ALLY_COMMIT_RADIUS = 600
 local function ally_committing_on(target)
     if not (target and Entity.IsEntity(target)) then return false end
     local tp = Entity.GetAbsOrigin(target)
     local me = state.self_npc
     if not tp or not me then return false end
-    local allies = Heroes.InRadius(tp, ALLY_COMMIT_RADIUS, Entity.GetTeamNum(me), Enum.TeamType.TEAM_FRIEND)
+    local allies = Heroes.InRadius(tp, K.ALLY_COMMIT_RADIUS, Entity.GetTeamNum(me), Enum.TeamType.TEAM_FRIEND)
     if not allies then return false end
     for i = 1, #allies do
         local a = allies[i]
@@ -4409,16 +4419,16 @@ local function ally_committing_on(target)
 end
 
 -- v0.5.26 Item 1: TF ally-focus target-scoring. Variant of ally_committing_on
--- that COUNTS attackers (within the wider ALLY_FOCUS_RADIUS=1100) instead of
+-- that COUNTS attackers (within the wider K.ALLY_FOCUS_RADIUS=1100) instead of
 -- returning on first match. tf_r_value_target subtracts a bonus from the
--- candidate score when count >= ALLY_FOCUS_COUNT so team focus nudges the R
+-- candidate score when count >= K.ALLY_FOCUS_COUNT so team focus nudges the R
 -- picker toward already-pressured targets. Mirrors Sniper.lua score_ally_focus
 -- / ally_focus+30 (Sniper.lua:1609 / 1979 / 5077).
 local function count_allies_attacking(target, me)
     if not (target and Entity.IsEntity(target)) then return 0 end
     local tp = Entity.GetAbsOrigin(target)
     if not tp or not me then return 0 end
-    local allies = Heroes.InRadius(tp, ALLY_FOCUS_RADIUS, Entity.GetTeamNum(me), Enum.TeamType.TEAM_FRIEND)
+    local allies = Heroes.InRadius(tp, K.ALLY_FOCUS_RADIUS, Entity.GetTeamNum(me), Enum.TeamType.TEAM_FRIEND)
     if not allies then return 0 end
     local n = 0
     for i = 1, #allies do
@@ -5014,14 +5024,14 @@ state.tf_r_value_target = function(me, center, cluster_radius, r_range)
             local ep = NPCLib.origin(e)
             local d_cluster = (ep and ep:Distance2D(center)) or 0
             local score = eff + 0.1 * d_cluster
-            -- v0.5.26 Item 1: TF ally-focus. If ALLY_FOCUS_COUNT (>=2) allies
+            -- v0.5.26 Item 1: TF ally-focus. If K.ALLY_FOCUS_COUNT (>=2) allies
             -- are attacking this candidate, subtract 200 eff_hp from the score
             -- so team focus tips the R picker. 200 is a meaningful nudge on
             -- Lina's eff_hp scale (0-2000+) without overriding a clearly
             -- squishier outlier (>200 eff_hp gap survives the bonus).
             local allies_atk = count_allies_attacking(e, me)
             local ally_bonus = 0
-            if allies_atk >= ALLY_FOCUS_COUNT then
+            if allies_atk >= K.ALLY_FOCUS_COUNT then
                 score = score - 200
                 ally_bonus = -200
             end
@@ -6066,7 +6076,7 @@ end
 -- Force/Pike with same dispel). This test catches a future accidental
 -- re-reorder. Reads state.lina_chains (the test-only expose; grep `state.lina_chains =`).
 state.tests["A9_pudge_chain_order"] = {
-    desc = "IMP-A9: _CHAIN_PUDGE_DISMEMBER is [WW,Eul,Force,Pike,Manta,BKB]",
+    desc = "IMP-A9: CH.PUDGE_DISMEMBER is [WW,Eul,Force,Pike,Manta,BKB]",
     fn = function(_cu)
         local chain = state.lina_chains and state.lina_chains.pudge_dismember
         if type(chain) ~= "table" then
@@ -6156,7 +6166,7 @@ state.tests["M05_panic_bypass_fires"] = {
         end
         -- (b) Stale last_save_t snapshot; verifies the bypass-restore branch
         -- leaves state.last_save_t at 0 after a successful dispatch (one-shot
-        -- consumption). The CanFire LAYER2_REACTION_WINDOW gate is mocked out
+        -- consumption). The CanFire K.LAYER2_REACTION_WINDOW gate is mocked out
         -- by the TrySaveSelf stub so this test exercises the wrapper state
         -- machine (panic_override_until arm + clear), not the dispatcher gate.
         state.last_save_t = now()
@@ -6816,12 +6826,19 @@ end
 -- via=blink_arrived) ahead of the OnModifierCreate path. AB* are the cast
 -- activity slots. Re-run the generator after a patch; do not hand-edit blocks.
 local GA = Enum.GameActivity
-local AB1 = GA and GA.ACT_DOTA_CAST_ABILITY_1 or 1500
-local AB2 = GA and GA.ACT_DOTA_CAST_ABILITY_2 or 1501
-local AB3 = GA and GA.ACT_DOTA_CAST_ABILITY_3 or 1502
-local AB4 = GA and GA.ACT_DOTA_CAST_ABILITY_4 or 1503
-local AB5 = GA and GA.ACT_DOTA_CAST_ABILITY_5 or 1504
-local AB6 = GA and GA.ACT_DOTA_CAST_ABILITY_6 or 1505
+-- v0.5.52.1 (200-locals cleanup): bundled AB1-AB6 into AB[1]..AB[6]
+-- table. Saves 5 main-chunk local slots. References [AB[1]]..[AB[6]]
+-- become [AB[1]]..[AB[6]] (correct Lua: outer brackets = table-key
+-- syntax, inner = AB table index). Hot-path cost is negligible (one
+-- extra table indirection per Anim.RegisterMap startup lookup).
+local AB = {
+    GA and GA.ACT_DOTA_CAST_ABILITY_1 or 1500,
+    GA and GA.ACT_DOTA_CAST_ABILITY_2 or 1501,
+    GA and GA.ACT_DOTA_CAST_ABILITY_3 or 1502,
+    GA and GA.ACT_DOTA_CAST_ABILITY_4 or 1503,
+    GA and GA.ACT_DOTA_CAST_ABILITY_5 or 1504,
+    GA and GA.ACT_DOTA_CAST_ABILITY_6 or 1505,
+}
 
 local function register_anim_maps()
     -- v6.15.206 (D18-followup initiative): the full register_anim_maps body
@@ -6834,211 +6851,211 @@ local function register_anim_maps()
     -- v0.5.36: Aphotic Shield cast on ally explodes for AoE damage; anim catches
     -- the cast, Lina repositions if Abaddon's ally is near.
     Anim.RegisterMap("npc_dota_hero_abaddon", {
-        [AB2] = { ability = "abaddon_aphotic_shield", role = "hard_disable" },
+        [AB[2]] = { ability = "abaddon_aphotic_shield", role = "hard_disable" },
     })
     -- alchemist (v6.15.268 zero-coverage fill)
     -- Unstable Concoction Throw is UNIT_TARGET AOE -- Alchemist throws the
     -- charged concoction at the target. Cast point 0.2. instant_target
     -- since Alchemist selects target by reference.
     Anim.RegisterMap("npc_dota_hero_alchemist", {
-        [AB3] = { ability = "alchemist_unstable_concoction_throw", role = "hard_disable", instant_target = true },
+        [AB[3]] = { ability = "alchemist_unstable_concoction_throw", role = "hard_disable", instant_target = true },
     })
     -- ancient_apparition (v6.15.263 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_ancient_apparition", {
-        [AB1] = { ability = "ancient_apparition_cold_feet", role = "hard_disable", instant_target = true },  -- unit-target, IGNORE_BACKSWING
-        [AB4] = { ability = "ancient_apparition_ice_blast", role = "ult_burst" },  -- POINT-AOE delayed execute
+        [AB[1]] = { ability = "ancient_apparition_cold_feet", role = "hard_disable", instant_target = true },  -- unit-target, IGNORE_BACKSWING
+        [AB[4]] = { ability = "ancient_apparition_ice_blast", role = "ult_burst" },  -- POINT-AOE delayed execute
     })
     -- antimage (v6.15.263 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_antimage", {
-        [AB4] = { ability = "antimage_mana_void", role = "ult_burst", instant_target = true },  -- unit-target AOE burst
+        [AB[4]] = { ability = "antimage_mana_void", role = "ult_burst", instant_target = true },  -- unit-target AOE burst
     })
     -- arc_warden (v6.15.269 zero-coverage fill)
     -- Flux is UNIT_TARGET damage-when-isolated debuff. 0.3 cast; Arc
     -- doesn't aim (selects by reference). instant_target bypasses gate.
     Anim.RegisterMap("npc_dota_hero_arc_warden", {
-        [AB1] = { ability = "arc_warden_flux", role = "hard_disable", instant_target = true },
+        [AB[1]] = { ability = "arc_warden_flux", role = "hard_disable", instant_target = true },
     })
     -- bane
     Anim.RegisterMap("npc_dota_hero_bane", {
-        [AB3] = { ability = "bane_nightmare", role = "hard_disable" },
-        [AB4] = { ability = "bane_fiends_grip", role = "channel_start", instant_target = true },
+        [AB[3]] = { ability = "bane_nightmare", role = "hard_disable" },
+        [AB[4]] = { ability = "bane_fiends_grip", role = "channel_start", instant_target = true },
     })
     -- batrider
     Anim.RegisterMap("npc_dota_hero_batrider", {
-        [AB4] = { ability = "batrider_flaming_lasso", role = "hard_disable" },
+        [AB[4]] = { ability = "batrider_flaming_lasso", role = "hard_disable" },
     })
     -- beastmaster
     Anim.RegisterMap("npc_dota_hero_beastmaster", {
-        [AB4] = { ability = "beastmaster_primal_roar", role = "hard_disable" },
+        [AB[4]] = { ability = "beastmaster_primal_roar", role = "hard_disable" },
     })
     -- bloodseeker
     Anim.RegisterMap("npc_dota_hero_bloodseeker", {
-        [AB4] = { ability = "bloodseeker_rupture", role = "ult_burst" },
+        [AB[4]] = { ability = "bloodseeker_rupture", role = "ult_burst" },
     })
     -- bounty_hunter (v6.15.269 zero-coverage fill)
     -- Shuriken Toss is UNIT_TARGET 0.3 cast (bounces between visible
     -- targets). instant_target since BH doesn't aim.
     Anim.RegisterMap("npc_dota_hero_bounty_hunter", {
-        [AB1] = { ability = "bounty_hunter_shuriken_toss", role = "hard_disable", instant_target = true },
+        [AB[1]] = { ability = "bounty_hunter_shuriken_toss", role = "hard_disable", instant_target = true },
     })
     -- brewmaster (v6.15.269 zero-coverage fill)
     -- Cinder Brew is POINT-AOE 0.2 cast slow+dot. Anim catches placement.
     Anim.RegisterMap("npc_dota_hero_brewmaster", {
-        [AB1] = { ability = "brewmaster_cinder_brew", role = "hard_disable" },
+        [AB[1]] = { ability = "brewmaster_cinder_brew", role = "hard_disable" },
     })
     -- broodmother (v6.15.268 zero-coverage fill)
     -- v0.5.36: Sticky Snare is POINT VECTOR_TARGETING CHANNELLED -- Brood places a
     -- web-snare that roots Lina if she walks through. anim catches the
     -- cast.
     Anim.RegisterMap("npc_dota_hero_broodmother", {
-        [AB2] = { ability = "broodmother_sticky_snare", role = "hard_disable" },
+        [AB[2]] = { ability = "broodmother_sticky_snare", role = "hard_disable" },
     })
     -- bristleback (v6.15.266 zero-coverage fill)
     -- Hairball is a hidden POINT-AOE that fires a line of viscous goo (same
     -- mechanic as Viscous Nasal Goo Q, but auto-cast multi-target).
     Anim.RegisterMap("npc_dota_hero_bristleback", {
-        [AB2] = { ability = "bristleback_hairball", role = "hard_disable" },
+        [AB[2]] = { ability = "bristleback_hairball", role = "hard_disable" },
     })
     -- centaur (v6.15.270 zero-coverage final mop-up)
     -- v0.5.36: Double Edge is UNIT_TARGET AOE instant burst; no target-side modifier.
     -- Anim catches the cast. instant_target since Centaur selects target.
     Anim.RegisterMap("npc_dota_hero_centaur", {
-        [AB2] = { ability = "centaur_double_edge", role = "hard_disable", instant_target = true },
+        [AB[2]] = { ability = "centaur_double_edge", role = "hard_disable", instant_target = true },
     })
     -- chaos_knight
     Anim.RegisterMap("npc_dota_hero_chaos_knight", {
-        [AB1] = { ability = "chaos_knight_chaos_bolt", role = "hard_disable" },
-        [AB2] = { ability = "chaos_knight_reality_rift", role = "gap_close" },
+        [AB[1]] = { ability = "chaos_knight_chaos_bolt", role = "hard_disable" },
+        [AB[2]] = { ability = "chaos_knight_reality_rift", role = "gap_close" },
     })
     -- chen (v6.15.270 zero-coverage final mop-up)
     -- Penitence is UNIT_TARGET slow + damage amp. 0.3 cast; Chen aims.
     Anim.RegisterMap("npc_dota_hero_chen", {
-        [AB1] = { ability = "chen_penitence", role = "hard_disable" },
+        [AB[1]] = { ability = "chen_penitence", role = "hard_disable" },
     })
     -- clinkz
     Anim.RegisterMap("npc_dota_hero_clinkz", {
-        [AB5] = { ability = "clinkz_burning_barrage", role = "channel_start" },  -- (draft)
+        [AB[5]] = { ability = "clinkz_burning_barrage", role = "channel_start" },  -- (draft)
     })
     -- crystal_maiden
     Anim.RegisterMap("npc_dota_hero_crystal_maiden", {
-        [AB4] = { ability = "crystal_maiden_freezing_field", role = "channel_start" },
+        [AB[4]] = { ability = "crystal_maiden_freezing_field", role = "channel_start" },
     })
     -- dark_seer (v6.15.268 zero-coverage fill)
     -- Vacuum is POINT-AOE pull. Anim catches the cast; chain dispatches
     -- BKB (blocks pull) or dispel-priority.
     Anim.RegisterMap("npc_dota_hero_dark_seer", {
-        [AB1] = { ability = "dark_seer_vacuum", role = "hard_disable" },
+        [AB[1]] = { ability = "dark_seer_vacuum", role = "hard_disable" },
     })
     -- dark_willow
     Anim.RegisterMap("npc_dota_hero_dark_willow", {
-        [AB1] = { ability = "dark_willow_bramble_maze", role = "hard_disable" },
-        [AB3] = { ability = "dark_willow_cursed_crown", role = "hard_disable" },
-        [AB4] = { ability = "dark_willow_terrorize", role = "hard_disable" },
+        [AB[1]] = { ability = "dark_willow_bramble_maze", role = "hard_disable" },
+        [AB[3]] = { ability = "dark_willow_cursed_crown", role = "hard_disable" },
+        [AB[4]] = { ability = "dark_willow_terrorize", role = "hard_disable" },
     })
     -- dawnbreaker
     Anim.RegisterMap("npc_dota_hero_dawnbreaker", {
-        [AB2] = { ability = "dawnbreaker_celestial_hammer", role = "gap_close" },
-        [AB4] = { ability = "dawnbreaker_solar_guardian", role = "channel_start" },  -- (draft)
+        [AB[2]] = { ability = "dawnbreaker_celestial_hammer", role = "gap_close" },
+        [AB[4]] = { ability = "dawnbreaker_solar_guardian", role = "channel_start" },  -- (draft)
     })
     -- death_prophet (v6.15.258 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_death_prophet", {
-        [AB2] = { ability = "death_prophet_silence", role = "hard_disable" },  -- AOE silence
+        [AB[2]] = { ability = "death_prophet_silence", role = "hard_disable" },  -- AOE silence
     })
     -- disruptor
     Anim.RegisterMap("npc_dota_hero_disruptor", {
-        [AB4] = { ability = "disruptor_static_storm", role = "hard_disable" },
+        [AB[4]] = { ability = "disruptor_static_storm", role = "hard_disable" },
     })
     -- doom_bringer (v6.15.265 zero-coverage fill)
     -- Infernal Blade is autocast UNIT_TARGET on Doom's attack target -- no
     -- aim, instant trigger; instant_target bypasses the facing gate.
     Anim.RegisterMap("npc_dota_hero_doom_bringer", {
-        [AB2] = { ability = "doom_bringer_infernal_blade", role = "hard_disable", instant_target = true },
+        [AB[2]] = { ability = "doom_bringer_infernal_blade", role = "hard_disable", instant_target = true },
     })
     -- dragon_knight (v6.15.258 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_dragon_knight", {
-        [AB2] = { ability = "dragon_knight_dragon_tail", role = "hard_disable" },  -- single-target stun
+        [AB[2]] = { ability = "dragon_knight_dragon_tail", role = "hard_disable" },  -- single-target stun
     })
     -- drow_ranger
     Anim.RegisterMap("npc_dota_hero_drow_ranger", {
-        [AB3] = { ability = "drow_ranger_multishot", role = "channel_start" },  -- (draft)
+        [AB[3]] = { ability = "drow_ranger_multishot", role = "channel_start" },  -- (draft)
     })
     -- earth_spirit
     Anim.RegisterMap("npc_dota_hero_earth_spirit", {
-        [AB2] = { ability = "earth_spirit_rolling_boulder", role = "hard_disable" },
+        [AB[2]] = { ability = "earth_spirit_rolling_boulder", role = "hard_disable" },
     })
     -- earthshaker
     Anim.RegisterMap("npc_dota_hero_earthshaker", {
-        [AB4] = { ability = "earthshaker_echo_slam", role = "hard_disable" },
+        [AB[4]] = { ability = "earthshaker_echo_slam", role = "hard_disable" },
     })
     -- elder_titan
     Anim.RegisterMap("npc_dota_hero_elder_titan", {
-        [AB1] = { ability = "elder_titan_echo_stomp", role = "channel_start" },  -- (draft)
+        [AB[1]] = { ability = "elder_titan_echo_stomp", role = "channel_start" },  -- (draft)
     })
     -- ember_spirit (v6.15.268 zero-coverage fill)
     -- Sleight of Fist is POINT-AOE 0-cast-point ROOT_DISABLES (Ember
     -- becomes untargetable while flickering through enemies). Anim
     -- catches the cast; chain dispatches BKB / displacement.
     Anim.RegisterMap("npc_dota_hero_ember_spirit", {
-        [AB3] = { ability = "ember_spirit_sleight_of_fist", role = "hard_disable" },
+        [AB[3]] = { ability = "ember_spirit_sleight_of_fist", role = "hard_disable" },
     })
     -- enchantress (v6.15.270 zero-coverage final mop-up)
     -- Impetus is autocast attack-replacement (UNIT_TARGET AUTOCAST
     -- ATTACK) - more damage the further Sniper is from Enchantress.
     -- No specific modifier; anim catches the autocast trigger.
     Anim.RegisterMap("npc_dota_hero_enchantress", {
-        [AB4] = { ability = "enchantress_impetus", role = "hard_disable", instant_target = true },
+        [AB[4]] = { ability = "enchantress_impetus", role = "hard_disable", instant_target = true },
     })
     -- enigma
     Anim.RegisterMap("npc_dota_hero_enigma", {
-        [AB1] = { ability = "enigma_malefice", role = "hard_disable" },
-        [AB4] = { ability = "enigma_black_hole", role = "hard_disable" },
+        [AB[1]] = { ability = "enigma_malefice", role = "hard_disable" },
+        [AB[4]] = { ability = "enigma_black_hole", role = "hard_disable" },
     })
     -- faceless_void
     Anim.RegisterMap("npc_dota_hero_faceless_void", {
-        [AB4] = { ability = "faceless_void_chronosphere", role = "hard_disable" },
+        [AB[4]] = { ability = "faceless_void_chronosphere", role = "hard_disable" },
     })
     -- furion (Nature's Prophet) (v6.15.265 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_furion", {
-        [AB1] = { ability = "furion_sprout", role = "hard_disable", instant_target = true },  -- UNIT_TARGET, 0.35 cast
+        [AB[1]] = { ability = "furion_sprout", role = "hard_disable", instant_target = true },  -- UNIT_TARGET, 0.35 cast
     })
     -- grimstroke
     Anim.RegisterMap("npc_dota_hero_grimstroke", {
-        [AB2] = { ability = "grimstroke_ink_creature", role = "hard_disable" },
-        [AB4] = { ability = "grimstroke_soul_chain", role = "channel_start", instant_target = true },
+        [AB[2]] = { ability = "grimstroke_ink_creature", role = "hard_disable" },
+        [AB[4]] = { ability = "grimstroke_soul_chain", role = "channel_start", instant_target = true },
     })
     -- gyrocopter (v6.15.263 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_gyrocopter", {
-        [AB1] = { ability = "gyrocopter_homing_missile", role = "hard_disable", instant_target = true },  -- 0 cast, IGNORE_BACKSWING
-        [AB4] = { ability = "gyrocopter_call_down", role = "hard_disable" },  -- POINT-AOE, 0.3 cast
+        [AB[1]] = { ability = "gyrocopter_homing_missile", role = "hard_disable", instant_target = true },  -- 0 cast, IGNORE_BACKSWING
+        [AB[4]] = { ability = "gyrocopter_call_down", role = "hard_disable" },  -- POINT-AOE, 0.3 cast
     })
     -- hoodwink
     Anim.RegisterMap("npc_dota_hero_hoodwink", {
-        [AB2] = { ability = "hoodwink_bushwhack", role = "hard_disable" },
+        [AB[2]] = { ability = "hoodwink_bushwhack", role = "hard_disable" },
     })
     -- huskar
     Anim.RegisterMap("npc_dota_hero_huskar", {
-        [AB4] = { ability = "huskar_life_break", role = "gap_close" },
+        [AB[4]] = { ability = "huskar_life_break", role = "gap_close" },
     })
     -- jakiro
     Anim.RegisterMap("npc_dota_hero_jakiro", {
-        [AB2] = { ability = "jakiro_ice_path", role = "hard_disable" },
+        [AB[2]] = { ability = "jakiro_ice_path", role = "hard_disable" },
     })
     -- juggernaut (v6.15.266 zero-coverage fill)
     -- Omni Slash is UNIT_TARGET 4s channel, locks target + invuln + massive
     -- damage. Swift Slash is new 0.3s UNIT_TARGET gap-close (mini Omni).
     -- Both no-aim (caster selects target by reference) -> instant_target.
     Anim.RegisterMap("npc_dota_hero_juggernaut", {
-        [AB1] = { ability = "juggernaut_swift_slash", role = "gap_close", instant_target = true },
-        [AB4] = { ability = "juggernaut_omni_slash", role = "channel_start", instant_target = true },
+        [AB[1]] = { ability = "juggernaut_swift_slash", role = "gap_close", instant_target = true },
+        [AB[4]] = { ability = "juggernaut_omni_slash", role = "channel_start", instant_target = true },
     })
     -- keeper_of_the_light
     Anim.RegisterMap("npc_dota_hero_keeper_of_the_light", {
-        [AB1] = { ability = "keeper_of_the_light_illuminate", role = "channel_start" },  -- (draft)
+        [AB[1]] = { ability = "keeper_of_the_light_illuminate", role = "channel_start" },  -- (draft)
     })
     -- kunkka (v6.15.263 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_kunkka", {
-        [AB1] = { ability = "kunkka_torrent", role = "hard_disable" },  -- POINT-AOE, 0.4 cast, 1.5s warning
-        [AB2] = { ability = "kunkka_x_marks_the_spot", role = "hard_disable", instant_target = true },  -- unit-target, IGNORE_BACKSWING
+        [AB[1]] = { ability = "kunkka_torrent", role = "hard_disable" },  -- POINT-AOE, 0.4 cast, 1.5s warning
+        [AB[2]] = { ability = "kunkka_x_marks_the_spot", role = "hard_disable", instant_target = true },  -- unit-target, IGNORE_BACKSWING
     })
     -- kez
     -- v6.15.256: Grappling Claw is unit-target (Kez selects target by
@@ -7049,33 +7066,33 @@ local function register_anim_maps()
     -- Dance stays gate-on (it's a self-cast AoE channel; the facing gate
     -- filters far-away casts that aren't targeting Sniper).
     Anim.RegisterMap("npc_dota_hero_kez", {
-        [AB2] = { ability = "kez_grappling_claw", role = "gap_close", instant_target = true },
-        [AB4] = { ability = "kez_raptor_dance", role = "hard_disable" },
+        [AB[2]] = { ability = "kez_grappling_claw", role = "gap_close", instant_target = true },
+        [AB[4]] = { ability = "kez_raptor_dance", role = "hard_disable" },
     })
     -- leshrac
     Anim.RegisterMap("npc_dota_hero_leshrac", {
-        [AB1] = { ability = "leshrac_split_earth", role = "hard_disable" },
+        [AB[1]] = { ability = "leshrac_split_earth", role = "hard_disable" },
     })
     -- lich
     Anim.RegisterMap("npc_dota_hero_lich", {
-        [AB3] = { ability = "lich_sinister_gaze", role = "channel_start", instant_target = true },
-        [AB4] = { ability = "lich_chain_frost", role = "ult_burst" },
+        [AB[3]] = { ability = "lich_sinister_gaze", role = "channel_start", instant_target = true },
+        [AB[4]] = { ability = "lich_chain_frost", role = "ult_burst" },
     })
     -- life_stealer
     Anim.RegisterMap("npc_dota_hero_life_stealer", {
-        [AB2] = { ability = "life_stealer_open_wounds", role = "hard_disable" },
+        [AB[2]] = { ability = "life_stealer_open_wounds", role = "hard_disable" },
     })
     -- lina
     Anim.RegisterMap("npc_dota_hero_lina", {
-        [AB2] = { ability = "lina_light_strike_array", role = "hard_disable" },
-        [AB4] = { ability = "lina_laguna_blade", role = "ult_burst" },
+        [AB[2]] = { ability = "lina_light_strike_array", role = "hard_disable" },
+        [AB[4]] = { ability = "lina_laguna_blade", role = "ult_burst" },
     })
     -- lion
     Anim.RegisterMap("npc_dota_hero_lion", {
-        [AB1] = { ability = "lion_impale", role = "hard_disable" },
-        [AB2] = { ability = "lion_voodoo", role = "hard_disable" },
-        [AB3] = { ability = "lion_mana_drain", role = "channel_start" },
-        [AB4] = { ability = "lion_finger_of_death", role = "ult_burst" },
+        [AB[1]] = { ability = "lion_impale", role = "hard_disable" },
+        [AB[2]] = { ability = "lion_voodoo", role = "hard_disable" },
+        [AB[3]] = { ability = "lion_mana_drain", role = "channel_start" },
+        [AB[4]] = { ability = "lion_finger_of_death", role = "ult_burst" },
     })
     -- lone_druid (v6.15.267 zero-coverage fill)
     -- Savage Roar is NO_TARGET fear AoE around the caster. Anim catches
@@ -7083,25 +7100,25 @@ local function register_anim_maps()
     -- Bear Entangle (the main passive root) detection is reactive only --
     -- proc on attack, no anim.
     Anim.RegisterMap("npc_dota_hero_lone_druid", {
-        [AB3] = { ability = "lone_druid_savage_roar", role = "hard_disable" },
+        [AB[3]] = { ability = "lone_druid_savage_roar", role = "hard_disable" },
     })
     -- lycan (v6.15.270 zero-coverage final mop-up)
     -- Howl is NO_TARGET team damage buff (enables enemy team to gank
     -- Sniper). Routed via ENEMY_BUFF_THREATS dispatcher; anim catches
     -- the cast for awareness.
     Anim.RegisterMap("npc_dota_hero_lycan", {
-        [AB2] = { ability = "lycan_howl", role = "hard_disable" },
+        [AB[2]] = { ability = "lycan_howl", role = "hard_disable" },
     })
     -- luna (v6.15.265 zero-coverage fill)
     -- Lucent Beam is UNIT_TARGET, no aim required (Luna selects target by
     -- reference). 0.4 cast point. instant_target bypasses the facing gate.
     Anim.RegisterMap("npc_dota_hero_luna", {
-        [AB1] = { ability = "luna_lucent_beam", role = "hard_disable", instant_target = true },
+        [AB[1]] = { ability = "luna_lucent_beam", role = "hard_disable", instant_target = true },
     })
     -- magnataur
     Anim.RegisterMap("npc_dota_hero_magnataur", {
-        [AB3] = { ability = "magnataur_skewer", role = "hard_disable" },
-        [AB4] = { ability = "magnataur_reverse_polarity", role = "hard_disable" },
+        [AB[3]] = { ability = "magnataur_skewer", role = "hard_disable" },
+        [AB[4]] = { ability = "magnataur_reverse_polarity", role = "hard_disable" },
     })
     -- marci
     -- v6.15.256: Grapple is unit-target (Marci pulls herself to the
@@ -7109,69 +7126,69 @@ local function register_anim_maps()
     -- the facing gate would refuse the anim path because Marci doesn't
     -- face Sniper when grappling. instant_target=true bypasses the gate.
     Anim.RegisterMap("npc_dota_hero_marci", {
-        [AB1] = { ability = "marci_grapple", role = "gap_close", instant_target = true },
+        [AB[1]] = { ability = "marci_grapple", role = "gap_close", instant_target = true },
     })
     -- medusa (v6.15.268 zero-coverage fill)
     -- Mystic Snake is UNIT_TARGET (bounces between enemies). Gorgon Grasp
     -- is POINT-AOE stun. Both aim-required; default facing gate.
     Anim.RegisterMap("npc_dota_hero_medusa", {
-        [AB1] = { ability = "medusa_mystic_snake", role = "hard_disable" },
-        [AB3] = { ability = "medusa_gorgon_grasp", role = "hard_disable" },
+        [AB[1]] = { ability = "medusa_mystic_snake", role = "hard_disable" },
+        [AB[3]] = { ability = "medusa_gorgon_grasp", role = "hard_disable" },
     })
     -- mars
     Anim.RegisterMap("npc_dota_hero_mars", {
-        [AB1] = { ability = "mars_spear", role = "hard_disable" },
-        [AB2] = { ability = "mars_gods_rebuke", role = "hard_disable" },
-        [AB4] = { ability = "mars_arena_of_blood", role = "hard_disable" },
+        [AB[1]] = { ability = "mars_spear", role = "hard_disable" },
+        [AB[2]] = { ability = "mars_gods_rebuke", role = "hard_disable" },
+        [AB[4]] = { ability = "mars_arena_of_blood", role = "hard_disable" },
     })
     -- meepo (v6.15.266 zero-coverage fill)
     -- Earthbind = POINT-AOE delayed root projectile. Poof = UNIT_TARGET
     -- 1.5s channelled gap-close (Meepo teleports to target location).
     -- Poof anim is the warning that Meepos are converging on Sniper.
     Anim.RegisterMap("npc_dota_hero_meepo", {
-        [AB1] = { ability = "meepo_earthbind", role = "hard_disable" },
-        [AB2] = { ability = "meepo_poof", role = "gap_close" },
+        [AB[1]] = { ability = "meepo_earthbind", role = "hard_disable" },
+        [AB[2]] = { ability = "meepo_poof", role = "gap_close" },
     })
     -- mirana
     Anim.RegisterMap("npc_dota_hero_mirana", {
-        [AB2] = { ability = "mirana_arrow", role = "hard_disable" },
+        [AB[2]] = { ability = "mirana_arrow", role = "hard_disable" },
     })
     -- monkey_king (v6.15.266 zero-coverage fill)
     -- Wukong's Command is POINT-AOE ult that creates a 4s cage of clones
     -- attacking inside. Hard disable (cage prevents leaving via standard
     -- movement); delayed_aoe dispatches blink / Pike / Force out.
     Anim.RegisterMap("npc_dota_hero_monkey_king", {
-        [AB4] = { ability = "monkey_king_wukongs_command", role = "hard_disable" },
+        [AB[4]] = { ability = "monkey_king_wukongs_command", role = "hard_disable" },
     })
     -- morphling
     Anim.RegisterMap("npc_dota_hero_morphling", {
-        [AB2] = { ability = "morphling_adaptive_strike_agi", role = "hard_disable" },
+        [AB[2]] = { ability = "morphling_adaptive_strike_agi", role = "hard_disable" },
     })
     -- muerta
     Anim.RegisterMap("npc_dota_hero_muerta", {
-        [AB1] = { ability = "muerta_dead_shot", role = "hard_disable" },
+        [AB[1]] = { ability = "muerta_dead_shot", role = "hard_disable" },
     })
     -- naga_siren
     Anim.RegisterMap("npc_dota_hero_naga_siren", {
-        [AB2] = { ability = "naga_siren_ensnare", role = "hard_disable" },
-        [AB4] = { ability = "naga_siren_song_of_the_siren", role = "hard_disable" },
+        [AB[2]] = { ability = "naga_siren_ensnare", role = "hard_disable" },
+        [AB[4]] = { ability = "naga_siren_song_of_the_siren", role = "hard_disable" },
     })
     -- necrolyte
     Anim.RegisterMap("npc_dota_hero_necrolyte", {
-        [AB4] = { ability = "necrolyte_reapers_scythe", role = "ult_burst" },
+        [AB[4]] = { ability = "necrolyte_reapers_scythe", role = "ult_burst" },
     })
     -- nevermore (Shadow Fiend) (v6.15.263 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_nevermore", {
-        [AB4] = { ability = "nevermore_requiem_of_souls", role = "ult_burst" },  -- 1s windup, fear + radial damage
+        [AB[4]] = { ability = "nevermore_requiem_of_souls", role = "ult_burst" },  -- 1s windup, fear + radial damage
     })
     -- night_stalker (v6.15.258 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_night_stalker", {
-        [AB1] = { ability = "night_stalker_void", role = "hard_disable" },  -- 0.3 cast, full stun at night
+        [AB[1]] = { ability = "night_stalker_void", role = "hard_disable" },  -- 0.3 cast, full stun at night
     })
     -- nyx_assassin
     Anim.RegisterMap("npc_dota_hero_nyx_assassin", {
-        [AB1] = { ability = "nyx_assassin_impale", role = "hard_disable" },
-        [AB4] = { ability = "nyx_assassin_vendetta", role = "gap_close" },
+        [AB[1]] = { ability = "nyx_assassin_impale", role = "hard_disable" },
+        [AB[4]] = { ability = "nyx_assassin_vendetta", role = "gap_close" },
     })
     -- obsidian_destroyer
     -- v6.15.250: Astral Imprisonment is unit-target (selects target by
@@ -7180,27 +7197,27 @@ local function register_anim_maps()
     -- as a centred AoE -- the facing gate is a useful filter for far-away
     -- casts that aren't targeting Sniper.
     Anim.RegisterMap("npc_dota_hero_obsidian_destroyer", {
-        [AB2] = { ability = "obsidian_destroyer_astral_imprisonment", role = "hard_disable", instant_target = true },
-        [AB4] = { ability = "obsidian_destroyer_sanity_eclipse", role = "ult_burst" },
+        [AB[2]] = { ability = "obsidian_destroyer_astral_imprisonment", role = "hard_disable", instant_target = true },
+        [AB[4]] = { ability = "obsidian_destroyer_sanity_eclipse", role = "ult_burst" },
     })
     -- ogre_magi (v6.15.258 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_ogre_magi", {
-        [AB1] = { ability = "ogre_magi_fireblast", role = "hard_disable" },  -- 0.45 cast, 1.5-2.4s stun
+        [AB[1]] = { ability = "ogre_magi_fireblast", role = "hard_disable" },  -- 0.45 cast, 1.5-2.4s stun
     })
     -- omniknight (v6.15.270 zero-coverage final mop-up)
     -- Hammer of Purity is autocast UNIT_TARGET single-target nuke.
     -- instant_target since Omniknight selects target by reference.
     Anim.RegisterMap("npc_dota_hero_omniknight", {
-        [AB4] = { ability = "omniknight_hammer_of_purity", role = "hard_disable", instant_target = true },
+        [AB[4]] = { ability = "omniknight_hammer_of_purity", role = "hard_disable", instant_target = true },
     })
     -- oracle
     Anim.RegisterMap("npc_dota_hero_oracle", {
-        [AB1] = { ability = "oracle_fortunes_end", role = "channel_start", instant_target = true },
+        [AB[1]] = { ability = "oracle_fortunes_end", role = "channel_start", instant_target = true },
     })
     -- pangolier
     Anim.RegisterMap("npc_dota_hero_pangolier", {
-        [AB1] = { ability = "pangolier_swashbuckle", role = "gap_close" },
-        [AB4] = { ability = "pangolier_gyroshell", role = "gap_close" },
+        [AB[1]] = { ability = "pangolier_swashbuckle", role = "gap_close" },
+        [AB[4]] = { ability = "pangolier_gyroshell", role = "gap_close" },
     })
     -- phantom_assassin
     -- v6.15.250: instant_target=true bypasses the lib/anim.lua facing gate.
@@ -7214,19 +7231,19 @@ local function register_anim_maps()
     -- either because that target-side modifier no longer exists in modern
     -- Dota, so the anim path is the only working detection.
     Anim.RegisterMap("npc_dota_hero_phantom_assassin", {
-        [AB2] = { ability = "phantom_assassin_phantom_strike", role = "gap_close", instant_target = true },
+        [AB[2]] = { ability = "phantom_assassin_phantom_strike", role = "gap_close", instant_target = true },
     })
     -- phantom_lancer (v6.15.266 zero-coverage fill)
     -- Spirit Lance is UNIT_TARGET instant slow + damage. PL doesn't aim
     -- (target by reference); instant_target bypasses facing gate.
     Anim.RegisterMap("npc_dota_hero_phantom_lancer", {
-        [AB1] = { ability = "phantom_lancer_spirit_lance", role = "hard_disable", instant_target = true },
+        [AB[1]] = { ability = "phantom_lancer_spirit_lance", role = "hard_disable", instant_target = true },
     })
     -- phoenix (v6.15.269 zero-coverage fill)
     -- Sun Ray is POINT 0.01 cast line beam channelled DoT + slow. Phoenix
     -- aims the line; default facing gate. Anim catches the cast.
     Anim.RegisterMap("npc_dota_hero_phoenix", {
-        [AB3] = { ability = "phoenix_sun_ray", role = "hard_disable" },
+        [AB[3]] = { ability = "phoenix_sun_ray", role = "hard_disable" },
     })
     -- primal_beast
     -- v6.15.250: Pulverize is unit-target (channel that locks the target by
@@ -7234,14 +7251,14 @@ local function register_anim_maps()
     -- channel-start save. Onslaught is a line dash -- PB DOES aim it -- so
     -- the facing gate stays for that one.
     Anim.RegisterMap("npc_dota_hero_primal_beast", {
-        [AB1] = { ability = "primal_beast_onslaught", role = "gap_close" },
-        [AB4] = { ability = "primal_beast_pulverize", role = "channel_start", instant_target = true },
+        [AB[1]] = { ability = "primal_beast_onslaught", role = "gap_close" },
+        [AB[4]] = { ability = "primal_beast_pulverize", role = "channel_start", instant_target = true },
     })
     -- puck
     Anim.RegisterMap("npc_dota_hero_puck", {
-        [AB2] = { ability = "puck_waning_rift", role = "hard_disable" },
-        [AB3] = { ability = "puck_phase_shift", role = "channel_start" },  -- (draft)
-        [AB4] = { ability = "puck_dream_coil", role = "hard_disable" },
+        [AB[2]] = { ability = "puck_waning_rift", role = "hard_disable" },
+        [AB[3]] = { ability = "puck_phase_shift", role = "channel_start" },  -- (draft)
+        [AB[4]] = { ability = "puck_dream_coil", role = "hard_disable" },
     })
     -- pudge
     -- v6.15.250: Dismember is unit-target (Pudge selects Sniper by
@@ -7249,76 +7266,76 @@ local function register_anim_maps()
     -- save fires even when Pudge faces away. Meat Hook is a line skill-
     -- shot (Pudge DOES aim it) -- facing gate stays for that one.
     Anim.RegisterMap("npc_dota_hero_pudge", {
-        [AB1] = { ability = "pudge_meat_hook", role = "gap_close" },
-        [AB4] = { ability = "pudge_dismember", role = "channel_start", instant_target = true },
+        [AB[1]] = { ability = "pudge_meat_hook", role = "gap_close" },
+        [AB[4]] = { ability = "pudge_dismember", role = "channel_start", instant_target = true },
     })
     -- pugna
     Anim.RegisterMap("npc_dota_hero_pugna", {
-        [AB4] = { ability = "pugna_life_drain", role = "channel_start", instant_target = true },
+        [AB[4]] = { ability = "pugna_life_drain", role = "channel_start", instant_target = true },
     })
     -- rattletrap
     Anim.RegisterMap("npc_dota_hero_rattletrap", {
-        [AB4] = { ability = "rattletrap_hookshot", role = "gap_close" },
+        [AB[4]] = { ability = "rattletrap_hookshot", role = "gap_close" },
     })
     -- riki (v6.15.267 added blink_strike + smoke_screen)
     -- Blink Strike is UNIT_TARGET 0.3 cast IGNORE_BACKSWING -- Riki blinks
     -- to target and attacks; no aim. Smoke Screen is POINT-AOE silence +
     -- miss chance (anim catches the placement).
     Anim.RegisterMap("npc_dota_hero_riki", {
-        [AB1] = { ability = "riki_blink_strike", role = "gap_close", instant_target = true },
-        [AB2] = { ability = "riki_smoke_screen", role = "hard_disable" },
-        [AB3] = { ability = "riki_tricks_of_the_trade", role = "channel_start" },  -- (draft)
+        [AB[1]] = { ability = "riki_blink_strike", role = "gap_close", instant_target = true },
+        [AB[2]] = { ability = "riki_smoke_screen", role = "hard_disable" },
+        [AB[3]] = { ability = "riki_tricks_of_the_trade", role = "channel_start" },  -- (draft)
     })
     -- ringmaster
     Anim.RegisterMap("npc_dota_hero_ringmaster", {
-        [AB1] = { ability = "ringmaster_tame_the_beasts", role = "channel_start" },  -- (draft)
-        [AB3] = { ability = "ringmaster_impalement", role = "hard_disable" },
-        [AB4] = { ability = "ringmaster_wheel", role = "hard_disable" },
+        [AB[1]] = { ability = "ringmaster_tame_the_beasts", role = "channel_start" },  -- (draft)
+        [AB[3]] = { ability = "ringmaster_impalement", role = "hard_disable" },
+        [AB[4]] = { ability = "ringmaster_wheel", role = "hard_disable" },
     })
     -- rubick (v6.15.258 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_rubick", {
-        [AB1] = { ability = "rubick_telekinesis", role = "hard_disable" },  -- 0.1 cast, lift+land stun (IGNORE_BACKSWING)
+        [AB[1]] = { ability = "rubick_telekinesis", role = "hard_disable" },  -- 0.1 cast, lift+land stun (IGNORE_BACKSWING)
     })
     -- sand_king
     Anim.RegisterMap("npc_dota_hero_sand_king", {
-        [AB1] = { ability = "sandking_burrowstrike", role = "hard_disable" },
-        [AB4] = { ability = "sandking_epicenter", role = "hard_disable" },
+        [AB[1]] = { ability = "sandking_burrowstrike", role = "hard_disable" },
+        [AB[4]] = { ability = "sandking_epicenter", role = "hard_disable" },
     })
     -- shadow_demon
     Anim.RegisterMap("npc_dota_hero_shadow_demon", {
-        [AB1] = { ability = "shadow_demon_disruption", role = "hard_disable" },
-        [AB4] = { ability = "shadow_demon_demonic_purge", role = "hard_disable" },
+        [AB[1]] = { ability = "shadow_demon_disruption", role = "hard_disable" },
+        [AB[4]] = { ability = "shadow_demon_demonic_purge", role = "hard_disable" },
     })
     -- shadow_shaman
     Anim.RegisterMap("npc_dota_hero_shadow_shaman", {
-        [AB2] = { ability = "shadow_shaman_voodoo", role = "hard_disable" },
-        [AB3] = { ability = "shadow_shaman_shackles", role = "channel_start", instant_target = true },
+        [AB[2]] = { ability = "shadow_shaman_voodoo", role = "hard_disable" },
+        [AB[3]] = { ability = "shadow_shaman_shackles", role = "channel_start", instant_target = true },
     })
     -- shredder (v6.15.269 zero-coverage fill)
     -- Chakram is POINT-AOE IGNORE_BACKSWING line slow + disarm. Anim
     -- catches the throw; default facing gate (Shredder aims the line).
     Anim.RegisterMap("npc_dota_hero_shredder", {
-        [AB4] = { ability = "shredder_chakram", role = "hard_disable" },
+        [AB[4]] = { ability = "shredder_chakram", role = "hard_disable" },
     })
     -- silencer (v6.15.258 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_silencer", {
-        [AB3] = { ability = "silencer_last_word", role = "hard_disable" },  -- 0.3 cast, silence on cast or 4s timer
+        [AB[3]] = { ability = "silencer_last_word", role = "hard_disable" },  -- 0.3 cast, silence on cast or 4s timer
     })
     -- skywrath_mage
     Anim.RegisterMap("npc_dota_hero_skywrath_mage", {
-        [AB3] = { ability = "skywrath_mage_ancient_seal", role = "hard_disable" },
-        [AB4] = { ability = "skywrath_mage_mystic_flare", role = "hard_disable" },
+        [AB[3]] = { ability = "skywrath_mage_ancient_seal", role = "hard_disable" },
+        [AB[4]] = { ability = "skywrath_mage_mystic_flare", role = "hard_disable" },
     })
     -- slardar (v6.15.266 zero-coverage fill)
     -- Slithereen Crush is NO_TARGET AoE stun around Slardar. Amplify
     -- Damage is UNIT_TARGET armor-debuff setup, instant cast.
     Anim.RegisterMap("npc_dota_hero_slardar", {
-        [AB1] = { ability = "slardar_slithereen_crush", role = "hard_disable" },
-        [AB3] = { ability = "slardar_amplify_damage", role = "hard_disable", instant_target = true },
+        [AB[1]] = { ability = "slardar_slithereen_crush", role = "hard_disable" },
+        [AB[3]] = { ability = "slardar_amplify_damage", role = "hard_disable", instant_target = true },
     })
     -- slark
     Anim.RegisterMap("npc_dota_hero_slark", {
-        [AB2] = { ability = "slark_pounce", role = "gap_close" },
+        [AB[2]] = { ability = "slark_pounce", role = "gap_close" },
     })
     -- snapfire
     -- spectre (v6.15.265 zero-coverage fill)
@@ -7326,107 +7343,107 @@ local function register_anim_maps()
     -- chases the target). 0.3 cast point. instant_target conservative
     -- since the cast resolves quickly.
     Anim.RegisterMap("npc_dota_hero_spectre", {
-        [AB1] = { ability = "spectre_spectral_dagger", role = "hard_disable", instant_target = true },
+        [AB[1]] = { ability = "spectre_spectral_dagger", role = "hard_disable", instant_target = true },
     })
     -- snapfire (existing)
     Anim.RegisterMap("npc_dota_hero_snapfire", {
-        [AB1] = { ability = "snapfire_scatterblast", role = "ult_burst" },
-        [AB4] = { ability = "snapfire_mortimer_kisses", role = "hard_disable" },
+        [AB[1]] = { ability = "snapfire_scatterblast", role = "ult_burst" },
+        [AB[4]] = { ability = "snapfire_mortimer_kisses", role = "hard_disable" },
     })
     -- spirit_breaker
     Anim.RegisterMap("npc_dota_hero_spirit_breaker", {
-        [AB1] = { ability = "spirit_breaker_charge_of_darkness", role = "gap_close" },
-        [AB4] = { ability = "spirit_breaker_nether_strike", role = "hard_disable" },
+        [AB[1]] = { ability = "spirit_breaker_charge_of_darkness", role = "gap_close" },
+        [AB[4]] = { ability = "spirit_breaker_nether_strike", role = "hard_disable" },
     })
     -- storm_spirit
     Anim.RegisterMap("npc_dota_hero_storm_spirit", {
-        [AB2] = { ability = "storm_spirit_electric_vortex", role = "hard_disable" },
-        [AB4] = { ability = "storm_spirit_ball_lightning", role = "gap_close" },
+        [AB[2]] = { ability = "storm_spirit_electric_vortex", role = "hard_disable" },
+        [AB[4]] = { ability = "storm_spirit_ball_lightning", role = "gap_close" },
     })
     -- sven
     Anim.RegisterMap("npc_dota_hero_sven", {
-        [AB1] = { ability = "sven_storm_bolt", role = "hard_disable" },
+        [AB[1]] = { ability = "sven_storm_bolt", role = "hard_disable" },
     })
     -- terrorblade (v6.15.263 zero-coverage fill)
     -- Sunder is unit-target instant HP swap. No Sniper-side modifier
     -- (instant burst); anim-path is the only detector. instant_target=true
     -- because TB selects Sniper by reference and doesn't aim.
     Anim.RegisterMap("npc_dota_hero_terrorblade", {
-        [AB4] = { ability = "terrorblade_sunder", role = "ult_burst", instant_target = true },
+        [AB[4]] = { ability = "terrorblade_sunder", role = "ult_burst", instant_target = true },
     })
     -- tidehunter
     Anim.RegisterMap("npc_dota_hero_tidehunter", {
-        [AB4] = { ability = "tidehunter_ravage", role = "hard_disable" },
+        [AB[4]] = { ability = "tidehunter_ravage", role = "hard_disable" },
     })
     -- tinker
     Anim.RegisterMap("npc_dota_hero_tinker", {
-        [AB4] = { ability = "tinker_rearm", role = "channel_start" },  -- (draft)
+        [AB[4]] = { ability = "tinker_rearm", role = "channel_start" },  -- (draft)
     })
     -- tiny
     Anim.RegisterMap("npc_dota_hero_tiny", {
-        [AB2] = { ability = "tiny_toss", role = "hard_disable" },
+        [AB[2]] = { ability = "tiny_toss", role = "hard_disable" },
     })
     -- treant
     Anim.RegisterMap("npc_dota_hero_treant", {
-        [AB4] = { ability = "treant_overgrowth", role = "hard_disable" },
+        [AB[4]] = { ability = "treant_overgrowth", role = "hard_disable" },
     })
     -- troll_warlord (v6.15.268 zero-coverage fill)
     -- Whirling Axes Ranged is UNIT_TARGET POINT IGNORE_BACKSWING -- Troll
     -- throws axes that silence + damage. instant_target since Troll
     -- selects target by reference.
     Anim.RegisterMap("npc_dota_hero_troll_warlord", {
-        [AB3] = { ability = "troll_warlord_whirling_axes_ranged", role = "hard_disable", instant_target = true },
+        [AB[3]] = { ability = "troll_warlord_whirling_axes_ranged", role = "hard_disable", instant_target = true },
     })
     -- tusk
     Anim.RegisterMap("npc_dota_hero_tusk", {
-        [AB1] = { ability = "tusk_ice_shards", role = "hard_disable" },
-        [AB2] = { ability = "tusk_snowball", role = "gap_close" },
+        [AB[1]] = { ability = "tusk_ice_shards", role = "hard_disable" },
+        [AB[2]] = { ability = "tusk_snowball", role = "gap_close" },
     })
     -- vengefulspirit
     -- venomancer (v6.15.265 zero-coverage fill)
     -- Venomous Gale is POINT-AOE line with 0 cast point. Anim path fires
     -- the line_projectile dispatch (force/pike/grenade-self for perp).
     Anim.RegisterMap("npc_dota_hero_venomancer", {
-        [AB1] = { ability = "venomancer_venomous_gale", role = "hard_disable" },
+        [AB[1]] = { ability = "venomancer_venomous_gale", role = "hard_disable" },
     })
     -- visage (v6.15.265 zero-coverage fill)
     -- Grave Chill is UNIT_TARGET slow+silence (Visage steals stats);
     -- Soul Assumption is UNIT_TARGET burst (high damage if Visage has
     -- charged souls). Both bypass facing gate via instant_target.
     Anim.RegisterMap("npc_dota_hero_visage", {
-        [AB1] = { ability = "visage_grave_chill", role = "hard_disable", instant_target = true },
-        [AB2] = { ability = "visage_soul_assumption", role = "ult_burst", instant_target = true },
+        [AB[1]] = { ability = "visage_grave_chill", role = "hard_disable", instant_target = true },
+        [AB[2]] = { ability = "visage_soul_assumption", role = "ult_burst", instant_target = true },
     })
     -- vengefulspirit (existing)
     Anim.RegisterMap("npc_dota_hero_vengefulspirit", {
-        [AB4] = { ability = "vengefulspirit_nether_swap", role = "hard_disable" },
+        [AB[4]] = { ability = "vengefulspirit_nether_swap", role = "hard_disable" },
     })
     -- void_spirit
     Anim.RegisterMap("npc_dota_hero_void_spirit", {
-        [AB1] = { ability = "void_spirit_aether_remnant", role = "hard_disable" },
-        [AB4] = { ability = "void_spirit_astral_step", role = "gap_close" },
+        [AB[1]] = { ability = "void_spirit_aether_remnant", role = "hard_disable" },
+        [AB[4]] = { ability = "void_spirit_astral_step", role = "gap_close" },
     })
     -- warlock
     Anim.RegisterMap("npc_dota_hero_warlock", {
-        [AB3] = { ability = "warlock_upheaval", role = "channel_start" },  -- (draft)
+        [AB[3]] = { ability = "warlock_upheaval", role = "channel_start" },  -- (draft)
     })
     -- windrunner
     Anim.RegisterMap("npc_dota_hero_windrunner", {
-        [AB1] = { ability = "windrunner_shackleshot", role = "hard_disable" },
-        [AB2] = { ability = "windrunner_powershot", role = "channel_start" },  -- (draft)
+        [AB[1]] = { ability = "windrunner_shackleshot", role = "hard_disable" },
+        [AB[2]] = { ability = "windrunner_powershot", role = "channel_start" },  -- (draft)
     })
     -- winter_wyvern
     Anim.RegisterMap("npc_dota_hero_winter_wyvern", {
-        [AB4] = { ability = "winter_wyvern_winters_curse", role = "hard_disable" },
+        [AB[4]] = { ability = "winter_wyvern_winters_curse", role = "hard_disable" },
     })
     -- witch_doctor
     Anim.RegisterMap("npc_dota_hero_witch_doctor", {
-        [AB4] = { ability = "witch_doctor_death_ward", role = "channel_start" },
+        [AB[4]] = { ability = "witch_doctor_death_ward", role = "channel_start" },
     })
     -- zuus
     Anim.RegisterMap("npc_dota_hero_zuus", {
-        [AB2] = { ability = "zuus_lightning_bolt", role = "ult_burst" },
-        [AB4] = { ability = "zuus_thundergods_wrath", role = "ult_burst" },
+        [AB[2]] = { ability = "zuus_lightning_bolt", role = "ult_burst" },
+        [AB[4]] = { ability = "zuus_thundergods_wrath", role = "ult_burst" },
     })
 
     -- Subscribe to role events
@@ -7865,7 +7882,7 @@ end
 -- cp_entry.cp_default for the cast point fallback.
 -- armed_threats key prefix "lotus_pending:" is sibling to BUG-3's "castpt:*";
 -- independent keyspaces, no collision.
-local LOTUS_DEFER_WINDOW_S = 1.2
+K.LOTUS_DEFER_WINDOW_S = 1.2
 local function lotus_defer_if_close(threat_mod, threat_caster)
     if not state.self_npc then return false end
     local lotus_item = NPCLib.item(state.self_npc, "item_lotus_orb")
@@ -7875,12 +7892,12 @@ local function lotus_defer_if_close(threat_mod, threat_caster)
     end
     local cd_remaining = (Ability.GetCooldown and Ability.GetCooldown(lotus_item)) or 999
     -- Q3 effective window: min(cp_default - 0.3s, 1.2s). CAST_POINT_THREATS is
-    -- BUG-3's module-local; absent entry falls through to LOTUS_DEFER_WINDOW_S
+    -- BUG-3's module-local; absent entry falls through to K.LOTUS_DEFER_WINDOW_S
     -- default for modifiers not in the cp catalog.
     local cp_entry = CAST_POINT_THREATS[threat_mod]
     local cp = cp_entry and cp_entry.cp_default or nil
-    local cp_window = (cp and (cp - 0.3)) or LOTUS_DEFER_WINDOW_S
-    local effective_window = math.min(cp_window, LOTUS_DEFER_WINDOW_S)
+    local cp_window = (cp and (cp - 0.3)) or K.LOTUS_DEFER_WINDOW_S
+    local effective_window = math.min(cp_window, K.LOTUS_DEFER_WINDOW_S)
     if effective_window <= 0 then return false end
     if cd_remaining > effective_window then return false end
     local caster_idx = (threat_caster and Entity.GetIndex and Entity.GetIndex(threat_caster)) or 0
@@ -7972,7 +7989,7 @@ local function handle_lotus_first(npc, modifier, mod_name, is_self)
         -- v0.5.23 (COR-01): pass threat_mod + caster + nil ability_name so
         -- ResolveSaveOrder consults LINA_SAVE_OVERRIDES on the Lotus-fallback
         -- path. Previously called with one argument; threat_mod/caster
-        -- arrived nil and the dispatcher collapsed to DEFAULT_SAVE_CHAIN,
+        -- arrived nil and the dispatcher collapsed to CH.DEFAULT_SAVE_CHAIN,
         -- silently bypassing hero-tuned chains for Sniper Assassinate, Lina R.
         -- v0.5.25 RPR-03: stamp AFTER try_save_lotus_first success so a
         -- chain bail (no Lotus + all chain items on CD) doesn't leave the
@@ -8506,6 +8523,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.52 Phase 3 slice 2: AutoDisabler Force Interrupt override (Pike + Force Staff). User: 'structural, the right end-state' on the v0.5.51 Pike double-fire fix choice. **The v0.5.51 demo log proved the conflict**: brain's catalog_eta_pike fired at impact_t=0.59 d=441, but framework AutoDisabler.lua had ALREADY cast Pike on Bara at d=569 and d=473 (two prior Pike casts in the same encounter). modifier_spirit_breaker_charge_of_darkness is in AutoDisabler/Force Interrupt/Versus list, and item_hurricane_pike + item_force_staff are in Force Interrupt/Usage. v0.5.43 Dodger override + v0.5.45.1 Linkbreaker override covered those subsystems but NOT AutoDisabler -- it's a third independent framework subsystem at General/Main/Auto Disabler in gui.json. **Fix**: mirror the v0.5.43 / v0.5.45.1 capture+restore pattern for AutoDisabler. New state.AD module (lives on state, not module-local, per the 200-locals limit memory rule from v0.5.45.1) with items {item_hurricane_pike, item_force_staff} at path General/Main/Auto Disabler/Main/Force Interrupt/Usage. state.AD.disable() captures+zeroes at GAME_IN_PROGRESS; state.AD.restore() restores at POST_GAME. Match-scoped so other heroes' AutoDisabler config is not permanently mutated. New menu toggle Override AutoDisabler Force Interrupt items (default ON). **Scope**: ONLY Force Interrupt/Usage items (Pike + Force Staff) -- the proven conflict from v0.5.51 log. AutoDisabler/General/Usage list (Cyclone + Pike + WW as disablers) has NOT shown demonstrated conflict yet (Dodger already zeroes those for defensive use); deferred until a demo log proves a problem. BKB / Manta / Ghost are NOT in any AutoDisabler list; no zeroing needed for them. **Why bundled into state.***: pre-v0.5.52 the main chunk was at the 200-locals ceiling. Adding local AD = {} pushed luac to 'too many local variables in main function'. Moved AD to state.AD per the v0.5.45.1 memory rule ('module-level additions MUST bundle into state.* or named tables'). The OnUpdateEx transition hook also avoids a new local (gs_ad) by inlining GameRules.GetGameState() twice instead of stashing it. **No code changes to the catalog gate, prep_time fields, or compute_save_fire_window from v0.5.51** -- this is purely the framework conflict resolution. **Lina.lua 8364 -> 8509 lines (+145; state.AD module + menu toggle + OnUpdateEx hook). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: at game start, tlog autodisabler_chain_disabled with items=2 set_ok=2 (Pike + Force Staff zeroed in framework AutoDisabler). Bara charge fires only ONE Pike from brain via catalog_eta_pike at impact_t in [0.5, 0.6]; no preceding AutoDisabler-source Pike casts. At post-game, autodisabler_chain_restored undoes the change so the framework AutoDisabler config is unchanged for other heroes / next match.")
+LOG:info("Lina brain v0.5.52.1 (200-locals cleanup): bundled AB1-AB6 + 10 save chains + 19 constants into tables. Saves 32 main-chunk local slots so future Phase 3 work has headroom. User: 'lets run try to clean the most number of locals possible so we can open space' (parallel to v0.5.52 testing). **No behavior change** -- pure refactor. Pre-cleanup main-chunk locals: 191. Post-cleanup: 159 (32 fewer). **Three bundles**: (1) AB1-AB6 into AB[1]..AB[6] table -- 159 references rewritten from [AB1]..[AB6] to [AB[1]]..[AB[6]]. Saves 5 slots. (2) 10 save chains (DEFAULT_SAVE_CHAIN, _GAP_CLOSE_SAVES, _CHAIN_PUDGE_DISMEMBER, _CHAIN_BANE_GRIP, _CHAIN_PUGNA_DRAIN, _CHAIN_LEGION_DUEL, _CHAIN_DISRUPTOR_KFR, _CHAIN_WD_DEATH_WARD, _CHAIN_UNDERLORD_PIT, _COMMITTED_ATTACKER_SAVES) into CH.* table. Declarations stay in their original positions (chain-by-chain commentary still reads top-to-bottom); only storage form changed. Saves 9 slots. (3) 19 single-value constants (LINA_COMMITTED_ATTACK_WINDOW_S, LINA_ATTACK_ENGAGE_RADIUS, LINA_COMMITTED_ATTACKER_RETREAT_BUFFER, LAYER2_REACTION_WINDOW, BLINK_ARRIVE_DIST_U, BLINK_SETTLE_S, BLINK_ARRIVE_TIMEOUT_S, PERSISTENT_LOCK_CAP_S, SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR, PERSISTENT_THREAT_TICK_INTERVAL, ALLY_DANGER_HP_FRAC, ALLY_FOCUS_RADIUS, ALLY_FOCUS_COUNT, PRE_FACE_TTI_THRESHOLD, PRE_FACE_COOLDOWN, PRE_FACE_ANGLE_OK, PRE_FACE_SCAN_RADIUS, ALLY_COMMIT_RADIUS, LOTUS_DEFER_WINDOW_S) into K.* table. Saves 18 slots. **Memory rule honored**: per v0.5.45.1 'module-level additions MUST bundle into state.* or named tables'. New tables AB / CH / K are module-local (not state.*) because they're short-name aliases used inside this script only, and using state.* prefix on every reference would balloon the diff. Each table counts as 1 main-chunk slot; the 30 references inside each cost 1 extra table-indirection at lookup (trivial at startup-time Anim.RegisterMap + cold data-table builds). **Not bundled**: large data tables (SAVE_FIRE, LINA_SAVE_OVERRIDES, SAVE_ETA_TRIGGER, SAVE_FIRE_DISTANCE, etc.) -- they have 100+ references each; bundling would be high-churn for moderate savings. The forward-decl shims (defense_dispatcher, fs_shard_window_active, record_save) and required lib aliases (TD, Defense, NPCLib, etc.) stay as separate locals. **Lina.lua 8509 -> 8526 lines (+17 net of bundling comments). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: identical behavior to v0.5.52. All threat scenarios should produce the same tlogs (catalog_eta_gate, w_defensive_fire, autodisabler_chain_disabled, etc.) with no diff in fire timing or aim. Future Phase 3 slices (v0.5.53 lib dispatcher integration, v0.5.54 cast-point catalog) now have ~40 free main-chunk slots to add helpers / state fields / module bundles without re-hitting the 200 ceiling.")
 
 return callbacks

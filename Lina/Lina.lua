@@ -1297,7 +1297,14 @@ local SAVE_FIRE = {
             if guarded then return false end
             local ok = issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_wind_waker"))
             if ok then
-                state.queue_safe_post_move("ww", 600, threat_caster, "modifier_wind_waker")
+                -- v0.5.64: WW self-cast allows movement at fixed 300 MS
+                -- during the 2.5s airborne (per Liquipedia: "they can
+                -- move freely at a fixed speed, free pathing, ignores
+                -- turn rates"). Pass moves_during_airborne=true so the
+                -- tick reissues MOVE while the modifier is still active
+                -- and Lina actually travels during the lift instead of
+                -- walking the full distance afterward.
+                state.queue_safe_post_move("ww", 600, threat_caster, "modifier_wind_waker", true)
             end
             return ok
         end,
@@ -1306,8 +1313,11 @@ local SAVE_FIRE = {
         short = "eul",
         -- v0.5.60 Phase 5 slice 3 / v0.5.62 fix: cast in place (EUL lifts
         -- Lina airborne 2.5s untargetable), then arm the tick-driven
-        -- post-airborne move via state.queue_safe_post_move. Same shape
-        -- as WW; modifier_name = "modifier_eul_cyclone".
+        -- post-airborne move via state.queue_safe_post_move. v0.5.64:
+        -- EUL is a FULL disable per Liquipedia (STUNNED + INVULNERABLE,
+        -- no horizontal movement during airborne) so moves_during_airborne
+        -- stays false (default); tick waits for the modifier to clear
+        -- before reissuing. Unlike WW, EUL cannot move during the lift.
         fire  = function(intent, threat_caster)
             local guarded = NPC.HasModifier(state.self_npc, "modifier_eul_cyclone")
             tlog(1, "save_fire_invoked", { item = "item_cyclone", intent = tostring(intent),
@@ -1315,7 +1325,7 @@ local SAVE_FIRE = {
             if guarded then return false end
             local ok = issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_cyclone"))
             if ok then
-                state.queue_safe_post_move("eul", 600, threat_caster, "modifier_eul_cyclone")
+                state.queue_safe_post_move("eul", 600, threat_caster, "modifier_eul_cyclone", false)
             end
             return ok
         end,
@@ -2005,7 +2015,7 @@ end
 -- her), false if no safe destination was found (in which case Lina just
 -- lands in place after airborne; the save still served its purpose by
 -- surviving the threat).
-state.queue_safe_post_move = function(intent, push_dist, threat_caster, modifier_name)
+state.queue_safe_post_move = function(intent, push_dist, threat_caster, modifier_name, moves_during_airborne)
     local me = state.self_npc
     if not me then return false end
     local _, landing = state.compute_safe_dest(threat_caster, push_dist)
@@ -2020,20 +2030,33 @@ state.queue_safe_post_move = function(intent, push_dist, threat_caster, modifier
         unit = me, position = landing,
         queue = true,
     }
-    -- Suspenders: tick re-issues every ~100ms after airborne ends.
+    -- Suspenders: tick re-issues every ~100ms. moves_during_airborne
+    -- decides whether reissues fire WHILE the modifier is present:
+    --   true  (WW self-cast per Liquipedia): "If the target is the
+    --         wielder, they can move freely at a fixed speed (300),
+    --         free pathing, ignores turn rates". Lina moves at 300 MS
+    --         during the 2.5s airborne. 300 * 2.5 = 750u covers the
+    --         600u dest with time to spare; she arrives mid-airborne.
+    --   false (EUL self-cast per Liquipedia): "fully disabling",
+    --         modifier states STUNNED + INVULNERABLE + NO_HEALTH_BAR,
+    --         "no horizontal movement is possible". Tick must wait for
+    --         the modifier to clear before reissuing; orders during the
+    --         disable would no-op.
     state.pending_post_airborne_move = {
-        dest              = landing,
-        modifier_name     = modifier_name,
-        deadline          = now() + 7.0,
-        intent            = intent,
-        observed_airborne = false,
-        last_reissue_t    = 0,
-        reissue_seq       = 0,
+        dest                  = landing,
+        modifier_name         = modifier_name,
+        moves_during_airborne = moves_during_airborne or false,
+        deadline              = now() + 7.0,
+        intent                = intent,
+        observed_airborne     = false,
+        last_reissue_t        = 0,
+        reissue_seq           = 0,
     }
     tlog(1, intent .. "_post_move", {
         x = string.format("%.0f", landing.x),
         y = string.format("%.0f", landing.y),
         caster = threat_caster and uname(threat_caster) or "centroid",
+        movable = (moves_during_airborne and "y") or "n",
     })
     return true
 end
@@ -2064,9 +2087,13 @@ state.pending_post_airborne_move_tick = function()
     local airborne = NPC.HasModifier and NPC.HasModifier(me, p.modifier_name) or false
     if airborne then
         p.observed_airborne = true
-        return
-    end
-    if not p.observed_airborne then
+        -- WW self-cast (moves_during_airborne=true): Lina moves at fixed
+        -- 300 MS during the 2.5s airborne. Fall through to reissue logic
+        -- so the brain pushes her toward dest during the lift.
+        -- EUL self-cast (moves_during_airborne=false): full disable, no
+        -- horizontal movement; defer until modifier clears.
+        if not p.moves_during_airborne then return end
+    elseif not p.observed_airborne then
         return
     end
     -- Arrival check: within 100u of dest. Avoids reissue oscillation when
@@ -8819,6 +8846,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.63 (hotfix): EUL/WW post-move via re-issue loop, NO Native disable. User: 'we shouldnt disable hit and run, weve already tested it and it does not come back when reactivate due to lag to cloud setting. What we can do is re-issue the position till it reachs it'. **v0.5.62 was wrong direction**: pausing Native HR/OW would prevent the baseline orbwalker from preempting our post-airborne MOVE, but the framework restore path is unreliable (cloud-sync menu lag, HR stays off after RestoreHitRun returns), so users would lose their auto-attack after every EUL/WW save. **v0.5.63 design**: NO Native pause / restore. The tick re-issues MOVE_TO_POSITION every ~100ms until Lina arrives within 100u of dest OR the deadline expires (7s, covers airborne up to 3s + walk 600u at 300 MS ~ 2s + grace). Each reissue uses a unique intent (intent_post_move_fire_N where N increments) to bypass safe_issue's dedup; without that, only the first reissue would actually reach the engine. ~10/sec reissue rate keeps the brain's MOVE as the most-recent order on enough frames to dominate the baseline orbwalker's interleaved USER MOVEs. Lina walks toward the brain's dest; baseline kites have effect on the OFF frames but the net direction is brain-dest. **Removed**: pcall(Native.PauseHitRun, LINA_MENU) at .fire entry; pcall(Native.RestoreHitRun, LINA_MENU) in tick (on dead/timeout). pending_post_airborne_move dropped move_issued field, added last_reissue_t + reissue_seq. deadline renamed from deadline_restore (no Native restore to gate). **Belt-and-suspenders**: queue=true MOVE issue at .fire STAYS in case the engine honours it (Lina starts moving the instant airborne ends, tick reissues keep her on course). **Arrival logic**: tick checks dist_sqr < 100*100 each iteration; emits <intent>_post_move_arrived tlog with reissue count and clears pending. **Timeout**: deadline emits <intent>_post_move_expired with reissue count. **New tlogs**: eul_post_move (arm, unchanged), eul_post_move_fired (FIRST reissue marker, ~1 per save), eul_post_move_arrived OR eul_post_move_expired (end). Pike + Force unchanged. **Files**: Lina.lua only (~30 lines net swap). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.61. **Verification on next demo**: EUL or WW fires -> save_fire_invoked + cast_verify + eul_post_move (arm). Airborne ends -> eul_post_move_fired (first reissue). Lina walks toward dest. After arrival -> eul_post_move_arrived with reissue count ~10-20 (depends on walk time). Native HR/OW NEVER touched -- user keeps their auto-attack intact across the save.")
+LOG:info("Lina brain v0.5.64 (Liquipedia-driven): WW reissues DURING airborne; EUL stays post-airborne. User: 'Check the log, it is moving lina out the ww or eul but. So it is making lina walking instead of making lina moving while on cyclone. Look on liquipedia'. **Liquipedia confirms the asymmetry**: WW (item_wind_waker) self-cast per docs: 'If the target is the wielder, they can move freely at a fixed speed (300), free pathing, ignores turn rates'. Silences/mutes/disarms but NOT a full disable. Lina CAN move at 300 MS during the 2.5s airborne. EUL (item_cyclone) self-cast per docs: 'fully disabling', modifier states STUNNED + INVULNERABLE + NO_HEALTH_BAR, 'no horizontal movement is possible'. EUL Lina cannot move during airborne. **v0.5.63 demo proved the post-airborne walk works** (ww_post_move_arrived reissues=13-33 across 3 fires) but Lina walked AFTER airborne instead of during. User wanted during. **v0.5.64 fix**: add moves_during_airborne flag to state.queue_safe_post_move. When true (WW), tick reissues MOVE while modifier_wind_waker is ACTIVE; Lina moves at 300 MS during the lift, 300 * 2.5 = 750u covers the 600u dest with ~0.5s to spare (she arrives mid-airborne, lands at dest). When false (EUL), tick waits for modifier_eul_cyclone to clear before reissuing (current behavior; orders during EUL would no-op against the full disable). **WW .fire passes moves_during_airborne=true; EUL .fire passes false explicitly**. **Pending struct** gains moves_during_airborne field. **Tick branch**: if airborne AND moves_during_airborne -> fall through to reissue logic; if airborne AND not moves_during_airborne -> defer until modifier clears (EUL path). **New tlog field**: post_move log adds movable=y|n marker so the demo can confirm which branch was taken per save. **Pike + Force unchanged**. **Files**: Lina.lua only (~15 lines: signature param + tick branch + .fire flag pass + new tlog field). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.61. **Verification on next demo**: WW fires -> save_fire_invoked + ww_post_move with movable=y + ww_post_move_fired DURING airborne (within ~100ms of cast not 2.5s later) + ww_post_move_arrived with low reissue count (~5-15, much less than v0.5.63s 13-33). Lina visually traveling during the airborne lift. EUL fires (if it triggers) -> ww_post_move with movable=n, eul_post_move_fired AFTER 2.5s airborne, eul_post_move_arrived as before.")
 
 return callbacks

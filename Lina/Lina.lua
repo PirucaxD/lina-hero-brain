@@ -1602,6 +1602,45 @@ local SAVE_FIRE = {
                     pos     = impact_pos
                     aim_via = (cat_entry and cat_entry.impact_pos == "caster")
                               and "catalog_caster" or "catalog_self"
+                    -- v0.5.50.4: smart aim offset for homing_charge per
+                    -- user spec ("save on self limits our error to the
+                    -- radius of the circle instead the diameter").
+                    -- Aim-at-self centers AoE on Lina, so the catch zone
+                    -- along the caster's approach line is only the AoE
+                    -- RADIUS (225u). Offsetting aim 225u TOWARD the
+                    -- caster shifts AoE so the catch zone is the AoE
+                    -- DIAMETER (450u: from Lina at one edge to 450u
+                    -- toward the caster's start at the other). For Bara
+                    -- (hit-and-stop): Bara at Lina at impact is at the
+                    -- near AoE edge, Bara en-route up to 450u out is
+                    -- still inside. Bara visually stunned away from
+                    -- Lina (along his approach), not at Lina's feet.
+                    -- Only apply for homing_charge (Bara). Tusk carry
+                    -- + others keep aim-at-self because the snowball
+                    -- carries Lina past her cast position and the
+                    -- offset math doesn't help.
+                    if cat_entry and cat_entry.kind == "homing_charge"
+                       and Entity.IsEntity(caster)
+                       and Entity.GetAbsOrigin then
+                        local cur_pos  = Entity.GetAbsOrigin(caster)
+                        local lina_pos = Entity.GetAbsOrigin(me)
+                        if cur_pos and lina_pos then
+                            local dx = (cur_pos.x or 0) - (lina_pos.x or 0)
+                            local dy = (cur_pos.y or 0) - (lina_pos.y or 0)
+                            local dist = math.sqrt(dx * dx + dy * dy)
+                            if dist > 0 then
+                                local W_AOE_RADIUS = 225
+                                local unit_x = dx / dist
+                                local unit_y = dy / dist
+                                pos = {
+                                    x = (lina_pos.x or 0) + unit_x * W_AOE_RADIUS,
+                                    y = (lina_pos.y or 0) + unit_y * W_AOE_RADIUS,
+                                    z = lina_pos.z or 0,
+                                }
+                                aim_via = "catalog_self_offset"
+                            end
+                        end
+                    end
                 end
             end
             -- v0.5.47.2 legacy fallback for mods not in catalog yet.
@@ -8266,6 +8305,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.50.3 tuning: tighten W fire window upper margin from W_LEAD + 225/speed to W_LEAD + 0.10. **v0.5.50.2 confirmed**: source=live_with_ramp in catalog tlog -> lib reload + ramp model engaged. But fire still 'a bit earlier' per user. Demo log fire 1: d=910 speed=630 (avg-during-prep from ramp) impact_t=1.44 in_window=y upper=1.48 -> Bara at (1.44-1.12)*630 = 204u from Lina at W detonation. Inside 225 AoE but at the edge, far from actual impact point. User wants W to detonate when Bara is CLOSER to Lina (closer to impact moment). **The wide upper formula** W_LEAD + 225/speed allowed fires anywhere up to AoE boundary -- mathematically valid catch but visually 'too early'. **Fix**: tight 0.10s band above W_LEAD for ALL homing kinds (homing_charge + homing_carry). New upper = W_LEAD + 0.10 = 1.22 fixed. For speed=630: caster at 0.10*630 = 63u from Lina at detonation (close to impact). For Tusk speed=1675: caster at 168u (still inside 225 AoE). At 60Hz impact_t drops ~0.017s per frame so ~6 frames available in the 0.10s window for the gate to fire. If missed, no W (preferred over too-early stun per user spec). **channel_at_caster + cast_point_targeted unchanged**: still [0, inf] (catalog provides aim only, other paths handle timing). **Verification on next demo**: Bara w_catalog_eta_gate should show upper=1.22 fixed (not 1.48+ scaled). Fire moment when impact_t enters [1.12, 1.22]. Bara at d such that d/speed = impact_t -> d at fire = 1.22 * 630 = 769 (vs previous 910). Bara stunned visibly close to Lina at detonation, not 200u out. **Lina.lua 8264 -> 8269 lines (+5). lib/threat_data.lua unchanged from v0.5.50. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
+LOG:info("Lina brain v0.5.50.4 smart aim offset toward caster (diameter coverage for homing_charge). User insight: 'save on self that limits our error to the radius of the circle instead the diameter. We dont to do on lina, it might be from self position to max position. On the position it stops bara'. **Geometry**: aim-at-self centers W AoE 225r on Lina, so the catch zone along the caster's approach line is only the AoE RADIUS (225u) -- caster catches only from d=0 (at Lina) to d=225 (entering AoE on approach). Offsetting aim 225u TOWARD the caster shifts the AoE: catch zone now spans the AoE DIAMETER (450u). For Bara at d=0 (stopped at Lina, impact moment): at AoE edge (caught at 225u from aim point). For Bara en-route at d=225: at AoE center (caught at 0 from aim). For Bara at d=450 (far edge): at AoE edge (caught at 225 from aim). DOUBLE the catch range along the approach line. **Visual benefit**: with offset aim, W AoE detonates 225u toward Bara from Lina (not centered on Lina). Bara visually stunned away from Lina's position along his approach. Less ambiguous than 'W explodes at Lina, Bara was stunned somewhere in there'. **Scope**: only for homing_charge kind (Bara stops at Lina at impact). Other kinds unchanged: homing_carry (Tusk) keeps aim-at-self because the snowball carries Lina past her cast position and the offset math doesn't help; channel_at_caster (WD) keeps aim-at-caster; cast_point_targeted (Lion) keeps aim-at-self at Lina. **Math**: 1) get caster current position; 2) compute unit vector from Lina to caster; 3) aim_pos = Lina + unit_vector * W_AOE_RADIUS (225u). Fallback to aim-at-self if caster not entity or distance is 0. **Combined with v0.5.50.3 tight fire window**: window [W_LEAD, W_LEAD + 0.10]; Bara at d_at_detonation in [0, 63] for speed=630. With smart aim offset 225 toward Bara, Bara's distance from aim point = |63 - 225| = 162 (or |0 - 225| = 225 for Bara-stopped-at-Lina). Both INSIDE AoE. Tight stun, visually toward Bara not at Lina. **New tlog aim value**: catalog_self_offset (distinguishes from plain catalog_self). **Lina.lua 8269 -> 8308 lines (+39). lib/threat_data.lua unchanged from v0.5.50. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
 
 return callbacks

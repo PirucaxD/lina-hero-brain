@@ -1733,6 +1733,165 @@ ThreatData.THREAT_ARRIVAL_TIMING = {
         post_cast_delay = 0,
         impact_pos      = "caster",
     },
+
+    -- v0.5.68 Phase 4 slice 3: homing projectiles + AoE-at-ground. 10 new
+    -- entries covering common stuns / nukes / displacements that Lina's
+    -- save chains care about. Cast point values from common Dota
+    -- knowledge; modifier names follow canonical patterns but may need
+    -- VPK-grep verification (see reference_dota_modifier_names_vpk_grep
+    -- memory) when a consumer comes online. Projectiles are modeled as
+    -- cast_point_targeted with cast_point covering the caster's cast
+    -- point only; projectile travel is on its own dispatch (the modifier
+    -- applies on hit). AoE-at-ground / AoE-at-caster keep the
+    -- cast_point_targeted + impact_pos=caster workaround until a
+    -- dedicated cast_point_aoe kind is added.
+
+    -- Earthshaker Fissure: line stun emanating from ES. Cast point 0.46s.
+    -- impact_pos=self (the line stun applies to targets along the line;
+    -- Lina catches it if she's in it).
+    modifier_earthshaker_fissure_stun = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "earthshaker_fissure",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.46,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Earthshaker Echo Slam: PBAoE stun + damage around ES, with
+    -- secondary echo damage per hero hit. Cast point 0.5s. impact_pos=
+    -- caster (centered on ES). Lotus reflect / pre-fire BKB protect self.
+    modifier_earthshaker_echo_slam = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "earthshaker_echo_slam",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.5,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
+
+    -- Earthshaker Earth Splitter: long-line AoE with delayed damage. Cast
+    -- point 0.5s, then a ~3s post-cast delay before the line damage
+    -- resolves. Aghs increases the damage tracking. impact_pos=caster
+    -- (line emanates from ES). Brain has plenty of time to react during
+    -- the post-cast delay; this is a rare case where post_cast_delay
+    -- actually matters for save timing.
+    modifier_earthshaker_earthsplitter = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "earthshaker_earth_splitter",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.5,
+        post_cast_delay = 3.0,
+        impact_pos      = "caster",
+    },
+
+    -- Magnus Skewer: line displacement; Magnus charges through targets
+    -- pulling them with him. Cast point 0.3s. impact_pos=self (Lina is
+    -- displaced if hit). Brain's pre-cast window saves are BKB / Lotus
+    -- (Lotus reflect on the dispel? actually Skewer isn't dispellable so
+    -- Lotus does nothing). Self-WW or Eul can dodge during cast point.
+    modifier_magnataur_skewer = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "magnataur_skewer",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Magnus Reverse Polarity: PBAoE pull + 4s stun. Cast point 0.55s.
+    -- impact_pos=caster (pulls all hit targets to Magnus). Pre-cast saves
+    -- must fire during the 0.55s window: BKB blocks the stun; Lotus
+    -- doesn't reflect; WW / Eul dodge.
+    modifier_magnataur_reverse_polarity_stun = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "magnataur_reverse_polarity",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.55,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
+
+    -- Sven Storm Bolt: homing projectile that stuns + damages target.
+    -- Cast point 0.5s. Projectile travel ~1100 u/s on top of cast point.
+    -- impact_pos=self. Modeled as cast_point_targeted; projectile travel
+    -- is post-cast and the brain treats the threat as armed at end of
+    -- cast point (mirrors AA Ice Blast pattern).
+    modifier_sven_storm_bolt = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "sven_storm_bolt",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.5,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Slardar Slithereen Crush: PBAoE stun + damage around Slardar. Cast
+    -- point 0.3s. impact_pos=caster.
+    modifier_slardar_slithereen_crush = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "slardar_slithereen_crush",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
+
+    -- Lich Chain Frost: bouncing projectile, initial target + jumps. Cast
+    -- point 0.45s. impact_pos=self (initial target = Lina if she's
+    -- targeted). Bounces are on their own dispatch.
+    modifier_lich_chain_frost = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "lich_chain_frost",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.45,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Lina Light Strike Array: delayed AoE-at-ground. Cast point 0.55s
+    -- then 0.5s explosion delay (the visible "ground glow" wind-up).
+    -- impact_pos=self (Lina catches it if she's in the AoE; brain may
+    -- defer / dodge during the combined ~1.05s window).
+    modifier_lina_light_strike_array = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "lina_light_strike_array",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.55,
+        post_cast_delay = 0.5,
+        impact_pos      = "self",
+    },
+
+    -- Tiny Avalanche: line/AoE damage at ground over duration. Cast point
+    -- 0.3s. impact_pos=self.
+    modifier_tiny_avalanche = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "tiny_avalanche",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.3,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
 }
 
 -- v0.5.56: cast_point single source of truth.

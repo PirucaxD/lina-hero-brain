@@ -2029,7 +2029,10 @@ ThreatData.THREAT_ARRIVAL_TIMING = {
     -- Beastmaster Primal Roar: line skillshot, primary target 4s stun +
     -- cone 2s slow. Cast point 0.4s. impact_pos=self (Lina is the primary
     -- target if she's at the line center). BKB blocks; airborne dodges.
-    modifier_beastmaster_primal_roar_stun = {
+    -- v0.5.73 name fix: was modifier_beastmaster_primal_roar_stun (with
+    -- _stun suffix) in v0.5.71; canonical per lib THREATS_ON_SELF L417 +
+    -- ABILITY_TO_THREAT L761 is the bare modifier_beastmaster_primal_roar.
+    modifier_beastmaster_primal_roar = {
         kind            = "cast_point_targeted",
         speed_source    = "instant",
         speed_fallback  = 0,

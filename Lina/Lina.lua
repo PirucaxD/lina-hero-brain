@@ -1470,12 +1470,33 @@ local SAVE_FIRE = {
                     })
                     return false
                 end
-            elseif hp_frac > 0.85 and not is_worthy then
-                tlog(3, "lotus_hp_gate_skip", {
-                    hp_frac = string.format("%.2f", hp_frac),
-                    mod = threat_mod or "-",
-                })
-                return false
+            else
+                -- v0.5.72 Phase 4 slice 7 (audit rec #5): severity-derived
+                -- fallback when LINA_EXPECTED_DAMAGE has no entry for the
+                -- threat. Maps TD.SeverityOf:
+                --   "high"   -> ignore HP gate, fire (high-severity threats
+                --               warrant Lotus regardless of HP)
+                --   "low"    -> skip Lotus (low-severity not worth 14s CD)
+                --   "medium" / unknown -> existing 0.85 HP fallback
+                -- Auto-covers ~180 mods that have severity tier in the lib
+                -- but aren't hand-listed in LINA_EXPECTED_DAMAGE (5 entries).
+                local sev = (TD.SeverityOf and threat_mod) and TD.SeverityOf(threat_mod) or nil
+                if sev == "high" then
+                    tlog(3, "lotus_sev_gate_fire", { sev = "high", mod = threat_mod or "-" })
+                    -- fall through to issue (fire)
+                elseif sev == "low" then
+                    tlog(3, "lotus_sev_gate_skip", {
+                        sev = "low", mod = threat_mod or "-",
+                    })
+                    return false
+                elseif hp_frac > 0.85 and not is_worthy then
+                    tlog(3, "lotus_hp_gate_skip", {
+                        hp_frac = string.format("%.2f", hp_frac),
+                        mod = threat_mod or "-",
+                        sev = sev or "-",
+                    })
+                    return false
+                end
             end
             return issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_lotus_orb"))
         end,
@@ -2524,6 +2545,73 @@ end
 -- offensive + defensive FC use). Fixed 1.9s -> 2.2s post-buffer lock TTL.
 local function _lina_eta_fc_offensive(_c, _t, _a, _ab, _now_t) return 1.9 end
 
+-- v0.5.72 Phase 4 slice 7: generic ETA fallback for mods not in
+-- LINA_ETA_RESOLVERS. Audit rec #3. Reads TD.THREAT_ARRIVAL_TIMING for
+-- catalog-aware TTL (cast_point + post_cast_delay for cast-point threats,
+-- GetModifierRemaining for channels, dist/speed for homing kinds). The
+-- per-mod entries in LINA_ETA_RESOLVERS still win because cfg.eta_resolver
+-- is checked first; this fallback covers the ~14 catalog mods from slices
+-- 1-4 + 6 that don't have a hand-tuned per-mod entry (Sand King Epicenter,
+-- CM FF, Enigma BH, FV Chrono, ES Echo Slam / Earth Splitter, Magnus RP,
+-- Slardar Crush, Lich Chain Frost, Tiny Avalanche, Skywrath MF, Ogre
+-- Fireblast, CM Frostbite, Jakiro Macropyre, WD Maledict, Dazzle Poison
+-- Touch, Beastmaster PR, Tide Ravage). Requires v0.5.72 lib API extension
+-- (canonical_mod passed as 6th arg).
+local function _lina_eta_default(caster, target, _armed, _ab, _now_t, mod_name)
+    if not mod_name then return nil end
+    local entry = TD.THREAT_ARRIVAL_TIMING and TD.THREAT_ARRIVAL_TIMING[mod_name]
+    if entry then
+        -- Channel: prefer caster-side GetModifierRemaining (matches WD Death
+        -- Ward + Bane Grip + Pugna Drain catalog convention; channel lives
+        -- on the caster, target may have a different _target variant).
+        if entry.kind == "channel_at_caster" then
+            local rem = 0
+            if caster and Entity.IsEntity and Entity.IsEntity(caster)
+               and NPC.GetModifierRemaining then
+                local ok, v = pcall(NPC.GetModifierRemaining, caster, mod_name)
+                if ok and type(v) == "number" and v > 0 then rem = v end
+            end
+            if rem > 0 then
+                if rem > K.PERSISTENT_LOCK_CAP_S then rem = K.PERSISTENT_LOCK_CAP_S end
+                if rem < 0.1 then rem = 0.1 end
+                return rem
+            end
+            -- fall through to cast_point if remaining unavailable
+        end
+        -- Cast-point class: cast_point + post_cast_delay covers cast_point_
+        -- targeted nukes + AoEs + projectile dispatch windows.
+        if entry.cast_point and entry.cast_point > 0 then
+            local total = entry.cast_point + (entry.post_cast_delay or 0)
+            if total < 0.1 then total = 0.1 end
+            return total
+        end
+        -- Homing kinds: dist/speed_fallback.
+        if entry.speed_fallback and entry.speed_fallback > 0
+           and (entry.kind == "homing_charge" or entry.kind == "homing_carry"
+                or entry.kind == "instant_blink") then
+            local d = _lina_eta_dist(caster, target)
+            local eta = d / entry.speed_fallback
+            if eta < 0.05 then eta = 0.05 end
+            return eta
+        end
+    end
+    -- No catalog entry. Try target-side GetModifierRemaining as a last
+    -- resort (covers debuffs the lib classifies as mid_channel / reactive
+    -- but doesn't have catalog entries for).
+    if target and Entity.IsEntity and Entity.IsEntity(target)
+       and NPC.GetModifierRemaining then
+        local ok, v = pcall(NPC.GetModifierRemaining, target, mod_name)
+        if ok and type(v) == "number" and v > 0 then
+            local rem = v
+            if rem > K.PERSISTENT_LOCK_CAP_S then rem = K.PERSISTENT_LOCK_CAP_S end
+            if rem < 0.1 then rem = 0.1 end
+            return rem
+        end
+    end
+    -- No data; return nil so lib falls back to cfg.fallback_lock_ttl_s.
+    return nil
+end
+
 -- The 30 per-mod + 4 synthetic FC resolvers, keyed by canonical mod string.
 -- The dispatcher canonicalizes the threat_mod via cfg.canonicalize_mod
 -- (= TD.CanonicalMod) BEFORE the lookup, so alias mods (e.g. _pull suffix)
@@ -2649,6 +2737,15 @@ defense_dispatcher = Defense.New {
     -- above for the catalog.
     canonicalize_mod        = TD.CanonicalMod,
     eta_resolver            = LINA_ETA_RESOLVERS,
+    -- v0.5.72 Phase 4 slice 7 (audit rec #3): generic fallback resolver
+    -- for mods not in LINA_ETA_RESOLVERS. Reads TD.THREAT_ARRIVAL_TIMING
+    -- (catalog) for cast_point + post_cast_delay (cast-point class),
+    -- GetModifierRemaining (channels), or dist/speed (homing kinds).
+    -- Requires v0.5.72 lib API extension passing canonical_mod as the
+    -- 6th arg to resolvers. Per-mod LINA_ETA_RESOLVERS entries still win
+    -- (cfg.eta_resolver checked first); this only covers the ~14 catalog
+    -- mods from Phase 4 slices that don't have hand-tuned entries.
+    eta_resolver_default    = _lina_eta_default,
     lock_buffer_s           = 0.3,
     fallback_lock_ttl_s     = 2.0,
     -- v0.5.40.1 HOTFIX: self_npc closure was missing from v0.5.40 cfg, so
@@ -8983,6 +9080,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.71 (Phase 4 slice 6): LINA_SAVE_OVERRIDES for 6 high-impact ults. User: 'Go on' after v0.5.70 catalog consumer ship. **Audit rec #4 addressed**: 6 hard-disable ults previously routed through generic CATEGORY_PATCHES.lockdown chain (audit verbatim: 'These are the threats that kill Lina; current chain is throw whatever lockdown items have'). v0.5.71 adds per-ult tuned chains. **6 new CH.* tables + LINA_SAVE_OVERRIDES entries**: CH.DOOM (Lotus reflect head + BKB magic-immune + airborne dodges + escape items), CH.MAGNUS_RP (BKB blocks pull+stun + airborne dodges), CH.FV_CHRONO (airborne pre-cast + Aeon lethal-block during -- BKB does NOT help inside Chrono), CH.ENIGMA_BH (airborne immune + escape items + BKB last-resort -- BKB does NOT block BH which pierces), CH.BEASTMASTER_PR (BKB blocks + airborne dodges), CH.TIDE_RAVAGE (BKB blocks + airborne dodges + Lotus attempt reflect). Each chain picks items by what actually works for THAT ult: BKB-pierce vs BKB-blocked, reflectable vs not, airborne dodge vs Aeon lethal-block. **2 new catalog entries**: modifier_beastmaster_primal_roar_stun (cp 0.4 self) + modifier_tidehunter_ravage (cp 0.55 caster). Catalog now at 42 entries. The other 4 ult modifiers (Doom, Magnus RP, FV Chrono, Enigma BH) were already in catalog from slices 1-3 so v0.5.70 cast_point_too_early defer gate ALREADY applies. **state.lina_chains test-harness handle** updated to expose the 6 new chains. **Authoritative override bypass**: ResolveSaveOrder returns is_authoritative=true for hero_overrides, so kind_mismatch / tether_unreachable filters skip -- user knows the mechanics better than the kind heuristic. **Combined with v0.5.70 cast_point_too_early defer**: Doom's Lotus reflect (chain head) is deferred until impact_t < 0.5s (cast point 0.5s, threshold 0.5s = fires near end of cast), saving Lotus's 14s CD if the Doom cancels mid-cast. Same for the other 4 catalog-covered ults. **Files**: Lina.lua +95 lines (6 CH.* chains + 6 LINA_SAVE_OVERRIDES entries + state.lina_chains updates). lib/threat_data.lua +30 lines (2 catalog entries). lib/escape.lua + lib/defense.lua + Sniper.lua unchanged. **Verification on next demo**: when these 6 ults trigger, resolve_save_order_pick tlog source=hero_override head=item_lotus_orb (Doom) / item_black_king_bar (Magnus RP / Beastmaster PR / Tide Ravage) / item_wind_waker (FV Chrono / Enigma BH). save_chain_skip reason=cast_point_too_early fires while chain walks early; eventually fire_returned_true on the head save when impact_t crosses 0.5s.")
+LOG:info("Lina brain v0.5.72 (Phase 4 slice 7): generic ETA fallback + Lotus severity gate. User: 'Go on with #3 and #5'. **Audit recs #3 + #5 in one slice**. **#3 (medium effort)**: replace LINA_ETA_RESOLVERS boilerplate with lib catalog lookups. Approach: keep all 30 hand-tuned per-mod entries (no regression), ADD generic eta_resolver_default that uses TD.THREAT_ARRIVAL_TIMING for the ~14 catalog mods from slices 1-4+6 with no per-mod entry (Sand King, CM FF, Enigma BH, FV Chrono, ES Echo Slam / Earth Splitter, Magnus RP, Slardar Crush, Lich Chain Frost, Tiny Avalanche, Skywrath MF, Ogre Fireblast, CM Frostbite, Jakiro Macropyre, WD Maledict, Dazzle, Beastmaster PR, Tide Ravage). The default resolver branches: channel_at_caster -> caster-side GetModifierRemaining; cast_point -> cast_point + post_cast_delay; homing kinds -> dist/speed_fallback; else target-side GetModifierRemaining; else nil (lib falls back to fallback_lock_ttl_s 2.0s). **Lib API extension**: resolve_ttl now passes canonical_mod as 6th arg to resolvers (backwards-compatible -- existing 5-arg per-mod resolvers ignore extra param; new default takes the 6th arg to look up catalog). Sniper unaffected (his 5-arg resolvers ignore the extra param). **#5 (small effort)**: extend LINA_EXPECTED_DAMAGE with severity-derived defaults. When threat_mod has no hand-tuned entry (5 today), use TD.SeverityOf: high -> fire Lotus (ignore HP gate), low -> skip, medium/unknown -> existing 0.85 HP fallback. Auto-covers ~180 mods with severity tier. **New tlogs**: lotus_sev_gate_fire / lotus_sev_gate_skip alongside existing lotus_dmg_gate_skip / lotus_hp_gate_skip. **Behavioural impact**: (a) the ~14 catalog mods get more precise lock TTL (catalog cast_point + post_cast_delay) vs fallback_lock_ttl_s = 2.0s; (b) Lotus fires more aggressively on high-severity threats (Tinker Laser, Zeus Wrath, Skywrath MF, etc.) and skips low-severity (CM Frostbite, WD Maledict if tier 'low'). **Files**: lib/defense.lua +5 lines (canonical_mod plumbing). Lina.lua +80 lines (_lina_eta_default function + eta_resolver_default registration + Lotus severity branch). lib/threat_data.lua + lib/escape.lua + Sniper.lua unchanged. **Audit rec #4 (LINA_SAVE_OVERRIDES for high-impact ults) was v0.5.71**; #3 + #5 close out the audit's 5 recommendations. **Verification on next demo**: lock TTL on ~14 catalog mods more precise than 2.0s default (lock_acquired ttl field log). lotus_sev_gate_fire fires for high-severity threats without LINA_EXPECTED_DAMAGE entry. lotus_sev_gate_skip for low-severity. Existing 30 LINA_ETA_RESOLVERS + 5 LINA_EXPECTED_DAMAGE entries unchanged behaviour.")
 
 return callbacks

@@ -415,6 +415,11 @@ end
 -- cfg.fallback_lock_ttl_s -> DEFAULT_FALLBACK_LOCK_TTL. Emits
 -- eta_resolver_fallback tlog at v=1 when the canonical_mod has no catalog
 -- entry (operators add proper entries during play).
+-- v0.5.72: resolver is now called with canonical_mod as the 6th arg so a
+-- generic default resolver can look up per-mod data from a lib catalog
+-- (Lina's _lina_eta_default consumes this to read THREAT_ARRIVAL_TIMING).
+-- Backwards-compatible: per-mod resolvers that take only 5 args ignore
+-- the extra parameter.
 local function resolve_ttl(c, canonical_mod, threat_caster, target_unit, armed_entry, ability_name)
     local resolver
     if c.eta_resolver and canonical_mod then
@@ -427,7 +432,7 @@ local function resolve_ttl(c, canonical_mod, threat_caster, target_unit, armed_e
             local ok, h = pcall(c.ability_handle, ability_name)
             if ok then ability_handle = h end
         end
-        local ok, eta = pcall(resolver, threat_caster, target_unit, armed_entry, ability_handle, c.now())
+        local ok, eta = pcall(resolver, threat_caster, target_unit, armed_entry, ability_handle, c.now(), canonical_mod)
         if ok and type(eta) == "number" then
             return clamp_ttl(c, eta)
         end

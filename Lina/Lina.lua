@@ -38,6 +38,7 @@ if package and package.loaded then
     package.loaded["lib.geometry"]    = nil
     package.loaded["lib.native"]      = nil
     package.loaded["lib.defense"]     = nil
+    package.loaded["lib.escape"]      = nil
 end
 local Signal = require("lib.signal")
 local Target = require("lib.target")      -- v0.2.0: IsAlive / NotIllusion / NotClone
@@ -47,6 +48,7 @@ local Dedup  = require("lib.dedup")       -- v0.2.0: threat-response + anim dedu
 local Geometry = require("lib.geometry")  -- v0.3.0: lead-target prediction (offense)
 local Native = require("lib.native")      -- v0.4.4: pause native Hit & Run / Orb Walker in combos
 local Defense = require("lib.defense")    -- v0.5.0: generic Layer-2 save dispatcher (Tier-2)
+local Escape = require("lib.escape")      -- v0.5.57: danger-aware escape destination picker (Phase 5)
 
 local MS = Enum.ModifierState
 local UO = Enum.UnitOrder
@@ -1417,6 +1419,13 @@ local SAVE_FIRE = {
         --           closure stamps state.pike_reissue and pike_prime_tick
         --           re-issues Pike once the next frame -- the 2nd cast lands.
         -- state.pike_primed flips true ONLY on positive proof (cooldown > 0).
+        -- v0.5.57 (Phase 5): self-cast fallback now uses Escape.PickDir
+        -- (lib/escape.lua) for a danger-aware 7-angle pick + two-phase
+        -- turn-then-fire harness. Pike pushes 600u in Lina's CURRENT
+        -- facing; firing without turning could push Lina into the threat
+        -- she is escaping. Mirrors Sniper.lua:5877 pike_self_reposition.
+        -- The enemy-target primary branch is unchanged (Pike-on-enemy
+        -- pushes them apart radially, no facing dependency).
         fire  = function(intent, threat_caster, threat_mod)
             local it = NPCLib.item(state.self_npc, "item_hurricane_pike"); if not it then return false end
             if threat_caster and Entity.IsEntity(threat_caster) and Target.IsAlive(threat_caster)
@@ -1428,14 +1437,81 @@ local SAVE_FIRE = {
                 end
                 return ok
             end
-            if state.safe_push_destination(threat_caster, 600) then
-                local ok = issue_item_self(intent, "def", it)  -- self semi-blink fallback
+            -- self-cast semi-blink fallback. v0.5.57: danger-aware pick.
+            local me = state.self_npc
+            local me_pos = me and Entity.GetAbsOrigin(me)
+            if not (me and me_pos) then return false end
+            -- Derive `toward` direction: prefer the known threat caster,
+            -- fall back to the hero centroid in 1500u (matches Sniper's
+            -- panic-mode path). With neither, no save.
+            local toward
+            local cp = threat_caster and Entity.IsEntity(threat_caster)
+                       and Target.IsAlive(threat_caster)
+                       and Entity.GetAbsOrigin(threat_caster) or nil
+            if cp then
+                local diff = cp - me_pos
+                if diff:Length2DSqr() < 1 then return false end
+                toward = diff:Normalized()
+            else
+                local enemies = Heroes.InRadius(me_pos, 1500, Entity.GetTeamNum(me),
+                                                Enum.TeamType.TEAM_ENEMY)
+                if enemies and #enemies > 0 then
+                    local cx, cy = 0, 0
+                    local n = 0
+                    for i = 1, #enemies do
+                        local ep = Entity.GetAbsOrigin(enemies[i])
+                        if ep then cx, cy, n = cx + ep.x, cy + ep.y, n + 1 end
+                    end
+                    if n > 0 then
+                        local cen = Vector(cx / n, cy / n, me_pos.z)
+                        local diff = cen - me_pos
+                        if diff:Length2DSqr() > 1 then toward = diff:Normalized() end
+                    end
+                end
+            end
+            if not toward then return false end
+            local escape_dir = Escape.PickDir(me, me_pos, toward, 600, threat_caster)
+            if not escape_dir then return false end
+            local away_pt = Vector(me_pos.x + escape_dir.x * 400,
+                                   me_pos.y + escape_dir.y * 400, me_pos.z)
+            -- NPC.FindRotationAngle returns RADIANS -- math.deg before the
+            -- 30deg tolerance compare (see reference_uczone_api_gotchas).
+            local angle_ok, angle_rad = pcall(NPC.FindRotationAngle, me, away_pt)
+            local angle = (angle_ok and angle_rad) and math.deg(math.abs(angle_rad)) or 0
+            if angle <= 30 then
+                local ok = issue_item_self(intent, "def", it)
                 if ok and not state.pike_primed then
                     state.pike_reissue = { caster = state.self_npc, t = now(), self_cast = true }
                 end
+                tlog(1, "pike_self_fired", {
+                    angle = string.format("%.0f", angle), phase = "immediate",
+                })
                 return ok
             end
-            return false
+            -- Faced toward the threat / sideways: turn first via a move
+            -- order to away_pt; pending_pike_self_tick fires Pike once the
+            -- facing is within 30deg (0.7s deadline ~ 180deg turn). Return
+            -- true so the dispatcher records this threat as responded; the
+            -- tick handles the actual cast. If the tick times out the
+            -- threat is not re-saved this encounter (same trade-off Sniper
+            -- accepts at Sniper.lua:5949).
+            local moved = safe_issue {
+                hero = HERO_KEY, layer = "def",
+                intent = intent .. "_turnaway",
+                order_type = UO.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
+                unit = me, position = away_pt,
+            }
+            state.pending_pike_self = {
+                caster   = threat_caster,
+                away_pt  = away_pt,
+                deadline = now() + 0.7,
+                intent   = intent,
+            }
+            tlog(1, "pike_self_turnaway", {
+                angle = string.format("%.0f", angle),
+                caster = threat_caster and uname(threat_caster) or "centroid",
+            })
+            return moved
         end,
     },
     -- HERO-SPECIFIC: Flame Cloak (Aghs Scepter ability; gate GetLevel>0).
@@ -1793,6 +1869,10 @@ state.lina_save_fire = SAVE_FIRE
 state.pike_primed     = false   -- positive-proof flag: cooldown observed > 0
 state.pike_prime_done = false   -- one-shot guard on the throwaway PRIME cast
 state.pike_reissue    = nil     -- {caster, t, self_cast} stamped by SAVE_FIRE.item_hurricane_pike.fire
+-- v0.5.57 Phase 5: {caster, away_pt, deadline, intent} armed by the Pike
+-- self-cast turn-then-fire harness (SAVE_FIRE.item_hurricane_pike.fire) and
+-- consumed by state.pending_pike_self_tick once facing is within 30deg.
+state.pending_pike_self = nil
 -- GREP: PIKE_PRIME_TICK_DEF (call site lives in callbacks.OnUpdateEx).
 state.pike_prime_tick = function()
     local me = state.self_npc
@@ -1837,6 +1917,49 @@ state.pike_prime_tick = function()
         state.pike_prime_done = true
         tlog(1, "pike_prime", {})
     end
+end
+
+-- v0.5.57 (Phase 5): two-phase Pike-on-self repositioning. Phase 1 lives
+-- in SAVE_FIRE.item_hurricane_pike.fire (self-cast branch); it picks a
+-- safe direction via Escape.PickDir, fires Pike immediately if facing is
+-- within 30deg, else issues a MOVE_TO_POSITION away_pt to rotate and
+-- arms state.pending_pike_self. Phase 2 is this tick: each frame
+-- re-measures the angle and fires Pike once aligned. On 0.7s timeout the
+-- pending is dropped (same trade-off as Sniper.lua:5970 - if turn does
+-- not complete the threat is not re-saved this encounter). Hooked into
+-- callbacks.OnUpdateEx alongside the other state.*_tick functions.
+state.pending_pike_self_tick = function()
+    local p = state.pending_pike_self
+    if not p then return end
+    local me = state.self_npc
+    if not me or not Target.IsAlive(me) then state.pending_pike_self = nil; return end
+    if now() > p.deadline then
+        tlog(2, "pike_self_turnaway_timeout", {})
+        state.pending_pike_self = nil
+        return
+    end
+    -- Caster gone (died / TP'd): reposition no longer needed; drop without
+    -- burning Pike's CD.
+    if p.caster and not (Entity.IsEntity(p.caster) and Target.IsAlive(p.caster)) then
+        state.pending_pike_self = nil
+        return
+    end
+    -- NPC.FindRotationAngle returns RADIANS; math.deg before the 30deg gate.
+    local angle_ok, angle_rad = pcall(NPC.FindRotationAngle, me, p.away_pt)
+    local angle = (angle_ok and angle_rad) and math.deg(math.abs(angle_rad)) or 0
+    if angle > 30 then return end
+    local it = NPCLib.item(me, "item_hurricane_pike")
+    if it and NPCLib.item_ready(me, "item_hurricane_pike") then
+        if issue_item_self((p.intent or "pike_self") .. "_aligned", "def", it) then
+            if not state.pike_primed then
+                state.pike_reissue = { caster = me, t = now(), self_cast = true }
+            end
+            tlog(1, "pike_self_fired", {
+                angle = string.format("%.0f", angle), phase = "turned",
+            })
+        end
+    end
+    state.pending_pike_self = nil
 end
 
 -- Proximity-weighted enemy-hero danger at a world position. Ranks Force/Pike
@@ -7622,6 +7745,9 @@ function callbacks.OnUpdateEx()
         -- pre_face_tick is not load-bearing.
         -- GREP: PIKE_PRIME_TICK_DEF (target is `state.pike_prime_tick = function()`).
         state.pike_prime_tick()
+        state.pending_pike_self_tick()  -- v0.5.57 Phase 5: fire Pike once
+                                         -- the turn-then-fire harness reaches
+                                         -- alignment (or timeout drops the pending)
         pre_face_tick()            -- E12: opt-in pre-face incoming threats
         -- Layer 1 offense (Phase F): latch -> scheduled steps -> R-abort ->
         -- auto-R kill-steal -> HOLD/TAP combo-key dispatch.
@@ -8492,6 +8618,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.56: cp_default single source of truth via lib catalog sync. User: 'Sync cp_default from catalog in lib' on the Phase-3 closer. **The dedup**: CAST_POINT_THREATS.cp_default (arming-site fallback) and THREAT_ARRIVAL_TIMING.cast_point (compute_arrival_time source) held duplicate static cast_point values for Lion Finger / Lina Laguna / Sniper Assassinate (0.6 / 0.45 / 2.0 respectively). Both code paths already prefer live Ability.GetCastPoint(ab, true) first; the static literal is the rarely-triggered fallback. **Fix**: lib/threat_data.lua walks THREAT_ARRIVAL_TIMING at load time and overrides CAST_POINT_THREATS[mod].cp_default = entry.cast_point for the 3 overlap entries. Future cast_point edits in THREAT_ARRIVAL_TIMING propagate to the arming fallback without touching two tables. Zero Lina-side change (banner bump only). **Scope**: CAST_POINT_THREATS entries with no catalog counterpart (Doom, Tinker Laser, AA Ice Blast, OD Sanity Eclipse, Zeus Thundergods Wrath, Sand King Epicenter) keep their existing literals; THREAT_ARRIVAL_TIMING covers only the 7 entries Phase 2 seeded. **Closes Phase 3** of the Option C roadmap: catalog DATA + per-hero COMPUTE for precise W timing fully wired across W gate (v0.5.55.2) + cast-point arming fallback (v0.5.56). **Files**: lib/threat_data.lua +13 lines. Lina.lua unchanged. luac clean both, no BOM Lina, lesson 15 verified. **Verification on next demo**: cast_point_threat_armed cp values for Lion Finger / Lina Laguna / Sniper Assassinate identical to v0.5.55.2 (live API still wins). To stress-test the fallback, cast from a slot the API cannot read; cp should match THREAT_ARRIVAL_TIMING entry (0.6 / 0.45 / 2.0). Other arming mods unchanged.")
+LOG:info("Lina brain v0.5.57: Phase 5 slice 1, Pike self-cast now picks a safe direction. User: 'Lets upgrade our EUL and WW usage, path lina position to security, same logic should be used on pike. Sniper have a module that pushes him while using pike or grenade'. **The problem**: SAVE_FIRE.item_hurricane_pike self-cast branch fired in Lina's CURRENT facing. If Lina was attacking the threat she was supposed to escape, the 600u push moved her TOWARD it. **The fix**: Phase 5 slice 1 extracts Sniper's safe-push module to lib/escape.lua (3 helpers: DangerAtPos / SafePushDestination / PickDir, all hero-agnostic, take `me` explicitly) and wires Lina's Pike self-cast through it. **Two-phase harness mirrors Sniper.lua:5877**: phase 1 (.fire body) computes toward from caster (or hero centroid fallback when caster unknown), calls Escape.PickDir(me, me_pos, toward, 600, threat_caster) for a danger-aware 7-angle pick. If facing within 30deg of away_pt fires Pike immediately. Else issues MOVE_TO_POSITION away_pt to rotate and arms state.pending_pike_self. Phase 2 (state.pending_pike_self_tick, new) re-measures angle each frame, fires Pike when aligned. 0.7s timeout drops the pending without re-saving the threat this encounter (same trade-off Sniper accepts). **Force Staff + EUL + WW are not yet wired** (queued for Phase 5 slices 2-3): Force = direct mirror of Pike harness (also 600u along facing), EUL/WW need a different move-then-cast shape (2.5s airborne, not a push). **Sniper side**: zero behaviour change. The three helpers in Sniper became thin delegates that pass state.self_npc as the new `me` arg the lib functions take explicitly; call sites unchanged. Sniper bumped to v6.15.278. **Files**: lib/escape.lua +175 lines new file. Lina.lua +120 lines (.fire body rewrite + new tick function + tick wiring + state declaration + require). Sniper.lua: +1 require, -135 net (3 helper bodies replaced by 1-line delegates). lib/threat_data.lua + lib/defense.lua unchanged from v0.5.56. **Verification on next demo**: Bara charge then Pike enemy-target primary path unchanged (Pike-on-Bara pushes both apart radially). When enemy-target is unavailable (Bara magic-immune, or out of 425u), self-cast branch emits pike_self_turnaway tlog (angle / caster), Lina turns to face the danger-aware destination, then pike_self_fired tlog phase=turned. If already facing safe direction at fire moment: pike_self_fired phase=immediate (no turn). pike_self_turnaway_timeout if rotation incomplete within 0.7s. Heroes other than Bara that route to Pike (drains, gap-closers) get the same treatment.")
 
 return callbacks

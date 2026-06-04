@@ -1595,31 +1595,48 @@ local SAVE_FIRE = {
             local pos
             local caster = threat_caster or state.cur_armed_caster
             local aim_via
+            local d_now_dbg, d_at_det_dbg, eff_speed_dbg
             if state.compute_arrival_time and threat_mod and caster then
-                local _, impact_pos, cat_entry =
+                local _, impact_pos, cat_entry, eff_speed =
                     state.compute_arrival_time(threat_mod, caster, me)
                 if impact_pos then
                     pos     = impact_pos
                     aim_via = (cat_entry and cat_entry.impact_pos == "caster")
                               and "catalog_caster" or "catalog_self"
-                    -- v0.5.50.4: smart aim offset for homing_charge per
-                    -- user spec ("save on self limits our error to the
-                    -- radius of the circle instead the diameter").
-                    -- Aim-at-self centers AoE on Lina, so the catch zone
-                    -- along the caster's approach line is only the AoE
-                    -- RADIUS (225u). Offsetting aim 225u TOWARD the
-                    -- caster shifts AoE so the catch zone is the AoE
-                    -- DIAMETER (450u: from Lina at one edge to 450u
-                    -- toward the caster's start at the other). For Bara
-                    -- (hit-and-stop): Bara at Lina at impact is at the
-                    -- near AoE edge, Bara en-route up to 450u out is
-                    -- still inside. Bara visually stunned away from
-                    -- Lina (along his approach), not at Lina's feet.
-                    -- Only apply for homing_charge (Bara). Tusk carry
-                    -- + others keep aim-at-self because the snowball
-                    -- carries Lina past her cast position and the
-                    -- offset math doesn't help.
+                    -- v0.5.50.6: predict-aim for homing_charge per user
+                    -- spec ("smart aim means it is doing a smart job on
+                    -- looking for the right placment of the aim that
+                    -- stop bara"). v0.5.50.4 used a FIXED 225u offset
+                    -- toward the caster; v0.5.50.5 fixed the Vector
+                    -- type but the offset stayed static. At impact_t
+                    -- = W_LEAD = 1.12 (window lower) Bara is AT Lina
+                    -- at detonation -> 225u from aim point -> AT THE
+                    -- AoE edge. Edge catches lose to engine epsilon /
+                    -- Bara's collision radius / sampling lag; symptom
+                    -- "Bara still hits Lina" at v0.5.50.5.
+                    -- Truly smart aim: predict Bara's position at W
+                    -- detonation, aim THERE so Bara is dead-center in
+                    -- the AoE regardless of where in the window we
+                    -- fire. Formula:
+                    --   d_at_det = max(0, d_now - eff_speed * W_LEAD)
+                    --   aim      = lina_pos + unit(lina->bara) * d_at_det
+                    -- eff_speed is the AVG speed during W prep (the
+                    -- v0.5.50 ramp model's avg_during_prep), so the
+                    -- prediction is self-consistent with the gate's
+                    -- impact_t calculation. max(0, ...) caps the predict
+                    -- at Lina because homing_charge stops at target
+                    -- (Bara doesn't over-travel past Lina). Range of
+                    -- aim across the [1.12, 1.22] fire window:
+                    --   impact_t = 1.12 -> d_at_det = 0      -> aim at Lina
+                    --   impact_t = 1.22 -> d_at_det = 0.10*s -> aim at
+                    --                      ~63u toward Bara (speed=630)
+                    -- In every case Bara is at the AoE center at
+                    -- detonation. Only homing_charge for now; other
+                    -- kinds keep their existing aim until they need
+                    -- the same treatment (Tusk snowball carries Lina,
+                    -- needs different predict; WD channel stationary).
                     if cat_entry and cat_entry.kind == "homing_charge"
+                       and eff_speed and eff_speed > 0
                        and Entity.IsEntity(caster)
                        and Entity.GetAbsOrigin then
                         local cur_pos  = Entity.GetAbsOrigin(caster)
@@ -1627,29 +1644,22 @@ local SAVE_FIRE = {
                         if cur_pos and lina_pos then
                             local dx = (cur_pos.x or 0) - (lina_pos.x or 0)
                             local dy = (cur_pos.y or 0) - (lina_pos.y or 0)
-                            local dist = math.sqrt(dx * dx + dy * dy)
-                            if dist > 0 then
-                                local W_AOE_RADIUS = 225
-                                local unit_x = dx / dist
-                                local unit_y = dy / dist
-                                -- v0.5.50.5: was a plain Lua table {x,y,z}
-                                -- which issue_cast_position passes to the
-                                -- Action.CastPosition layer; that layer
-                                -- requires a Vector userdata, not a table.
-                                -- The table fell through as nil/invalid
-                                -- position, the cast was dropped, and Lina
-                                -- visibly defaulted to kite/move (user
-                                -- "walking in a random direction"). Use
-                                -- the same Vector(x,y,z) constructor that
-                                -- Sniper.lua + lib/geometry.lua use
-                                -- (e.g. Sniper.lua:5926, lib/geometry.lua
-                                -- L89/L166). Same arithmetic, correct type.
+                            local d_now = math.sqrt(dx * dx + dy * dy)
+                            if d_now > 0 then
+                                local W_LEAD = 1.12
+                                local bara_travel = eff_speed * W_LEAD
+                                local d_at_det = math.max(0, d_now - bara_travel)
+                                local unit_x = dx / d_now
+                                local unit_y = dy / d_now
                                 pos = Vector(
-                                    (lina_pos.x or 0) + unit_x * W_AOE_RADIUS,
-                                    (lina_pos.y or 0) + unit_y * W_AOE_RADIUS,
+                                    (lina_pos.x or 0) + unit_x * d_at_det,
+                                    (lina_pos.y or 0) + unit_y * d_at_det,
                                     lina_pos.z or 0
                                 )
-                                aim_via = "catalog_self_offset"
+                                aim_via      = "catalog_predict"
+                                d_now_dbg    = d_now
+                                d_at_det_dbg = d_at_det
+                                eff_speed_dbg = eff_speed
                             end
                         end
                     end
@@ -1676,6 +1686,16 @@ local SAVE_FIRE = {
                 w_cost = string.format("%.0f", w_cost),
                 aim    = aim_via,
                 mod    = tostring(threat_mod or "-"),
+                -- v0.5.50.6 predict-aim debug: present only when the
+                -- catalog_predict branch ran (homing_charge + ramped
+                -- speed). Lets the demo log verify the math:
+                --   d_now  = current Bara distance from Lina
+                --   d_det  = predicted Bara distance at W detonation
+                --   speed  = avg-during-prep speed (ramp model)
+                -- and aim_via=catalog_predict confirms the branch.
+                d_now  = d_now_dbg    and string.format("%.0f", d_now_dbg)    or nil,
+                d_det  = d_at_det_dbg and string.format("%.0f", d_at_det_dbg) or nil,
+                speed  = eff_speed_dbg and string.format("%.0f", eff_speed_dbg) or nil,
             })
             return issue_cast_position(intent, w, pos, "def")
         end,
@@ -8317,6 +8337,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.50.5 Vector cast position hotfix for catalog_self_offset. User: 'Bara is working terrible now, lina is walking in a random direction. This have no line of logic, the smart aim should be able to fire W on the direction bara is approaching in the right time'. **Root cause**: v0.5.50.4 catalog_self_offset block built pos as a plain Lua table {x=, y=, z=} instead of a Vector userdata. issue_cast_position passes pos as the position field of the UO.DOTA_UNIT_ORDER_CAST_POSITION order; the Action.CastPosition layer requires Vector userdata (Sniper.lua + lib/geometry.lua use Vector(x,y,z) pervasively for ground-targeted positions). The Lua table was rejected or coerced to nil/origin: W cast silently dropped, Lina fell through to default kite/move behavior, 'walks in a random direction' symptom. **Fix**: replace the table literal with Vector(...) constructor matching Sniper.lua:5926 and lib/geometry.lua L89/L166 pattern. Arithmetic unchanged (lina_pos + unit_vec * 225). Same offset, correct type. **Scope**: only the homing_charge smart-aim branch added in v0.5.50.4. Other aim paths (catalog_self, catalog_caster, caster_origin, self_origin) returned Entity.GetAbsOrigin(handle) directly which is already Vector userdata and were never affected. **Lina.lua 8308 -> 8320 lines (+12). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara w_defensive_fire aim=catalog_self_offset; Lina actually casts W (not kite); W AoE visibly detonates 225u toward Bara from Lina; Bara stunned along his approach line as v0.5.50.4 geometry intended.")
+LOG:info("Lina brain v0.5.50.6 predict-aim for homing_charge (was fixed 225u offset). User: 'We are still being hit by bara. Check if smart aim is doing the correctly positioning of W, it can go from 0 to max range. Smart aim means it is doing a smart job on looking for the right placment of the aim that stop bara'. **The miss**: v0.5.50.4 placed aim 225u from Lina toward Bara (a fixed offset, claimed 'diameter coverage'). v0.5.50.5 fixed the Vector type but kept the static 225u. At gate window lower (impact_t = W_LEAD = 1.12) Bara is AT Lina (d=0 from Lina) at W detonation, so distance from Bara to aim point = 225u = AT THE 225u AoE EDGE. Edge catches lose to engine epsilon + Bara's hit collision + position sampling lag. Symptom: 'Bara still hits Lina' at v0.5.50.5. **Smart aim**: predict Bara's position at W detonation, aim THERE so Bara is dead-center in the AoE regardless of where in the [1.12, 1.22] window we fire. **Math**: d_at_det = max(0, d_now - eff_speed * W_LEAD); aim = lina_pos + unit(lina to bara) * d_at_det. eff_speed = avg-during-prep from the v0.5.50 ramp model (same value compute_arrival_time uses for impact_t) so the prediction is self-consistent with the gate. max(0, ...) caps at Lina because homing_charge stops at target (Bara never over-travels past Lina). **Aim range across fire window** (speed=630): impact_t=1.12 -> d_at_det=0 -> aim AT Lina; impact_t=1.17 -> d_at_det=32u -> aim 32u toward Bara; impact_t=1.22 -> d_at_det=63u -> aim 63u toward Bara. Bara dead-center in 225r AoE in every case (worst case Bara is 0u from aim center; AoE radius 225 gives 225u safety margin). **For slow Bara** (speed=437): impact_t=1.22 -> d_at_det=44u. **For fast Bara** (speed=1000): impact_t=1.22 -> d_at_det=100u. **Scope**: only homing_charge (Bara). Other kinds (Tusk homing_carry, WD channel_at_caster, Lion cast_point_targeted) unchanged. Tusk needs its own predict (snowball CARRIES Lina) -- queued for v0.5.51. **New tlog fields** on w_defensive_fire when catalog_predict branch runs: d_now (current Bara distance), d_det (predicted Bara distance at detonation), speed (eff_speed used). aim_via renamed catalog_self_offset -> catalog_predict to reflect the new behavior. **Lina.lua 8320 -> 8340 lines (+20). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara w_defensive_fire aim=catalog_predict; d_det in [0, ~70u]; speed = ramp avg (e.g. 700 ish for live=634 lvl 4 Bara); Bara visually stunned WITH AoE centered on his predicted impact point, not at Lina, not at 225u far. No edge cases at impact_t=1.12 (aim collapses to Lina position when Bara would arrive on detonation).")
 
 return callbacks

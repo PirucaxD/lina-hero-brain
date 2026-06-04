@@ -1283,22 +1283,38 @@ local SAVE_FIRE = {
         -- v0.5.16 Group 4 guard + v0.5.20 instrumentation: log every closure
         -- invocation regardless of guard/fire outcome so we can correlate
         -- user-observed in-game saves against actual brain dispatch.
-        fire  = function(intent)
+        -- v0.5.60 Phase 5 slice 3: cast in place (WW lifts Lina airborne
+        -- 3s untargetable), then queue a post-airborne MOVE_TO_POSITION to
+        -- a danger-aware landing via state.queue_safe_post_move. When Lina
+        -- lands she walks 600u toward safety automatically. User spec: "We
+        -- can move after cast eul and WW on self."
+        fire  = function(intent, threat_caster)
             local guarded = NPC.HasModifier(state.self_npc, "modifier_wind_waker")
             tlog(1, "save_fire_invoked", { item = "item_wind_waker", intent = tostring(intent),
                 guarded = guarded and "y" or "n" })
             if guarded then return false end
-            return issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_wind_waker"))
+            local ok = issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_wind_waker"))
+            if ok then
+                state.queue_safe_post_move("ww", 600, threat_caster)
+            end
+            return ok
         end,
     },
     item_cyclone      = {
         short = "eul",
-        fire  = function(intent)
+        -- v0.5.60 Phase 5 slice 3: cast in place (EUL lifts Lina airborne
+        -- 2.5s untargetable), then queue a post-airborne MOVE_TO_POSITION
+        -- via state.queue_safe_post_move. Same shape as WW.
+        fire  = function(intent, threat_caster)
             local guarded = NPC.HasModifier(state.self_npc, "modifier_eul_cyclone")
             tlog(1, "save_fire_invoked", { item = "item_cyclone", intent = tostring(intent),
                 guarded = guarded and "y" or "n" })
             if guarded then return false end
-            return issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_cyclone"))
+            local ok = issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_cyclone"))
+            if ok then
+                state.queue_safe_post_move("eul", 600, threat_caster)
+            end
+            return ok
         end,
     },
     -- v0.5.2 C: HP gate on chain-walked Lotus. DEMO 3 showed 5x Lotus fires in
@@ -1853,28 +1869,24 @@ state.pike_prime_tick = function()
     end
 end
 
--- v0.5.58 Phase 5 slice 2: shared self-push harness. Both Pike (600u) and
--- Force Staff (600u) push along Lina's CURRENT facing, so the
--- rotate-then-fire pattern is identical. This helper picks a danger-aware
--- destination via Escape.PickDir, fires immediately if facing is within
--- 30deg of the desired away point, else issues MOVE_TO_POSITION and arms
--- state.pending_self_push (consumed below by state.pending_self_push_tick).
--- Returns truthy when an action issued (immediate cast OR turn-then-arm);
--- false when no destination found (caller falls through to next save in
--- the chain). Pike's first-cast-drop pike_reissue stamp is the only
--- item-specific behaviour gated inside.
-state.try_self_push = function(intent, item, item_name, push_dist, threat_caster)
+-- v0.5.60 Phase 5 slice 3: shared "where should the defender go" helper.
+-- Derives a `toward` direction (caster preferred, hero centroid in 1500u
+-- fallback) and runs Escape.PickDir for a danger-aware 7-angle pick.
+-- Returns (escape_dir, landing) on success, (nil, nil) when no viable
+-- destination exists (caller falls through). Used by state.try_self_push
+-- (Pike + Force turn-then-push) and by SAVE_FIRE.item_cyclone /
+-- item_wind_waker .fire bodies (cast + queued post-airborne move).
+state.compute_safe_dest = function(threat_caster, push_dist)
     local me = state.self_npc
     local me_pos = me and Entity.GetAbsOrigin(me)
-    if not (me and me_pos and item) then return false end
-    -- toward direction: caster preferred, hero centroid in 1500u fallback.
+    if not (me and me_pos and push_dist) then return nil, nil end
     local toward
     local cp = threat_caster and Entity.IsEntity(threat_caster)
                and Target.IsAlive(threat_caster)
                and Entity.GetAbsOrigin(threat_caster) or nil
     if cp then
         local diff = cp - me_pos
-        if diff:Length2DSqr() < 1 then return false end
+        if diff:Length2DSqr() < 1 then return nil, nil end
         toward = diff:Normalized()
     else
         local enemies = Heroes.InRadius(me_pos, 1500, Entity.GetTeamNum(me),
@@ -1893,9 +1905,31 @@ state.try_self_push = function(intent, item, item_name, push_dist, threat_caster
             end
         end
     end
-    if not toward then return false end
+    if not toward then return nil, nil end
     local escape_dir = Escape.PickDir(me, me_pos, toward, push_dist, threat_caster)
+    if not escape_dir then return nil, nil end
+    local landing = me_pos + escape_dir * push_dist
+    return escape_dir, landing
+end
+
+-- v0.5.58 Phase 5 slice 2: shared self-push harness. Both Pike (600u) and
+-- Force Staff (600u) push along Lina's CURRENT facing, so the
+-- rotate-then-fire pattern is identical. v0.5.60: factored the
+-- destination-pick into state.compute_safe_dest so EUL / WW can share it.
+-- This helper still owns the turn-or-fire-now decision + the
+-- state.pending_self_push arm. Returns truthy when an action issued
+-- (immediate cast OR turn-then-arm); false when no destination found
+-- (caller falls through to next save in the chain). Pike's first-cast-drop
+-- pike_reissue stamp is the only item-specific behaviour gated inside.
+state.try_self_push = function(intent, item, item_name, push_dist, threat_caster)
+    local me = state.self_npc
+    local me_pos = me and Entity.GetAbsOrigin(me)
+    if not (me and me_pos and item) then return false end
+    local escape_dir, _ = state.compute_safe_dest(threat_caster, push_dist)
     if not escape_dir then return false end
+    -- away_pt is 400u along escape_dir, used both as the rotation target and
+    -- as the alignment-check reference. Not the full push_dist because the
+    -- 30deg gate is about facing direction, not landing distance.
     local away_pt = Vector(me_pos.x + escape_dir.x * 400,
                            me_pos.y + escape_dir.y * 400, me_pos.z)
     -- NPC.FindRotationAngle returns RADIANS; math.deg before the 30deg gate
@@ -1936,6 +1970,36 @@ state.try_self_push = function(intent, item, item_name, push_dist, threat_caster
         caster = threat_caster and uname(threat_caster) or "centroid",
     })
     return moved
+end
+
+-- v0.5.60 Phase 5 slice 3: post-airborne move helper for EUL / WW. Issues a
+-- QUEUED MOVE_TO_POSITION order toward a danger-aware landing computed via
+-- state.compute_safe_dest. The queue=true flag tells the engine to run the
+-- order after current actions complete; since Lina is airborne (untargetable
+-- for 2.5s / 3s) for the duration of the lift, the move starts the moment
+-- she lands. push_dist=600 matches Pike/Force; tunable per-item if a future
+-- slice wants tighter / looser displacement after airborne.
+-- Returns true if a queued move was issued, false if no safe destination
+-- was found (in which case Lina just lands in place after airborne, the
+-- save still served its purpose by surviving the threat).
+state.queue_safe_post_move = function(intent, push_dist, threat_caster)
+    local me = state.self_npc
+    if not me then return false end
+    local _, landing = state.compute_safe_dest(threat_caster, push_dist)
+    if not landing then return false end
+    safe_issue {
+        hero = HERO_KEY, layer = "def",
+        intent = intent .. "_post_move",
+        order_type = UO.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
+        unit = me, position = landing,
+        queue = true,
+    }
+    tlog(1, intent .. "_post_move", {
+        x = string.format("%.0f", landing.x),
+        y = string.format("%.0f", landing.y),
+        caster = threat_caster and uname(threat_caster) or "centroid",
+    })
+    return true
 end
 
 -- v0.5.58 Phase 5 slice 2: generalized from v0.5.57's pending_pike_self_tick.
@@ -8643,6 +8707,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.59 (log-hygiene): harvest skips LINA_DEFER_TO_ARMED. User: 'Add it' on the v0.5.58 demo finding. **The noise**: handle_unrecognized_harvest emitted threat_unrecognized | mod=modifier_spirit_breaker_charge_of_darkness_vision on every Bara charge in the v0.5.58 demo log, even though LINA_DEFER_TO_ARMED at Lina.lua:1114 already maps that modifier to the bara_charge armed entry. The harvest's exclusion list was THREATS_ON_SELF + LINA_EXTRA_THREATS only; LINA_DEFER_TO_ARMED was missing. **The fix**: one-line addition to handle_unrecognized_harvest, also skips LINA_DEFER_TO_ARMED[mod_name]. Silences the vision modifier today and any future DEFER_TO_ARMED additions (modifier_tusk_snowball_target, modifier_phantom_assassin_phantom_strike_target are also in DEFER_TO_ARMED but did not happen to trigger in the v0.5.58 demo). **Behaviour change**: log noise only. Save dispatch unaffected; the LINA_DEFER_TO_ARMED check in handle_threat_on_self is at a different site and still fires. **Files**: Lina.lua only (+8 lines comment + 1 condition). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.58. **Verification on next demo**: zero threat_unrecognized lines for the 3 DEFER_TO_ARMED modifiers. Real unrecognized threats (genuine gaps in the catalog) still log as before.")
+LOG:info("Lina brain v0.5.60: Phase 5 slice 3, EUL and WW queue a post-airborne move to safety. User: 'We can move after cast eul and WW on self. Go on'. **The shape**: EUL (item_cyclone) lifts Lina airborne 2.5s untargetable; WW (item_wind_waker) lifts 3s. Both land Lina at her cast position when airborne ends. v0.5.59 .fire bodies cast in place and called it done; v0.5.60 chains a queued MOVE_TO_POSITION order so when Lina lands she walks 600u toward a danger-aware destination automatically. The queue=true flag on Order.Issue tells the engine to run the move after the airborne action completes. **Refactor**: lifted the toward+Escape.PickDir+landing computation out of state.try_self_push into state.compute_safe_dest(threat_caster, push_dist). Now used by 3 callers: state.try_self_push (Pike/Force turn-then-push), state.queue_safe_post_move (new helper for EUL/WW post-airborne move), and indirectly when push_dist matches. **New helper**: state.queue_safe_post_move(intent, push_dist, threat_caster) issues a queued MOVE_TO_POSITION to compute_safe_dest's landing. Returns true if a queued move issued, false if no safe destination (in which case Lina just lands in place after airborne; the save still served its purpose by surviving the threat). **Wired into**: SAVE_FIRE.item_wind_waker.fire and SAVE_FIRE.item_cyclone.fire. Both gained a threat_caster param (dispatcher already passes it). Cast happens first as before; post-move queues only on successful cast. Behaviour preserved when no safe dest found: same in-place landing as v0.5.59. **New tlogs**: eul_post_move x=... y=... caster=..., ww_post_move x=... y=... caster=.... save_fire_invoked unchanged. **Phase 5 complete**: Pike (slice 1 v0.5.57) + Force (slice 2 v0.5.58) use turn-then-push via state.try_self_push; EUL + WW (slice 3 v0.5.60) use cast-then-queued-move via state.queue_safe_post_move. Both helpers share state.compute_safe_dest. **Files**: Lina.lua only (+45 lines net: helper extract + new helper + EUL/WW wires). lib/escape.lua + lib/threat_data.lua + lib/defense.lua + Sniper.lua unchanged from v0.5.58 / v6.15.278. **Verification on next demo**: EUL or WW threat (drain, late-game gap-close, mass disable etc.) triggers the save. Post-cast brain emits eul_post_move or ww_post_move with landing coords + caster. After airborne ends, Lina walks toward the landing without further player input. If no safe spot exists (terrain blocked, all 7 angles dangerous): no _post_move tlog, Lina lands in place same as before.")
 
 return callbacks

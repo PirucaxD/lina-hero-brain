@@ -22,6 +22,18 @@
 ---    math is in the callers' turn-then-fire harness.
 ---  - First cast of a freshly-acquired item silently dropped. Also
 ---    a caller concern (Sniper's pike_prime + Lina's pike_reissue).
+---
+---v0.5.61 fix: require lib/target here. The original v0.5.57 extraction
+---left Target as a global ref expecting it to be available in the lib's
+---scope, but lib modules do not inherit the hero script's upvalues.
+---Latent bug bit EUL on first self-cast (v0.5.60 demo log L2712:
+---'attempt to index a nil value (global Target)' inside
+---Escape.SafePushDestination). The Pike / Force code path would have
+---crashed identically; v0.5.58 demo never triggered Pike's self-cast
+---branch (all Pike fires went enemy-target via the unchanged primary
+---branch) so it stayed latent.
+
+local Target = require("lib.target")
 
 local Escape = {}
 

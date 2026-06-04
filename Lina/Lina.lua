@@ -1595,74 +1595,28 @@ local SAVE_FIRE = {
             local pos
             local caster = threat_caster or state.cur_armed_caster
             local aim_via
-            local d_now_dbg, d_at_det_dbg, eff_speed_dbg
+            -- v0.5.50.7 (option B): smart-aim is gone. With the window
+            -- math now including turn time AND a geometric upper of
+            -- W_PREP + W_AOE_RADIUS/speed, the catalog impact_pos
+            -- (Lina's origin for homing_charge / homing_carry) is
+            -- guaranteed to contain the caster at AoE detonation:
+            --   impact_t = lower -> caster AT Lina (catch dead-center).
+            --   impact_t = upper -> caster 225u from Lina along the
+            --                        approach axis (catch at AoE edge).
+            -- The v0.5.50.4-6 geometric tricks (fixed 225u offset, then
+            -- predict-aim, then Vector type fix) were all trying to
+            -- compensate for a tight 0.10s window that didn't account
+            -- for turn time. Now that compute_w_fire_window receives
+            -- turn_s and uses the geometric upper, plain aim = Lina
+            -- origin (catalog_self) catches every in-window fire. See
+            -- the v0.5.50.7 banner for the full derivation.
             if state.compute_arrival_time and threat_mod and caster then
-                local _, impact_pos, cat_entry, eff_speed =
+                local _, impact_pos, cat_entry =
                     state.compute_arrival_time(threat_mod, caster, me)
                 if impact_pos then
                     pos     = impact_pos
                     aim_via = (cat_entry and cat_entry.impact_pos == "caster")
                               and "catalog_caster" or "catalog_self"
-                    -- v0.5.50.6: predict-aim for homing_charge per user
-                    -- spec ("smart aim means it is doing a smart job on
-                    -- looking for the right placment of the aim that
-                    -- stop bara"). v0.5.50.4 used a FIXED 225u offset
-                    -- toward the caster; v0.5.50.5 fixed the Vector
-                    -- type but the offset stayed static. At impact_t
-                    -- = W_LEAD = 1.12 (window lower) Bara is AT Lina
-                    -- at detonation -> 225u from aim point -> AT THE
-                    -- AoE edge. Edge catches lose to engine epsilon /
-                    -- Bara's collision radius / sampling lag; symptom
-                    -- "Bara still hits Lina" at v0.5.50.5.
-                    -- Truly smart aim: predict Bara's position at W
-                    -- detonation, aim THERE so Bara is dead-center in
-                    -- the AoE regardless of where in the window we
-                    -- fire. Formula:
-                    --   d_at_det = max(0, d_now - eff_speed * W_LEAD)
-                    --   aim      = lina_pos + unit(lina->bara) * d_at_det
-                    -- eff_speed is the AVG speed during W prep (the
-                    -- v0.5.50 ramp model's avg_during_prep), so the
-                    -- prediction is self-consistent with the gate's
-                    -- impact_t calculation. max(0, ...) caps the predict
-                    -- at Lina because homing_charge stops at target
-                    -- (Bara doesn't over-travel past Lina). Range of
-                    -- aim across the [1.12, 1.22] fire window:
-                    --   impact_t = 1.12 -> d_at_det = 0      -> aim at Lina
-                    --   impact_t = 1.22 -> d_at_det = 0.10*s -> aim at
-                    --                      ~63u toward Bara (speed=630)
-                    -- In every case Bara is at the AoE center at
-                    -- detonation. Only homing_charge for now; other
-                    -- kinds keep their existing aim until they need
-                    -- the same treatment (Tusk snowball carries Lina,
-                    -- needs different predict; WD channel stationary).
-                    if cat_entry and cat_entry.kind == "homing_charge"
-                       and eff_speed and eff_speed > 0
-                       and Entity.IsEntity(caster)
-                       and Entity.GetAbsOrigin then
-                        local cur_pos  = Entity.GetAbsOrigin(caster)
-                        local lina_pos = Entity.GetAbsOrigin(me)
-                        if cur_pos and lina_pos then
-                            local dx = (cur_pos.x or 0) - (lina_pos.x or 0)
-                            local dy = (cur_pos.y or 0) - (lina_pos.y or 0)
-                            local d_now = math.sqrt(dx * dx + dy * dy)
-                            if d_now > 0 then
-                                local W_LEAD = 1.12
-                                local bara_travel = eff_speed * W_LEAD
-                                local d_at_det = math.max(0, d_now - bara_travel)
-                                local unit_x = dx / d_now
-                                local unit_y = dy / d_now
-                                pos = Vector(
-                                    (lina_pos.x or 0) + unit_x * d_at_det,
-                                    (lina_pos.y or 0) + unit_y * d_at_det,
-                                    lina_pos.z or 0
-                                )
-                                aim_via      = "catalog_predict"
-                                d_now_dbg    = d_now
-                                d_at_det_dbg = d_at_det
-                                eff_speed_dbg = eff_speed
-                            end
-                        end
-                    end
                 end
             end
             -- v0.5.47.2 legacy fallback for mods not in catalog yet.
@@ -1686,16 +1640,6 @@ local SAVE_FIRE = {
                 w_cost = string.format("%.0f", w_cost),
                 aim    = aim_via,
                 mod    = tostring(threat_mod or "-"),
-                -- v0.5.50.6 predict-aim debug: present only when the
-                -- catalog_predict branch ran (homing_charge + ramped
-                -- speed). Lets the demo log verify the math:
-                --   d_now  = current Bara distance from Lina
-                --   d_det  = predicted Bara distance at W detonation
-                --   speed  = avg-during-prep speed (ramp model)
-                -- and aim_via=catalog_predict confirms the branch.
-                d_now  = d_now_dbg    and string.format("%.0f", d_now_dbg)    or nil,
-                d_det  = d_at_det_dbg and string.format("%.0f", d_at_det_dbg) or nil,
-                speed  = eff_speed_dbg and string.format("%.0f", eff_speed_dbg) or nil,
             })
             return issue_cast_position(intent, w, pos, "def")
         end,
@@ -2546,9 +2490,34 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
                         -- Lua multi-return gotcha: `a and f() or x, y` does NOT
                         -- assign both returns from f() to both targets. Use
                         -- explicit if/else so the second return value lands in `upper`.
+                        --
+                        -- v0.5.50.7 (option B): compute Lina's turn cost to
+                        -- face the cast position and thread it through the
+                        -- window math. Sniper does the same for grenade
+                        -- (Sniper.lua:6343 lead_s = deg(angle)/400 +
+                        -- cast_pt + travel). Without this, a 180-deg-back
+                        -- Lina starts the cast point ~0.45s after the gate
+                        -- fires, the W detonates 1.57s post-fire instead
+                        -- of 1.12s, and any in-window fire turns into "W
+                        -- detonates AFTER caster arrival" -> charge stun
+                        -- on Lina lands first. The 400 deg/sec turn-rate
+                        -- approximation matches Sniper's; 180 deg = 0.45s
+                        -- which is conservative for most Dota heroes
+                        -- (turn_rate=0.5 default, ~0.5s for 180).
+                        local turn_s = 0
+                        if entry.caster and Entity.IsEntity(entry.caster)
+                           and Entity.GetAbsOrigin and NPC.FindRotationAngle then
+                            local cpos = Entity.GetAbsOrigin(entry.caster)
+                            if cpos then
+                                local ok, ang = pcall(NPC.FindRotationAngle, state.self_npc, cpos)
+                                if ok and type(ang) == "number" then
+                                    turn_s = math.deg(math.abs(ang)) / 400
+                                end
+                            end
+                        end
                         local lower, upper
                         if state.compute_w_fire_window then
-                            lower, upper = state.compute_w_fire_window(cat_entry, cat_speed)
+                            lower, upper = state.compute_w_fire_window(cat_entry, cat_speed, turn_s)
                         else
                             lower, upper = W_LEAD - 0.05, W_LEAD + 0.20
                         end
@@ -2567,6 +2536,12 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
                             -- the new ramp fields (live_with_ramp) or stale
                             -- cached pre-v0.5.50 values (live_or_fallback).
                             source    = tostring(cat_entry and cat_entry.speed_source or "-"),
+                            -- v0.5.50.7 diag: turn cost (seconds Lina spends
+                            -- rotating before the cast point begins). Demo
+                            -- log should show turn around 0 when Lina faces
+                            -- Bara at fire moment, up to 0.45 when she
+                            -- starts facing fully away.
+                            turn      = string.format("%.2f", turn_s),
                         })
                         if in_window then
                             entry._fire_dist_eff   = -3  -- sentinel: catalog path
@@ -3790,39 +3765,59 @@ end
 --   channel_at_caster / cast_point_targeted (WD, Lion; stationary
 --   caster; fire-timing handled by other paths):
 --     window = [0, infty] (always passes; aim still applies).
-state.compute_w_fire_window = function(entry, speed)
-    -- v0.5.50.3: tighten upper to W_LEAD + 0.10 for all homing kinds.
-    -- v0.5.49.1's W_LEAD + 225/speed allowed fires up to the AoE boundary
-    -- which left the caster 100-200u from Lina at W detonation (still
-    -- inside the 225r AoE but far from actual impact). v0.5.50.2 demo
-    -- log Bara fire at d=910 speed=630 impact_t=1.44 in_window=y upper
-    -- =1.48 -> Bara at (1.44-1.12)*630 = 204u from Lina at W detonation.
-    -- User: "Still firing earlier check the log".
+state.compute_w_fire_window = function(entry, speed, turn_s)
+    -- v0.5.50.7 (option B): add turn_s, restore geometric upper.
+    -- The math:
+    --   W_PREP = turn_s + W_LEAD  is the real time from issuing the
+    --     cast order to AoE detonation (Lina rotates to face the cast
+    --     position, THEN starts the 0.6s cast point + 0.5s delay +
+    --     0.02s anim = W_LEAD). Sniper's grenade timing uses the same
+    --     turn-cost decomposition (Sniper.lua:6343 lead_s = turn +
+    --     cast_pt + travel).
+    --   lower = W_PREP : W detonates AT or BEFORE caster arrival.
+    --     Equivalently: caster arrival time >= W_PREP so Lina's cast
+    --     point completes before the caster's charge stun interrupts
+    --     it. This is the "stun before impact" floor from v0.5.49.1
+    --     extended with the turn cost. Without turn_s, a 180-deg-back
+    --     Lina starts cast point ~0.45s late and the W is fired into
+    --     a window where caster arrival precedes detonation -> charge
+    --     stun on Lina lands first (the v0.5.50.x miss-mode).
+    --   upper = W_PREP + W_AOE_RADIUS/speed (geometric): at this upper
+    --     bound, caster at detonation is exactly (impact_t - W_PREP)
+    --     * speed = W_AOE_RADIUS = 225u from Lina, AT the AoE edge.
+    --     Aim = Lina origin catches the caster anywhere in the window.
+    --     v0.5.50.3 tightened this to a fixed 0.10s for visual reasons
+    --     (caster closer to Lina at stun); that's now obsolete -- with
+    --     aim-at-self the upper is purely a geometric catch bound, and
+    --     the wider window gives more frames for the gate to trigger
+    --     (the v0.5.50.3 ~6-frame window left no slack for speed-model
+    --     drift). User spec from v0.5.50.6 discussion: "lets revise
+    --     all the math and calculus methodology we are using".
     --
-    -- Tight 0.10s band: W detonates within 0 to 0.10s of caster arrival.
-    -- For speed=630: caster at 0.10*630 = 63u from Lina at detonation
-    -- (well inside 225 AoE, close to impact point). For Tusk speed=1675:
-    -- caster at 168u (still inside 225 AoE). At 60Hz, impact_t drops
-    -- ~0.017s per frame -> ~6 frames available in the 0.10s window for
-    -- the gate to fire. If somehow missed, no W fire (chain continues);
-    -- preferred behavior over a too-early stun.
-    --
-    -- The math for "stun BEFORE impact":
-    --   impact_t >  W_LEAD : W detonates BEFORE arrival; caster in
-    --                        transit (impact_t - W_LEAD)*speed from Lina.
-    --                        Catch iff distance <= W_AOE_RADIUS=225.
-    --   impact_t == W_LEAD : perfect timing.
-    --   impact_t <  W_LEAD : late stun. SKIP.
-    if not entry then return 1.12, 1.22 end
-    local W_LEAD       = 1.12
-    local UPPER_MARGIN = 0.10
+    -- Other kinds:
+    --   homing_carry (Tusk): same window (snowball-arrival math is the
+    --     same; Bara's deceleration/stop quirk doesn't apply but the
+    --     catch geometry is identical for aim-at-self).
+    --   channel_at_caster (WD) + cast_point_targeted (Lion): window
+    --     [0, inf] unchanged. These aim at the caster, not at self;
+    --     fire-timing handled by other paths (chain head + cast point).
+    turn_s = turn_s or 0
+    local W_LEAD = 1.12
+    local W_AOE_RADIUS = 225
+    local W_PREP = W_LEAD + turn_s
+    if not entry then return W_PREP, W_PREP + 0.20 end
     local k = entry.kind or ""
     if k == "channel_at_caster" or k == "cast_point_targeted" then
         return 0, math.huge
     end
-    -- Same window for homing_charge AND homing_carry: tight band above
-    -- W_LEAD. Both must detonate AT or BEFORE caster arrival.
-    return W_LEAD, W_LEAD + UPPER_MARGIN
+    if speed and speed > 0 then
+        return W_PREP, W_PREP + W_AOE_RADIUS / speed
+    end
+    -- Fallback when speed unknown (catalog mid-load, ramp model not yet
+    -- engaged): use a conservative 0.20s upper margin so the gate can
+    -- still fire on a sensible window instead of [W_PREP, W_PREP] (zero
+    -- width, never fires).
+    return W_PREP, W_PREP + 0.20
 end
 
 -- Q (Dragon Slave) is a traveling line wave (KV dragon_slave_speed = 1200 u/s,
@@ -8337,6 +8332,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.50.6 predict-aim for homing_charge (was fixed 225u offset). User: 'We are still being hit by bara. Check if smart aim is doing the correctly positioning of W, it can go from 0 to max range. Smart aim means it is doing a smart job on looking for the right placment of the aim that stop bara'. **The miss**: v0.5.50.4 placed aim 225u from Lina toward Bara (a fixed offset, claimed 'diameter coverage'). v0.5.50.5 fixed the Vector type but kept the static 225u. At gate window lower (impact_t = W_LEAD = 1.12) Bara is AT Lina (d=0 from Lina) at W detonation, so distance from Bara to aim point = 225u = AT THE 225u AoE EDGE. Edge catches lose to engine epsilon + Bara's hit collision + position sampling lag. Symptom: 'Bara still hits Lina' at v0.5.50.5. **Smart aim**: predict Bara's position at W detonation, aim THERE so Bara is dead-center in the AoE regardless of where in the [1.12, 1.22] window we fire. **Math**: d_at_det = max(0, d_now - eff_speed * W_LEAD); aim = lina_pos + unit(lina to bara) * d_at_det. eff_speed = avg-during-prep from the v0.5.50 ramp model (same value compute_arrival_time uses for impact_t) so the prediction is self-consistent with the gate. max(0, ...) caps at Lina because homing_charge stops at target (Bara never over-travels past Lina). **Aim range across fire window** (speed=630): impact_t=1.12 -> d_at_det=0 -> aim AT Lina; impact_t=1.17 -> d_at_det=32u -> aim 32u toward Bara; impact_t=1.22 -> d_at_det=63u -> aim 63u toward Bara. Bara dead-center in 225r AoE in every case (worst case Bara is 0u from aim center; AoE radius 225 gives 225u safety margin). **For slow Bara** (speed=437): impact_t=1.22 -> d_at_det=44u. **For fast Bara** (speed=1000): impact_t=1.22 -> d_at_det=100u. **Scope**: only homing_charge (Bara). Other kinds (Tusk homing_carry, WD channel_at_caster, Lion cast_point_targeted) unchanged. Tusk needs its own predict (snowball CARRIES Lina) -- queued for v0.5.51. **New tlog fields** on w_defensive_fire when catalog_predict branch runs: d_now (current Bara distance), d_det (predicted Bara distance at detonation), speed (eff_speed used). aim_via renamed catalog_self_offset -> catalog_predict to reflect the new behavior. **Lina.lua 8320 -> 8340 lines (+20). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara w_defensive_fire aim=catalog_predict; d_det in [0, ~70u]; speed = ramp avg (e.g. 700 ish for live=634 lvl 4 Bara); Bara visually stunned WITH AoE centered on his predicted impact point, not at Lina, not at 225u far. No edge cases at impact_t=1.12 (aim collapses to Lina position when Bara would arrive on detonation).")
+LOG:info("Lina brain v0.5.50.7 (option B): turn-time-aware W fire window, geometric upper restored, smart-aim retired. User: 'Lets go with B' (chose option B from the v0.5.50.6 methodology review: 'Fix the window math, keep the catalog'). **Diagnosis**: v0.5.49.1 through v0.5.50.6 all had the same root gap: the W fire window (lower W_LEAD=1.12, upper W_LEAD+225/speed in v0.5.49 -> W_LEAD+0.10 in v0.5.50.3) assumed Lina was already FACING the cast position. If Lina is turned away from Bara when the gate fires, she spends up to 0.45s (180 degrees at ~400 deg/sec) rotating before her cast point starts. Real time from order issue to AoE detonation is turn_s + W_LEAD, not W_LEAD. Gate fires in window [1.12, 1.22], cast actually detonates at 1.57s. By detonation Bara has long arrived at Lina, charge stun applied first, W stuns Bara AFTER impact (= the user-reported miss). v0.5.50.4-6 layered smart-aim geometry (fixed 225u offset, predict-aim, Vector type fix) trying to compensate for a window that was structurally too narrow and didn't account for turn -- treating symptoms not cause. Sniper reference: Sniper.lua:6343 lead_s = deg(angle)/400 + cast_pt + travel. Same decomposition Lina was missing. **Fix (option B from v0.5.50.6 hint document)**: compute_w_fire_window accepts turn_s and uses W_PREP = W_LEAD + turn_s for BOTH bounds. Geometric upper W_PREP + W_AOE_RADIUS/speed restored (v0.5.49 derivation). Call site computes turn_s = deg(|FindRotationAngle(self, caster_pos)|)/400 (Sniper turn-rate constant). Tlog w_catalog_eta_gate gains turn field. Smart-aim block in lina_w_anti_gap.fire deleted -- with the window math correct, plain aim = catalog impact_pos (Lina origin for homing_charge / homing_carry) catches Bara across the whole window: impact_t=lower -> caster at Lina dead-center; impact_t=upper -> caster 225u from Lina at AoE edge. aim_via reverts to catalog_self / catalog_caster. **Aim policy now matches Sniper's grenade_at_caster** for the corresponding mod kinds. **Margins**: at speed=630 (lvl 4 Bara mid-charge), turn_s=0 gives window [1.12, 1.48] (= 0.36s = ~22 frames at 60Hz; v0.5.50.3 had 0.10s = ~6 frames). turn_s=0.45 gives window [1.57, 1.93]. Much more slack for speed-model drift, frame-rate hiccups, and order-issue latency. **Why this works where v0.5.50.4-6 didn't**: turn_s was a missing degree of freedom that no amount of aim geometry could compensate for; the cast point itself was completing AFTER caster arrival in the back-facing case, and once Lina is mid-cast Bara's charge stun aborts the W entirely. Now the gate refuses to fire until W will actually finish before Bara arrives. **Lina.lua 8340 -> 8335 lines (-5; net of expanded window helper, added turn block, removed predict-aim block). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara w_catalog_eta_gate gains turn field (e.g. turn=0.00 facing Bara, turn=0.45 back-to). lower/upper shift accordingly (lower = 1.12 + turn). w_defensive_fire aim = catalog_self (not catalog_predict; smart-aim retired). W fires only when impact_t >= 1.12 + turn = real time-to-detonation, so cast point ALWAYS completes before Bara arrives. Late-fire mode (Bara hits Lina then gets stunned) impossible by construction.")
 
 return callbacks

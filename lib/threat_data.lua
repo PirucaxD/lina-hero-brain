@@ -1489,6 +1489,107 @@ ThreatData.THREAT_ARRIVAL_TIMING = {
         post_cast_delay = 0,
         impact_pos      = "self",
     },
+
+    -- v0.5.66 Phase 4 slice 1: catalog the 6 CAST_POINT_THREATS modifiers
+    -- previously absent from THREAT_ARRIVAL_TIMING. All cast_point_targeted
+    -- shape; cast_point values mirror the CAST_POINT_THREATS.cp_default
+    -- already in this file (and re-validated against liquipedia where the
+    -- comment notes a check date). The v0.5.56 sync block below will dedupe
+    -- cp_default from these new entries automatically.
+
+    -- Doom: cast-point-targeted single-target silence + dot. Cast point
+    -- 0.5s (KV AbilityCastPoint, liquipedia). 16s undispellable silence
+    -- on the target; Lotus / BKB / Lina W stun must fire BEFORE doom lands.
+    -- impact_pos=self.
+    modifier_doom_bringer_doom = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "doom_bringer_doom",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.5,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- AA Ice Blast: cast-point-targeted, GLOBAL frost mark + execute.
+    -- Cast point 0.5s. The mark itself lands at cast_point + projectile
+    -- travel from AA to target, but at global cast range projectile time
+    -- dominates -- treat as cast_point for the brain's pre-impact window
+    -- since the projectile is on its own dispatch (modifier_ice_blast
+    -- applies on hit). Lotus reflect / BKB pre-fire on the projectile.
+    -- impact_pos=self.
+    modifier_ice_blast = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "ancient_apparition_ice_blast",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.5,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- OD Sanity Eclipse: cast-point-targeted, AoE around target, mana-based
+    -- magic damage. Cast point 1.7s. impact_pos=self (Lina is the catch
+    -- point for the AoE; BKB / Lotus protect self).
+    modifier_obsidian_destroyer_sanity_eclipse = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "obsidian_destroyer_sanity_eclipse",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 1.7,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Tinker Laser: cast-point-targeted, single-target stun + nuke + miss
+    -- chance debuff. Cast point 0.45s. Range 700 base (cast range bonuses
+    -- apply). impact_pos=self.
+    modifier_tinker_laser = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "tinker_laser",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.45,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Zeus Thundergod's Wrath: global ult, hits every visible enemy hero.
+    -- Cast point 0.6s. impact_pos=self (the damage application point is
+    -- the target; defensive Lotus / BKB protect self). Side mark removes
+    -- invisibility for 4s on each target.
+    modifier_zuus_thundergods_wrath = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "zuus_thundergods_wrath",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 0.6,
+        post_cast_delay = 0,
+        impact_pos      = "self",
+    },
+
+    -- Sand King Epicenter: channeled AoE expanding from SK's cast position
+    -- over 2.0s (KV AbilityCastPoint, KV epicenter_radius growing per
+    -- pulse). impact_pos=caster -- the AoE expands FROM Sand King's
+    -- standing position, so defensive aim (e.g. Lina W stun on SK to
+    -- cancel the channel) targets SK. Lotus reflect / self-BKB fire on
+    -- self though; aim is a save-specific concern, this field is the
+    -- "where does the threat originate" hint.
+    modifier_sand_king_epicenter = {
+        kind            = "cast_point_targeted",
+        speed_source    = "instant",
+        speed_fallback  = 0,
+        kv_ability      = "sandking_epicenter",
+        kv_cast_point_key = "AbilityCastPoint",
+        cast_point      = 2.0,
+        post_cast_delay = 0,
+        impact_pos      = "caster",
+    },
 }
 
 -- v0.5.56: cast_point single source of truth.
@@ -1496,11 +1597,13 @@ ThreatData.THREAT_ARRIVAL_TIMING = {
 -- authoritative static cast_point per threat. CAST_POINT_THREATS.cp_default
 -- (the fallback used by Lina's arming sites when Ability.GetCastPoint
 -- returns 0 / unavailable) is synced from there at load time so future
--- catalog edits propagate without touching two tables. Entries present in
--- CAST_POINT_THREATS but absent from THREAT_ARRIVAL_TIMING (Doom, Tinker
--- Laser, AA Ice Blast, OD Sanity Eclipse, Zeus Thundergods Wrath, Sand
--- King Epicenter) keep their existing cp_default literal -- the catalog
--- covers only the 7 entries Phase 2 seeded.
+-- catalog edits propagate without touching two tables.
+-- v0.5.66: catalog now covers all 9 CAST_POINT_THREATS entries (Phase 4
+-- slice 1 added Doom + AA Ice Blast + OD Sanity Eclipse + Tinker Laser +
+-- Zeus Thundergods + Sand King Epicenter, all cast_point_targeted, same
+-- shape as Lion/Sniper/Lina). The sync loop now writes back to ALL nine
+-- cp_default fields; no more "absent from catalog keep their literal"
+-- carve-out.
 for _mod, _t in pairs(ThreatData.THREAT_ARRIVAL_TIMING) do
     local _cp_entry = ThreatData.CAST_POINT_THREATS[_mod]
     if _cp_entry and _t.cast_point and _t.cast_point > 0 then

@@ -2528,20 +2528,24 @@ local SAVE_FIRE_DISTANCE = {
     item_invis_sword        = 240,
     item_silver_edge        = 240,
     item_ethereal_blade_self = 480,
-    -- v0.5.46.3 Problem B: bumped 800 -> 1200. v0.5.46.1's 800u gate
-    -- assumed Bara real charge speed ~700 u/s but the demo confirmed
-    -- "missing by little time" = real speed closer to 900-1000 u/s
-    -- (charge MS scales with level + Phase Boots + talents). At d=800
-    -- with real speed 1000, real-eta=0.80s and W lands 0.32s AFTER
-    -- impact = miss. At d=1200 with real speed 1000, real-eta=1.20s
-    -- and W lands 0.08s BEFORE impact = clean stun. Pairs with
-    -- v0.5.46.3 predict-aim (W aimed at threat caster's predicted
-    -- position W_LEAD=1.12s ahead, not Lina origin) so the AoE lands
-    -- wherever the caster actually is at detonation. Tusk dropped
-    -- from W_skip_too_late_mods in the same release: with predict-aim
-    -- the W AoE follows Tusk's snowball endpoint = past Lina's pre-
-    -- snowball position = the spot where the snowball lets Lina go.
-    lina_w_anti_gap         = 1200,
+    -- v0.5.55.1 hotfix: SAVE_FIRE_DISTANCE[lina_w_anti_gap] REMOVED
+    -- (was 1200). v0.5.55 demo log L601: armed_chain_peek fired W
+    -- via save_dist at d=1193 (fixed eta_speed=600 gave eta=1.99,
+    -- but real impact_t=2.36 at actual speed 506 was WAY out of W's
+    -- [1.12, 1.56] window). W's .fire body correctly skipped via
+    -- w_defensive_skip_window, but armed_post_fire had already
+    -- consumed the armed_threats[bara_charge] entry, leaving the
+    -- brain unable to re-attempt as Bara closed. W eventually fired
+    -- LATE via the committed_attacker path (after Bara hit Lina and
+    -- started auto-attacks). Without this distance entry, the chain
+    -- peek falls through to SAVE_ETA_TRIGGER[lina_w_anti_gap]=1.20
+    -- so armed_chain_peek fires W at eta=1.20 (d~720 for eta_speed
+    -- 600); at that distance W's catalog impact_t (~1.42 for speed
+    -- 506) is squarely inside W's window and W actually fires. The
+    -- v0.5.46.3 rationale for 1200 (compensating for missing
+    -- timing precision) is obsolete -- W's .fire body's impact_t
+    -- window check (v0.5.55 Step 4) gives the precision the
+    -- distance gate was trying to fake.
 }
 -- v0.5.9 (E2): self-displacement saves refuse to fire below this radius --
 -- pushing Lina 600u in facing when the threat already crossed inside would
@@ -8439,6 +8443,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.55: Sniper-style chain simplification refactor. User: 'WE might going over the board we are doing multiple detection for the same problem, which is leading to different chains. It is good using multiple methods to identify the same threat but it should fall on the same chain of protection. Sniper for instance is using pike and after that or if pike on CD grenade and it is working with no problems'. User: 'Go with full implementation, for every step run a quality test'. **The over-engineering was real**: pre-refactor Lina had 5 gate layers (v0.5.51 hero-side catalog gate, v0.5.53 lib-side gate, v0.5.54.1 W skip-after-item, legacy distance gate, W predict-aim) vs Sniper's 1 (chain walker with each .fire body owning its range/timing). The fundamental design tension: W's 1.12s prep is longer than Pike's 0.5s, so W's catalog-correct fire moment (d~700) is BEFORE Pike's range (d=425). Brain fires W first; AD fires Pike later = double save. **Six-step refactor** (each with luac quality gate): (1) lib/defense.lua per-save catalog gate removed from run_chain_walk; Defense.ComputeSaveFireWindow kept as public helper. (2) Lina armed_chain_peek per-save catalog gate + W skip-after-item check + W-specific legacy live-eta fallback removed. Chain walker returns to pre-v0.5.51 shape: pure distance + eta_trigger fall-through. (3) prep_time / active_duration / catch_radius removed from SAVE_FIRE entries (item_lotus_orb, item_black_king_bar, lina_w_anti_gap). State helpers state.compute_save_fire_window + state.compute_w_fire_window + state.W_FALLBACK_BLOCK_* + state.w_fallback_item_just_fired removed. (4) W precision timing moved INTO lina_w_anti_gap.fire body: new w_defensive_skip_window tlog when impact_t out of [W_LEAD=1.12, W_LEAD + W_AOE_RADIUS/eff_speed]. For homing_charge / homing_carry catalog mods only; other kinds (channel, cast_point) and non-catalog mods unconstrained. (5) Sniper-style defer-for-Pike check in armed_threats_tick homing branch (mirrors Sniper.lua:8220). New armed_threat_defer_for_pike tlog when Pike ready AND threat caster will close to Pike's 425u range within ~0.15s of travel; brain skips chain walk that tick, lets AD's Pike fire first. (6) Predict-aim INTACT inside W's .fire body (catalog_predict aim_via still emitted). Cfg threat_catalog + compute_arrival_time registrations removed from Defense.New (no consumer). **Net effect**: brain chain walker now matches Sniper's pattern. W timing precision preserved (in .fire body). Bara double-fire prevented structurally via defer-for-Pike (not patched per-item via cooldown check). **Removed v0.5.51, v0.5.53, v0.5.54.1 work** -- not wasted, those got us the Sniper-comparison insight. **Files**: Lina.lua 8610 -> 8442 lines (-168). lib/defense.lua -90 lines net (gate removed, helper kept). lib/threat_data.lua unchanged from v0.5.50. SHA refreshed both. luac clean both, no BOM Lina, lesson 15 verified Lina. **Verification on next demo**: Bara approach at d > 1000: brain no logs (waiting). Bara at d~600 (closing): armed_threat_defer_for_pike tlog if Pike ready (Bara within 0.15s of 425u range). AutoDisabler.lua casts Pike. Brain chain remains deferred (Pike not ready). Bara mitigated. NO brain w_defensive_fire on this charge. Alternative: Pike on CD -> defer skipped -> brain chain walks -> W's .fire reaches: impact_t check decides fire/skip. WD Death Ward / Lion Finger / catalog channel mods unchanged (channel_at_caster / cast_point_targeted bypass W timing gate). Sniper smoke test: no changes (lib helper added, gate not consumed by him).")
+LOG:info("Lina brain v0.5.55.1 hotfix: drop SAVE_FIRE_DISTANCE[lina_w_anti_gap]. User: 'It is working better regard double firing, lina W fire extremely late. Check the log'. **The bug**: v0.5.55 demo log L601 showed armed_chain_peek fired W via save_dist at d=1193 because SAVE_FIRE_DISTANCE[W]=1200 (v0.5.46.3 wide-net value). At d=1193 with actual speed=506, real impact_t=2.36 -- WAY above W's window [1.12, 1.56]. W's .fire body's window check (v0.5.55 Step 4) correctly returned w_defensive_skip_window. But armed_post_fire had ALREADY cleared state.armed_threats[bara_charge], so the brain could not re-attempt as Bara closed. W eventually fired LATE via committed_attacker path (L705) after Bara hit Lina. **Fix**: remove SAVE_FIRE_DISTANCE[lina_w_anti_gap]. The chain peek now falls through to SAVE_ETA_TRIGGER[W]=1.20; armed_threats_tick fires W at eta=1.20 (d=720 for fixed eta_speed=600). At d=720 with real speed=506, impact_t=1.42 = inside W's window [1.12, 1.56] -> W actually fires (not too late, not too early). For faster Bara (real speed=750): at d=720, impact_t=0.96 < window lower 1.12 -> W still skips (correctly; W cannot stun before Bara at that speed). For slower Bara (real speed=400): at d=720, impact_t=1.80 > upper 1.68 -> W still skips (correctly; window expires before Bara arrives). **The v0.5.46.3 rationale for 1200 (compensating for missing timing precision) is obsolete** -- W's .fire body's impact_t window check is the precision the distance gate was trying to fake. **One-line hotfix**: just remove the lina_w_anti_gap entry from the SAVE_FIRE_DISTANCE table. No code changes to armed_chain_peek, armed_threats_tick, defer-for-Pike, or W's .fire body. **Lina.lua 8442 -> 8444 lines (net +2 from comment expansion). lib/defense.lua + lib/threat_data.lua unchanged**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara approach -> bara_charge_armed at modseen. armed_threats_tick re-evaluates each tick. NO save_dist trigger for W at d>720. When Bara reaches eta=1.20 (d=720): armed_threat_fire via=eta_trigger (was via=save_dist in v0.5.55). W's .fire window check passes for typical speeds 450-650 -> w_defensive_fire with predict-aim. armed_post_fire consumes entry. Bara mitigated by W's stun before arrival. defer-for-Pike still active: if Pike ready when Bara at d~600, brain defers; AD casts Pike; brain chain stays deferred. The two paths (Pike via AD + W via brain) don't conflict because Bara doesn't reach W's eta=1.20 trigger before Pike fires (Pike's range gate at d=425 hits earlier in the encounter).")
 
 return callbacks

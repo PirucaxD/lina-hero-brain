@@ -1632,11 +1632,23 @@ local SAVE_FIRE = {
                                 local W_AOE_RADIUS = 225
                                 local unit_x = dx / dist
                                 local unit_y = dy / dist
-                                pos = {
-                                    x = (lina_pos.x or 0) + unit_x * W_AOE_RADIUS,
-                                    y = (lina_pos.y or 0) + unit_y * W_AOE_RADIUS,
-                                    z = lina_pos.z or 0,
-                                }
+                                -- v0.5.50.5: was a plain Lua table {x,y,z}
+                                -- which issue_cast_position passes to the
+                                -- Action.CastPosition layer; that layer
+                                -- requires a Vector userdata, not a table.
+                                -- The table fell through as nil/invalid
+                                -- position, the cast was dropped, and Lina
+                                -- visibly defaulted to kite/move (user
+                                -- "walking in a random direction"). Use
+                                -- the same Vector(x,y,z) constructor that
+                                -- Sniper.lua + lib/geometry.lua use
+                                -- (e.g. Sniper.lua:5926, lib/geometry.lua
+                                -- L89/L166). Same arithmetic, correct type.
+                                pos = Vector(
+                                    (lina_pos.x or 0) + unit_x * W_AOE_RADIUS,
+                                    (lina_pos.y or 0) + unit_y * W_AOE_RADIUS,
+                                    lina_pos.z or 0
+                                )
                                 aim_via = "catalog_self_offset"
                             end
                         end
@@ -8305,6 +8317,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.50.4 smart aim offset toward caster (diameter coverage for homing_charge). User insight: 'save on self that limits our error to the radius of the circle instead the diameter. We dont to do on lina, it might be from self position to max position. On the position it stops bara'. **Geometry**: aim-at-self centers W AoE 225r on Lina, so the catch zone along the caster's approach line is only the AoE RADIUS (225u) -- caster catches only from d=0 (at Lina) to d=225 (entering AoE on approach). Offsetting aim 225u TOWARD the caster shifts the AoE: catch zone now spans the AoE DIAMETER (450u). For Bara at d=0 (stopped at Lina, impact moment): at AoE edge (caught at 225u from aim point). For Bara en-route at d=225: at AoE center (caught at 0 from aim). For Bara at d=450 (far edge): at AoE edge (caught at 225 from aim). DOUBLE the catch range along the approach line. **Visual benefit**: with offset aim, W AoE detonates 225u toward Bara from Lina (not centered on Lina). Bara visually stunned away from Lina's position along his approach. Less ambiguous than 'W explodes at Lina, Bara was stunned somewhere in there'. **Scope**: only for homing_charge kind (Bara stops at Lina at impact). Other kinds unchanged: homing_carry (Tusk) keeps aim-at-self because the snowball carries Lina past her cast position and the offset math doesn't help; channel_at_caster (WD) keeps aim-at-caster; cast_point_targeted (Lion) keeps aim-at-self at Lina. **Math**: 1) get caster current position; 2) compute unit vector from Lina to caster; 3) aim_pos = Lina + unit_vector * W_AOE_RADIUS (225u). Fallback to aim-at-self if caster not entity or distance is 0. **Combined with v0.5.50.3 tight fire window**: window [W_LEAD, W_LEAD + 0.10]; Bara at d_at_detonation in [0, 63] for speed=630. With smart aim offset 225 toward Bara, Bara's distance from aim point = |63 - 225| = 162 (or |0 - 225| = 225 for Bara-stopped-at-Lina). Both INSIDE AoE. Tight stun, visually toward Bara not at Lina. **New tlog aim value**: catalog_self_offset (distinguishes from plain catalog_self). **Lina.lua 8269 -> 8308 lines (+39). lib/threat_data.lua unchanged from v0.5.50. SHA refreshed. luac clean, no BOM, lesson 15 verified.")
+LOG:info("Lina brain v0.5.50.5 Vector cast position hotfix for catalog_self_offset. User: 'Bara is working terrible now, lina is walking in a random direction. This have no line of logic, the smart aim should be able to fire W on the direction bara is approaching in the right time'. **Root cause**: v0.5.50.4 catalog_self_offset block built pos as a plain Lua table {x=, y=, z=} instead of a Vector userdata. issue_cast_position passes pos as the position field of the UO.DOTA_UNIT_ORDER_CAST_POSITION order; the Action.CastPosition layer requires Vector userdata (Sniper.lua + lib/geometry.lua use Vector(x,y,z) pervasively for ground-targeted positions). The Lua table was rejected or coerced to nil/origin: W cast silently dropped, Lina fell through to default kite/move behavior, 'walks in a random direction' symptom. **Fix**: replace the table literal with Vector(...) constructor matching Sniper.lua:5926 and lib/geometry.lua L89/L166 pattern. Arithmetic unchanged (lina_pos + unit_vec * 225). Same offset, correct type. **Scope**: only the homing_charge smart-aim branch added in v0.5.50.4. Other aim paths (catalog_self, catalog_caster, caster_origin, self_origin) returned Entity.GetAbsOrigin(handle) directly which is already Vector userdata and were never affected. **Lina.lua 8308 -> 8320 lines (+12). lib/threat_data.lua unchanged from v0.5.50**. SHA refreshed. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: Bara w_defensive_fire aim=catalog_self_offset; Lina actually casts W (not kite); W AoE visibly detonates 225u toward Bara from Lina; Bara stunned along his approach line as v0.5.50.4 geometry intended.")
 
 return callbacks

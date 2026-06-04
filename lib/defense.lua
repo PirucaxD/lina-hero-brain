@@ -45,6 +45,43 @@
 
 local Defense = {}
 
+---v0.5.53 Phase 3 slice 3: public lib helper for the per-save fire-window
+---math. Generalized from Lina's v0.5.51 state.compute_save_fire_window so
+---the dispatcher's per-save catalog gate (in run_chain_walk) and any
+---hero-side preview can share one source of truth.
+---
+---@param threat_entry table|nil  catalog entry (THREAT_ARRIVAL_TIMING[mod])
+---@param speed number|nil        effective threat speed (avg-during-prep)
+---@param save_entry table|nil    SAVE_FIRE[name] entry (must have prep_time)
+---@return number lower, number upper
+function Defense.ComputeSaveFireWindow(threat_entry, speed, save_entry)
+    local prep = (save_entry and save_entry.prep_time) or 0
+    local UPPER_TOLERANCE = 0.10
+    if threat_entry then
+        local k = threat_entry.kind or ""
+        -- channel_at_caster (WD) + cast_point_targeted (Lion / Lina /
+        -- Sniper Assassinate): preserve v0.5.51 behavior of always-open
+        -- window; fire-timing handled by other paths in v0.5.53. Slice 4
+        -- (v0.5.54) will revisit when cast-point-armed branches consume
+        -- catalog cast_point.
+        if k == "channel_at_caster" or k == "cast_point_targeted" then
+            return 0, math.huge
+        end
+        -- AoE-catch saves on homing kinds: upper is geometric
+        -- (catch_radius / speed). W has catch_radius=225; other saves
+        -- leave it nil and fall through to tight tolerance.
+        if (k == "homing_charge" or k == "homing_carry")
+           and save_entry and save_entry.catch_radius
+           and speed and speed > 0 then
+            return prep, prep + save_entry.catch_radius / speed
+        end
+    end
+    -- Default: tight tolerance (D3 from v0.5.51: singular fire moment
+    -- per spec "fire moment as impact_t - prep_t", small upper margin
+    -- for frame-rate slack only).
+    return prep, prep + UPPER_TOLERANCE
+end
+
 -- v0.5.39 P3-LOW-magic: reserve-skip / concurrent-penalty thresholds are
 -- passed in via cfg (cfg.reserve_skip_floor / cfg.concurrent_penalty) rather
 -- than baked in here, so heroes can tune them independently. The hero-side
@@ -91,15 +128,29 @@ local LOCK_TTL_FLOOR_S           = 0.4
 ---        Optional. Returns the engine ability handle for an ability_name so
 ---        resolvers can read GetCastPoint / GetChannelTime live. nil-tolerant.
 ---    cfg.post_pick_filter   fun(picked:table, ctx:table|nil, threat_mod:string|nil, authoritative:boolean):table?, boolean?
----        Optional chain-rewrite hook called by ResolveSaveOrder after chain
----        resolution, before returning. Receives the resolved (picked, ctx,
----        threat_mod, authoritative); may return a new (picked, authoritative)
----        tuple to substitute. Return nil for picked to keep the resolved
----        chain. Lib applies new_auth only when non-nil so a hook returning
----        just a new chain preserves the original authoritative flag. Use
----        this for hero-specific reordering on live ctx (for example,
----        demoting a particular save under a context flag the hero sets).
----        nil hook = passthrough.
+---        v0.5.41 GAP-3-GENERIC. Optional chain-rewrite hook called by
+---        ResolveSaveOrder after chain resolution, before returning. Receives
+---        the resolved (picked, ctx, threat_mod, authoritative); may return a
+---        new (picked, authoritative) tuple to substitute. Return nil for
+---        picked to keep the resolved chain. Lib applies new_auth only when
+---        non-nil so a hook returning just a new chain preserves the
+---        original authoritative flag. nil hook = passthrough.
+---  v0.5.53 Phase 3 slice 3 additions (all optional, opt-in):
+---    cfg.threat_catalog     table|nil
+---        Map threat_mod -> catalog entry (kind / speed_source / catch_radius
+---        / etc.). When registered AND cfg.compute_arrival_time is registered,
+---        run_chain_walk applies a per-save catalog gate before firing each
+---        save with cfg.save_fire[name].prep_time > 0. Hero passes the same
+---        THREAT_ARRIVAL_TIMING table its own compute_arrival_time consumes.
+---        nil = no lib-side catalog gate (Sniper today; legacy behavior).
+---    cfg.compute_arrival_time fun(threat_mod:string, caster:any, target:any):number?, any, table?, number?
+---        Returns (impact_t, impact_pos, cat_entry, eff_speed). Used by the
+---        per-save catalog gate to compute fire windows. Same signature as
+---        Lina's state.compute_arrival_time. nil = no lib-side catalog gate.
+---    cfg.self_npc           fun():any|nil
+---        Returns the hero's own NPC handle (used as the catalog target).
+---        Already used by TrySaveSelf; now also consumed by the per-save
+---        catalog gate in run_chain_walk.
 ---@return table dispatcher
 function Defense.New(cfg)
     local self = setmetatable({ cfg = cfg }, Dispatcher)
@@ -120,10 +171,13 @@ end
 ---Resolve the effective save chain for a (threat_mod, category_hint,
 ---ability_name) tuple. Returns (chain, is_authoritative); authoritative
 ---chains bypass the kind/tether filters during the walk.
----Optional ctx table lets the hero pass live context that influences chain
----ordering. ctx is forwarded to cfg.post_pick_filter (when registered) so
----the hero decides which keys it cares about. The lib treats ctx as opaque.
----Behavior-neutral when the hook is nil or returns nil.
+---v0.5.40 GAP-3 / v0.5.41 GAP-3-GENERIC: optional ctx table lets the hero
+---pass live context that influences chain ordering. ctx is forwarded to
+---cfg.post_pick_filter (when registered) so the hero decides what keys it
+---cares about. The lib treats ctx as opaque. Behavior-neutral when the hook
+---is nil or returns nil. Lina's registration consumes ctx.fs_shard_window
+---to demote 'lina_flame_cloak' to chain tail during the 5s post-R Aghs
+---Shard window; see Lina/Lina.lua Defense.New cfg.post_pick_filter.
 ---@param threat_mod string|nil
 ---@param category_hint string|nil
 ---@param ability_name string|nil
@@ -186,15 +240,14 @@ function Dispatcher:ResolveSaveOrder(threat_mod, category_hint, ability_name, ct
         picked, authoritative = c.default_chain, false
     end
 
-    -- Hero-supplied chain-rewrite hook. Replaces what previously was a
-    -- hardcoded demotion case. The hero registers cfg.post_pick_filter
-    -- (picked, ctx, threat_mod, authoritative) -> (picked, authoritative)
-    -- and decides on live ctx whether to rebuild the chain. nil hook
-    -- returns the chain as resolved (behavior-neutral). The hook owns the
-    -- responsibility of building a NEW chain table rather than mutating
-    -- the cfg-supplied override / category / default tables, since those
-    -- are typically module-local on the hero side and mutations would
-    -- leak across calls.
+    -- v0.5.41 GAP-3-GENERIC: hero-supplied chain-rewrite hook. Replaces the
+    -- v0.5.40 hardcoded lina_flame_cloak demotion that used to live here.
+    -- Hero registers cfg.post_pick_filter(picked, ctx, threat_mod,
+    -- authoritative) -> (picked, authoritative); nil hook returns chain
+    -- as-is (behavior-neutral). Lina's registration replicates the v0.5.40
+    -- FC demotion under fs_shard_window; other heroes can reorder chains
+    -- on live ctx without editing the lib. Builds a NEW chain table inside
+    -- the hook so cfg override / category / default tables stay untouched.
     if c.post_pick_filter then
         local new_picked, new_auth = c.post_pick_filter(picked, ctx, threat_mod, authoritative)
         if new_picked then
@@ -540,8 +593,59 @@ local function run_chain_walk(self, intent, threat_mod, threat_caster,
 
     for _, save_name in ipairs(order) do
         local fire_entry = c.save_fire[save_name]
+
+        -- v0.5.53 Phase 3 slice 3: per-save catalog gate.
+        -- When the hero registered cfg.threat_catalog + cfg.compute_arrival_time
+        -- AND this save has prep_time > 0 AND the threat is in the catalog,
+        -- gate the fire moment on impact_t in [prep_time, upper] per
+        -- Defense.ComputeSaveFireWindow. D3 semantics from the v0.5.51
+        -- design discussion:
+        --   in_window  -> fall through to the existing skip/fire chain
+        --   too early  -> STOP the entire chain walk (lower-priority saves
+        --                  have even smaller prep_time so their moments are
+        --                  also further out; nothing fires this dispatch)
+        --   too late   -> skip this save, continue to next
+        -- Hero opt-in via cfg.threat_catalog registration. Sniper doesn't
+        -- register, so the gate is no-op (legacy behavior preserved).
+        local catalog_too_late = false
+        if fire_entry and c.threat_catalog and c.compute_arrival_time
+           and fire_entry.prep_time and fire_entry.prep_time > 0
+           and threat_mod and c.threat_catalog[threat_mod] then
+            local target_unit = c.self_npc and c.self_npc() or nil
+            local impact_t, _, cat_entry, cat_speed =
+                c.compute_arrival_time(threat_mod, threat_caster, target_unit)
+            if impact_t and cat_entry then
+                local lower, upper = Defense.ComputeSaveFireWindow(
+                    cat_entry, cat_speed, fire_entry)
+                c.tlog(3, "lib_catalog_gate", {
+                    save      = fire_entry.short or save_name,
+                    impact_t  = string.format("%.2f", impact_t),
+                    lower     = string.format("%.2f", lower),
+                    upper     = (upper == math.huge) and "inf" or string.format("%.2f", upper),
+                    kind      = tostring(cat_entry.kind or "-"),
+                })
+                if impact_t > upper then
+                    -- D3 (y): caster too far / impact too distant. This
+                    -- save's moment hasn't arrived, and any lower-priority
+                    -- save in the chain has an EVEN smaller prep_time, so
+                    -- its moment is also further out. STOP walking.
+                    c.tlog(3, "save_chain_stop", {
+                        save = fire_entry.short or save_name,
+                        reason = "catalog_too_early",
+                    })
+                    return false
+                end
+                if impact_t < lower then
+                    -- D3 (x): too late for this save. Skip and continue.
+                    catalog_too_late = true
+                end
+            end
+        end
+
         if not fire_entry then
             c.tlog(3, "save_chain_skip", { save = save_name, reason = "no_entry" })
+        elseif catalog_too_late then
+            c.tlog(3, "save_chain_skip", { save = fire_entry.short, reason = "catalog_too_late" })
         elseif c.ability_saves[save_name] and not c.self_can_cast_abilities() then
             c.tlog(3, "save_chain_skip", { save = save_name, reason = "ability_muted" })
         elseif homing and c.self_displacement_saves[save_name] then

@@ -49,6 +49,7 @@ local Geometry = require("lib.geometry")  -- v0.3.0: lead-target prediction (off
 local Native = require("lib.native")      -- v0.4.4: pause native Hit & Run / Orb Walker in combos
 local Defense = require("lib.defense")    -- v0.5.0: generic Layer-2 save dispatcher (Tier-2)
 local Escape = require("lib.escape")      -- v0.5.57: danger-aware escape destination picker (Phase 5)
+local Farm   = require("lib.farm")        -- v0.5.78: stateless farm geometry (line/point AoE optimizers + worth-casting)
 
 local MS = Enum.ModifierState
 local UO = Enum.UnitOrder
@@ -6000,6 +6001,169 @@ state.combo_key_tick = function()
     state.combo_key_was_down = down
 end
 
+-- v0.5.78 wave-clear: gather farmable units (lane creeps + neutrals) near Lina.
+-- DEFENSIVE enumeration -- the hero brains have never enumerated creeps before,
+-- so every engine call is pcall-guarded and degrades to "no creeps" instead of
+-- crashing if a name/enum is wrong on this framework build.
+--   * Enemy non-hero units = Entity.GetUnitsInRadius(TEAM_ENEMY) MINUS
+--     Entity.GetHeroesInRadius(TEAM_ENEMY). Set-difference avoids needing an
+--     unverified NPC.IsHero predicate.
+--   * Neutrals = Entity.GetUnitsInRadius(TEAM_NEUTRAL), only if the enum value
+--     exists on this build (guarded). If absent, lane clear still works.
+--   * Skip dead / illusions (lib/target) and invulnerable units (towers pre-
+--     expose, wards, etc. via the verified NPC.IsInvulnerable).
+-- Returns a Farm-contract list: { {pos, hp, is_neutral, entity}, ... }.
+-- One-shot probe tlog on first call dumps raw counts so the next demo confirms
+-- exactly what the API returns on this build.
+state.farm_probe_logged = false
+state.farm_gather_creeps = function(radius)
+    local me = state.self_npc
+    local me_pos = me and Entity.GetAbsOrigin(me)
+    if not (me and me_pos) then return {} end
+    radius = radius or 1075
+    local out, seen = {}, {}
+    -- enemy hero set to subtract (verified API; Sniper uses it heavily)
+    local hero_set, n_heroes = {}, 0
+    local okh, heroes = pcall(Entity.GetHeroesInRadius, me, radius,
+                              Enum.TeamType.TEAM_ENEMY)
+    if okh and heroes then
+        for i = 1, #heroes do hero_set[heroes[i]] = true; n_heroes = n_heroes + 1 end
+    end
+    local n_enemy_units, n_neutral_units = 0, 0
+    local function consume(list, is_neutral)
+        if not list then return end
+        for i = 1, #list do
+            local u = list[i]
+            if u and not seen[u] and not hero_set[u] then
+                seen[u] = true
+                local alive = Target.IsAlive(u) and Target.NotIllusion(u)
+                local invuln = NPC.IsInvulnerable and NPC.IsInvulnerable(u)
+                if alive and not invuln then
+                    local p = Entity.GetAbsOrigin(u)
+                    if p then
+                        local hp = (Entity.GetHealth and Entity.GetHealth(u)) or 0
+                        out[#out + 1] = {
+                            pos = p, hp = hp,
+                            is_neutral = is_neutral and true or false,
+                            entity = u,
+                        }
+                    end
+                end
+            end
+        end
+    end
+    local oke, eunits = pcall(Entity.GetUnitsInRadius, me, radius,
+                              Enum.TeamType.TEAM_ENEMY)
+    if oke and eunits then n_enemy_units = #eunits; consume(eunits, false) end
+    -- Neutrals: only if this build exposes the enum value.
+    if Enum and Enum.TeamType and Enum.TeamType.TEAM_NEUTRAL ~= nil then
+        local okn, nunits = pcall(Entity.GetUnitsInRadius, me, radius,
+                                  Enum.TeamType.TEAM_NEUTRAL)
+        if okn and nunits then n_neutral_units = #nunits; consume(nunits, true) end
+    end
+    if not state.farm_probe_logged then
+        state.farm_probe_logged = true
+        tlog(1, "farm_gather_probe", {
+            radius = string.format("%.0f", radius),
+            enemy_units = tostring(n_enemy_units),
+            neutral_units = tostring(n_neutral_units),
+            heroes_excluded = tostring(n_heroes),
+            farmable = tostring(#out),
+            neutral_enum = (Enum and Enum.TeamType and Enum.TeamType.TEAM_NEUTRAL ~= nil)
+                           and "y" or "n",
+        })
+    end
+    return out
+end
+
+-- v0.5.78 wave-clear HOLD handler. While the wave-clear key is held:
+--   1. gather creeps within Q range,
+--   2. Q (Dragon Slave) at the line aim hitting the most creeps, when
+--      hit_count >= min_creeps AND mana gates pass,
+--   3. (opt) W (Light Strike Array) on a dense camp when mana-rich.
+-- Player owns movement (HOLD model); the brain only nukes what is already in
+-- range. Gated on master enable + Q/W readiness + mana floor + R reserve.
+-- Skipped while a combo is active (combo owns the spells) and while a save
+-- chain is mid-flight.
+state.last_wave_clear_t = 0
+state.wave_clear_tick = function()
+    local m = state.menu
+    if not (m and m.wave_key) then return end
+    if m.enable and not m.enable:Get() then return end
+    -- combo takes priority over farm
+    if state.combo_hold_active then return end
+    local down = false
+    local ok, v = pcall(function() return m.wave_key:IsDown() end)
+    if ok then down = v and true or false end
+    if not down then return end
+    -- light throttle: re-evaluate ~5x/sec (Q CD + safe_issue dedup do the rest)
+    local t = now()
+    if (t - (state.last_wave_clear_t or 0)) < 0.2 then return end
+    state.last_wave_clear_t = t
+
+    local me = state.self_npc
+    local me_pos = me and Entity.GetAbsOrigin(me)
+    if not (me and me_pos) then return end
+
+    local q_ready = ability_ready("lina_dragon_slave")
+    local w_ready = m.wave_use_w and m.wave_use_w:Get()
+                    and ability_ready("lina_light_strike_array")
+    if not (q_ready or w_ready) then return end
+
+    -- mana gates
+    local mana    = (NPC.GetMana and NPC.GetMana(me)) or 0
+    local maxmana = (NPC.GetMaxMana and NPC.GetMaxMana(me)) or 0
+    local floor_frac = (m.wave_mana_floor and (m.wave_mana_floor:Get() / 100)) or 0
+    local reserve_r  = m.wave_reserve_r and m.wave_reserve_r:Get()
+    local r_cost = reserve_r and ability_mana("lina_laguna_blade") or 0
+    if maxmana > 0 and (mana / maxmana) < floor_frac then return end
+
+    local min_creeps = (m.wave_min_creeps and m.wave_min_creeps:Get()) or 3
+    local creeps = state.farm_gather_creeps(Q_LENGTH)
+    if #creeps == 0 then return end
+
+    local fired = false
+    -- Q: best line aim
+    if q_ready then
+        local q_cost = ability_mana("lina_dragon_slave")
+        if mana >= q_cost and (mana - q_cost) >= r_cost then
+            local aim, hit_n = Farm.BestLineAim(me_pos, creeps, Q_LENGTH, Q_HALF_WIDTH)
+            if aim and Farm.WorthCasting(hit_n, min_creeps) then
+                local q = ability("lina_dragon_slave")
+                if q and issue_cast_position("wave_clear_q", q, aim, "agg") then
+                    fired = true
+                    tlog(1, "wave_clear_q", {
+                        hits = tostring(hit_n),
+                        x = string.format("%.0f", aim.x),
+                        y = string.format("%.0f", aim.y),
+                        mana = string.format("%.0f", mana),
+                    })
+                end
+            end
+        end
+    end
+    -- W: dense camp, only when mana-rich after the (possible) Q spend.
+    if w_ready then
+        local q_cost = (q_ready and ability_mana("lina_dragon_slave")) or 0
+        local w_cost = ability_mana("lina_light_strike_array")
+        local spent  = fired and q_cost or 0
+        if (mana - spent) >= w_cost and (mana - spent - w_cost) >= r_cost then
+            local center, w_hit = Farm.BestPointAim(creeps, W_AOE)
+            -- dense = at least one more than the Q gate (a real pack, not a pair)
+            if center and Farm.WorthCasting(w_hit, min_creeps + 1) then
+                local w = ability("lina_light_strike_array")
+                if w and issue_cast_position("wave_clear_w", w, center, "agg") then
+                    tlog(1, "wave_clear_w", {
+                        hits = tostring(w_hit),
+                        x = string.format("%.0f", center.x),
+                        y = string.format("%.0f", center.y),
+                    })
+                end
+            end
+        end
+    end
+end
+
 -- v0.5.15 OBS-08: one-press forensic dump of the live brain state. Emits
 -- multi-line tlog at level 1 (visible at default verbosity), one record per
 -- logical group so the debug.log stays grep-friendly. fs stack count is read
@@ -6806,6 +6970,34 @@ local function setup_menu()
         .. "Skipped at fs_at_cap / fs_shard_window / in_flight / channelling, "
         .. "same as the starter and tf_burst sites; shares the 1.5s "
         .. "state.last_fc_dispatch_t throttle.")
+
+    -- v0.5.78 wave-clear (HOLD): mana + stack aware lane/jungle farm. Q (Dragon
+    -- Slave) line nuke at the aim hitting the most creeps; optional W on a dense
+    -- camp. Opt-in: KEY_NONE default so the bind does nothing until assigned.
+    m.wave_key = gCore:Bind("Wave-clear key (HOLD)", Enum.ButtonCode.KEY_NONE)
+    m.wave_key:ToolTip("HOLD to farm: fire Dragon Slave (Q) at the line aim "
+        .. "hitting the most nearby creeps, plus Light Strike Array (W) on a "
+        .. "dense camp when mana-rich. Player controls movement; the brain only "
+        .. "nukes creeps already in range. Gated by min-creeps + mana floor + "
+        .. "R reserve. KEY_NONE = off until you assign a key.")
+    m.wave_min_creeps = gCore:Slider("Wave-clear: min creeps to fire Q", 1, 6, 3)
+    m.wave_min_creeps:ToolTip("Only cast Q when the line would hit at least this "
+        .. "many creeps. 3 = won't waste Q on a lone creep; fires on stacked "
+        .. "camps / lane waves. Set 1 to nuke anything. W fires at min+1 (a real "
+        .. "pack, not a pair).")
+    m.wave_mana_floor = gCore:Slider("Wave-clear: mana floor %", 0, 90, 30)
+    m.wave_mana_floor:ToolTip("Skip wave-clear entirely while mana fraction is "
+        .. "below this %. Keeps a buffer for fights / saves. 30 = stop farming "
+        .. "below 30% mana.")
+    m.wave_reserve_r = gCore:Switch("Wave-clear reserves R mana", true)
+    m.wave_reserve_r:ToolTip("When ON, never spend Q/W on farm if it would drop "
+        .. "mana below Laguna Blade's cost, so R stays available for a kill. "
+        .. "OFF = farm down to the mana-floor % only.")
+    m.wave_use_w = gCore:Switch("Wave-clear uses W on dense camps", true)
+    m.wave_use_w:ToolTip("Also drop Light Strike Array (W) on a tightly-packed "
+        .. "camp (min-creeps + 1 in the W AoE) when mana allows after Q + the R "
+        .. "reserve. Faster clear + a Fiery Soul stack; spends the stun. OFF = "
+        .. "Q only.")
 
     ------------------------------------------------------------- Defense --
     m.auto_defense = gDef:Switch("Enable auto-defense (Layer 2)", true)
@@ -7801,6 +7993,7 @@ function callbacks.OnUpdateEx()
         state.r_abort_tick()       -- STOP a doomed R mid-cast (refund mana/CD)
         state.lina_r_kill_steal_tick()
         state.combo_key_tick()     -- HOLD/TAP classify + starter/teamfight dispatch
+        state.wave_clear_tick()    -- v0.5.78: HOLD wave-clear (Q line + W dense camp), mana+stack aware
         state.dump_key_tick()      -- v0.5.15 OBS-08: one-press brain state dump bind
         state.panic_key_tick()     -- v0.5.37 MAINT-05: one-press 2.0s panic throttle-bypass bind
         state.test_key_tick()      -- v0.5.17 Track 1: one-press run-all-tests bind
@@ -8672,6 +8865,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.77 (FogSnapshot + 4 fog-aware consumers): user-asked extension of v0.5.76 Pike-advance fog work. User: 'We can keep a fog aware list and make a possible gank feature or something more useful, but it has to be with in the pike advance since this can be shared'. **The refactor**: Escape.FogSnapshot(me, opts) extracted as a shared primitive returning {t, heroes={{entity, pos, age, probable_radius, visible}}}. NearbyEnemiesIncludingFog rewritten to consume it (external API unchanged). opts.snapshot now threads through all consumer functions so one scan can fuel multiple risk evaluations within a frame (SafestSpotNear uses this to run 9 grid samples against one scan instead of nine). **4 new consumers added in lib/escape.lua**: Escape.PossibleGankers(me, pos, eta_s, opts) -> {gankers={{entity, eta_seconds, dist, visibility, age}}, summary={count, soonest_eta, eta_s, max_ms}} sorts by eta ascending; per-enemy time_to_reach = dist/max_ms for visible OR max(0, dist/max_ms - age) for fog. Escape.GankImminent(me, pos, eta_s, min_count, opts) convenience predicate; default min_count=2 (the user-picked '2-man gank' signal), default eta_s 4s. Escape.MissingFromMap(me, min_age_s, opts) rotation tracker, returns {{entity, age, last_pos}} sorted longest-missing-first, default threshold 5s. Escape.InitiatorAccountedFor(me, names, opts) -> {accounted={[name]=bool}, missing, visible, unmatched} for combo gating ('is Magnus visible?'). Escape.SafestSpotNear(me, radius, opts) -> (best_pos, score) grid samples me + 8 cardinal/diagonal points at radius, picks lowest AdvanceRiskScore, GridNav.IsTraversableFromTo filtered. **Lina-side**: 5 state.* aliases (state.fog_snapshot / state.possible_gankers / state.gank_imminent_self / state.missing_from_map / state.initiators_accounted_for / state.safest_spot_near) -- no auto-action wired per user-picked design ('Expose state.* only'). One _fog_opts module-local bundles max_ms=700 + now to avoid re-allocation per call. **Sniper benefit**: same lib API available immediately. **Files**: lib/escape.lua +261 lines (FogSnapshot + 4 consumers + AdvanceRiskScore opts.snapshot plumbing + section header). Lina.lua +55 lines (6 state.* aliases + _fog_opts local). lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean both, no BOM Lina, lesson 15 verified. **Verification on next demo / test**: call state.gank_imminent_self() -- returns (false, {}) at game start (no fog yet). After enemies disappear from minimap, call state.missing_from_map(3) -- should list them with age >= 3s. state.fog_snapshot().heroes should have 5 entries for a 5v5 (visible OR fog, exclude illusions/dead). state.safest_spot_near(800) should return Lina's current pos if she is in safe lane; should pivot to a flanking spot if enemies cluster on one side. No behaviour change to v0.5.75-76 saves or Pike-advance pick. **Deferred slices renumbered**: v0.5.78 wave-clear (was v0.5.77), v0.5.79 R kill-confirm (was v0.5.78), v0.5.80 HUD chips (was v0.5.79). All 3 user-approved from earlier this session.")
+LOG:info("Lina brain v0.5.78 (wave-clear: HOLD, mana + stack aware): first farm feature. User: 'clear wave button to farm (aware of the amount of stacks so it is effective to farm jungle)' + chose HOLD trigger + Q+W scope + Entity.GetUnitsInRadius+TeamType gather. **New lib/farm.lua** (hero-agnostic, PURE GEOMETRY -- zero engine API calls, caller passes a unit-position list): Farm.BestLineAim(origin, units, length, half_width) -> aim_pos hitting most units (candidate dirs toward each unit, tie-break by summed hp); Farm.BestPointAim(units, radius) -> best AoE circle center; Farm.CountInLine(...); Farm.WorthCasting(hit_count, min_count). Reusable for any line/AoE nuke (offense W/Q aim could consume later). **Lina-side**: state.farm_gather_creeps(radius) DEFENSIVE enumeration -- enemy non-hero units = Entity.GetUnitsInRadius(TEAM_ENEMY) MINUS Entity.GetHeroesInRadius(TEAM_ENEMY) (set-difference avoids unverified NPC.IsHero); neutrals = Entity.GetUnitsInRadius(TEAM_NEUTRAL) only if Enum.TeamType.TEAM_NEUTRAL exists (guarded); skip dead/illusion (lib/target) + invulnerable (NPC.IsInvulnerable). ALL pcall-guarded -> degrades to no-creeps instead of crashing if a name/enum is wrong on this build. One-shot farm_gather_probe tlog dumps raw counts so the first demo confirms the API empirically. state.wave_clear_tick() HOLD handler: gather within Q range (1075) -> Farm.BestLineAim -> gate (hit>=min_creeps AND mana>=Qcost AND post-Q mana>=R reserve AND mana%>=floor) -> issue_cast_position Q; then W on dense camp (BestPointAim, hit>=min+1) when mana-rich. Player owns movement; brain only nukes creeps already in range. Skipped while combo active. **Menu (Core)**: Wave-clear key (HOLD, KEY_NONE default opt-in), min-creeps slider (1-6, def 3), mana-floor % slider (0-90, def 30), reserve-R switch (def on), uses-W switch (def on). Wired into OnUpdateEx after combo_key_tick. **Files**: lib/farm.lua NEW (169 lines pure geometry). Lina.lua +~190 (require + 2 state fns + 5 menu items + 1 tick wire). lib/escape + lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean both, no BOM Lina, lesson 15 verified. **Verification on next demo**: HOLD wave-clear key over a creep wave -> farm_gather_probe tlog shows enemy_units/neutral_units/farmable counts + neutral_enum=y|n (CONFIRMS the creep API on this build). wave_clear_q hits=N when >=min creeps in line; wave_clear_w on dense camps. If farmable=0 with creeps present, the gather API needs adjustment (check neutral_enum + enemy_units count). No behaviour change to combos / saves / fog primitives. **Deferred**: v0.5.79 R kill-confirm, v0.5.80 HUD chips.")
 
 return callbacks

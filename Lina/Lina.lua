@@ -2084,6 +2084,25 @@ state.pending_self_push_tick = function()
         state.self_npc, state.pending_self_push, state.escape_cfg)
 end
 
+-- v0.5.76 Pike-advance pick: decision-support primitive for offensive Pike
+-- self-cast toward a target. Returns (landing, risk_score, breakdown) so
+-- callers (combo system, HUD probe, future auto-engage) can fire / skip
+-- based on a threshold. Lib does the geometry + risk math (visible enemies
+-- proximity + fog probable-position via Hero.GetLastMaphackPos /
+-- GetLastVisibleTime). Pike push is 600u along facing-toward-target.
+--
+-- Suggested threshold (caller-chosen, no auto-fire wired yet):
+--   score <= 30  safe-to-advance      (0-1 distant visible enemies)
+--   30 < score <= 60  risky-but-survivable
+--   score > 60  abort                 (multiple close enemies or fog stack)
+state.pike_advance_pick = function(target)
+    return Escape.ComputeAdvanceDest(state.self_npc, target, 600, {
+        engage_radius = 800,
+        max_ms        = 700,
+        now           = now,
+    })
+end
+
 -- v0.5.75 dead-code deletion: state.danger_at_pos + state.safe_push_destination
 -- (the older permissive shape pre-dating the lib/escape extraction at v0.5.57)
 -- removed. Only call sites were each other; Force / Pike self-cast switched to
@@ -8596,6 +8615,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.75.1 HOTFIX (circular require break): lib/threat_data.lua <-> lib/target.lua circular require broke cold load -- C stack overflow at Lina.lua:44 require(lib.target) on game restart. User: 'Not sure what happend but lina disapeared from UC zone menu'. **The cycle**: v0.5.74 added eager `local Target = require(lib.target)` at lib/threat_data.lua:60 so ComputeArrivalTime could call Target.IsAlive. lib/target.lua:271 ALREADY has its own eager `require(lib.threat_data)` for ESCAPE_ITEM_NAMES at line 272. Two-way eager => infinite recursion when neither is cached. **Why v0.5.74-75 seemed to work**: Lina.lua hot-reload at lines 40-42 clears ONLY package.loaded[lib.defense] + package.loaded[lib.escape], NOT package.loaded[lib.target] or [lib.threat_data]. So any reload after the original pre-v0.5.74 cold load got cached Target / TD modules and the cycle never fired. Game restart cleared the Lua state -> cold load triggered the cycle -> stack overflow -> Lina disappeared from UCZone menu (and Sniper.lua hit the same crash, also disappeared). **The fix**: lazy-resolve Target inside ComputeArrivalTime. Module-top declaration changed from `local Target = require(lib.target)` to `local Target` (forward declaration). First ComputeArrivalTime call does `Target = Target or require(lib.target)` -- by then both modules are fully loaded so require returns the cached Target table immediately. **Files touched**: lib/threat_data.lua (1 line replaced + 1 line added in ComputeArrivalTime + extended comment at the module-top forward-decl explaining why). Lina.lua: banner only. lib/escape.lua + lib/defense.lua + Sniper.lua unchanged. **Sniper benefits identically** -- same fix unblocks his cold load too. **Lessons documented**: cache-clear at hero-script top is selective (defense + escape only); shared libs require careful audit for eager bilateral requires; lazy-resolve is the standard pattern when one module's API is needed inside a function only. **Files**: lib/threat_data.lua small surgical fix. Lina.lua banner bump. SHA Lina TBD post-banner-bump, lib/threat_data.lua TBD. luac clean both, no BOM Lina, lesson 15 verified. **Verification on next demo / next cold load**: Lina + Sniper menus both reappear after game restart. No stack overflow at C:\\Umbrella\\debug.log. ComputeArrivalTime still produces same per-mod TTLs as v0.5.74-75 (lazy require returns same Target table; behaviour byte-equivalent).")
+LOG:info("Lina brain v0.5.76 (Pike-advance lib + fog-aware risk): offensive counterpart to v0.5.75's defensive Escape.ComputeSafeDest. User picked all 4 features (A wave-clear, B Pike-advance + risk, C R kill-confirm, D HUD chips); B shipped this slice with the user-asked addition 'check up for possible heroes on the fog might be on PI last seen enemies'. A/C/D deferred to v0.5.77-79 (logged in Deviation Ledger via task list, context budget). **Lib additions (lib/escape.lua, all hero-agnostic)**: Escape.NearbyEnemiesIncludingFog(me, pos, radius, opts) -> v_cnt, f_cnt, list -- enumerates visible enemies (Heroes.InRadius) + fog enemies via Hero.GetLastMaphackPos + Hero.GetLastVisibleTime probable-position circle (age * max_ms, capped at 30s age and 700 max_ms). Per API_GOTCHAS nil GetLastVisibleTime = never-fogged (fresh visible, age=0). Escape.AdvanceRiskScore(me, landing, opts) -> score, breakdown -- composite: visible enemies proximity-weighted (1 - dist/engage) * 30 max per enemy, fog enemies +15 each (half-weight uncertainty discount). Default engage_radius=800u. Escape.PikeAdvanceLanding(me_pos, target_pos, push_dist) -> landing -- deterministic geometry helper, reusable for Force Staff offensive too. Escape.ComputeAdvanceDest(me, target, push_dist, opts) -> landing, score, breakdown -- accepts entity OR Vector target; pure decision-support, NO orders issued by lib. **Lina-side**: state.pike_advance_pick(target) thin alias passing 600u push + 800u engage + now callback. No auto-fire wiring yet -- exposes the primitive for combo integration in a later slice. Suggested threshold band: <=30 safe / 30-60 risky / >60 abort (caller picks; lib only scores). **Sniper benefit**: same lib API available immediately; any pike-carrier hero opts in without rewrite. **Files**: lib/escape.lua +222 lines (4 new entry points + extensive docstrings). Lina.lua +18 lines (one state.* alias). lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean both, no BOM Lina, lesson 15 verified. **Verification on next demo / test**: call state.pike_advance_pick(some_enemy) and observe (landing, score, breakdown). Breakdown.visible_count + fog_count should match the actual nearby+fog enemies; breakdown.visible_score should rise as enemies cluster closer to landing; breakdown.fog_score should rise when long-fogged enemies' probable-position circles reach landing. No behaviour changes to existing v0.5.75 Pike + Force + EUL + WW self-cast saves (different API path). **Deferred slices**: v0.5.77 wave-clear (HOLD trigger + lib/farm.lua), v0.5.78 R kill-confirm gate, v0.5.79 HUD power-spike chips.")
 
 return callbacks

@@ -2103,6 +2103,63 @@ state.pike_advance_pick = function(target)
     })
 end
 
+-- v0.5.77 fog-aware shared primitives. lib/escape.lua extracted FogSnapshot
+-- as the underlying enemy-state scan; these 5 aliases expose it + 4
+-- consumers (PossibleGankers/GankImminent, MissingFromMap, InitiatorAccount-
+-- edFor, SafestSpotNear). No auto-action wired in Lina -- pure decision
+-- support for combo / HUD / future slices.
+--
+-- Pattern is identical to state.pike_advance_pick (v0.5.76): pass
+-- state.self_npc + opts bundle, return lib result verbatim. Threshold
+-- defaults match the user-picked v0.5.77 design (2 enemies arrivable in 4s
+-- for gank, 5s for missing-from-map).
+local _fog_opts = { max_ms = 700, now = now }
+
+state.fog_snapshot = function()
+    return Escape.FogSnapshot(state.self_npc, _fog_opts)
+end
+
+-- Caller may pass an explicit pos (Vector) or omit for "at Lina's current
+-- position". Returns the full PossibleGankers result (gankers list +
+-- summary). Sorted by eta_seconds ascending; summary has count + soonest.
+state.possible_gankers = function(pos, eta_s)
+    local me = state.self_npc
+    local p = pos or (me and Entity.GetAbsOrigin(me)) or nil
+    if not p then return { gankers = {}, summary = { count = 0 } } end
+    return Escape.PossibleGankers(me, p, eta_s or 4.0, _fog_opts)
+end
+
+-- Convenience predicate. Defaults: 4s window, 2 enemies (the user-picked
+-- "common 2-man gank" signal). Returns (bool, ganker_list).
+state.gank_imminent_self = function(eta_s, min_count)
+    local me = state.self_npc
+    local p = me and Entity.GetAbsOrigin(me) or nil
+    if not p then return false, {} end
+    return Escape.GankImminent(me, p, eta_s or 4.0, min_count or 2, _fog_opts)
+end
+
+-- Rotation tracker. Returns list of {entity, age, last_pos} for enemies
+-- off-minimap >= min_age_s seconds. Default 5s. Sorted longest-missing first.
+state.missing_from_map = function(min_age_s)
+    return Escape.MissingFromMap(state.self_npc, min_age_s or 5.0, _fog_opts)
+end
+
+-- Initiator-accounted-for predicate. Pass list of npc_dota_hero_* names;
+-- returns {accounted, missing, visible, unmatched}. Caller decides what
+-- counts as an initiator (typical: Magnus, Tide, Enigma, Earthshaker).
+state.initiators_accounted_for = function(names)
+    return Escape.InitiatorAccountedFor(state.self_npc, names or {}, _fog_opts)
+end
+
+-- Safest-spot grid picker. Samples 8 cardinal+diagonal points at `radius`
+-- plus current pos; returns (best_pos, best_score). Default radius 800u.
+-- One FogSnapshot shared across all 9 scores internally.
+state.safest_spot_near = function(radius)
+    return Escape.SafestSpotNear(state.self_npc, radius or 800, {
+        engage_radius = 800, max_ms = 700, now = now,
+    })
+end
+
 -- v0.5.75 dead-code deletion: state.danger_at_pos + state.safe_push_destination
 -- (the older permissive shape pre-dating the lib/escape extraction at v0.5.57)
 -- removed. Only call sites were each other; Force / Pike self-cast switched to
@@ -8615,6 +8672,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.76 (Pike-advance lib + fog-aware risk): offensive counterpart to v0.5.75's defensive Escape.ComputeSafeDest. User picked all 4 features (A wave-clear, B Pike-advance + risk, C R kill-confirm, D HUD chips); B shipped this slice with the user-asked addition 'check up for possible heroes on the fog might be on PI last seen enemies'. A/C/D deferred to v0.5.77-79 (logged in Deviation Ledger via task list, context budget). **Lib additions (lib/escape.lua, all hero-agnostic)**: Escape.NearbyEnemiesIncludingFog(me, pos, radius, opts) -> v_cnt, f_cnt, list -- enumerates visible enemies (Heroes.InRadius) + fog enemies via Hero.GetLastMaphackPos + Hero.GetLastVisibleTime probable-position circle (age * max_ms, capped at 30s age and 700 max_ms). Per API_GOTCHAS nil GetLastVisibleTime = never-fogged (fresh visible, age=0). Escape.AdvanceRiskScore(me, landing, opts) -> score, breakdown -- composite: visible enemies proximity-weighted (1 - dist/engage) * 30 max per enemy, fog enemies +15 each (half-weight uncertainty discount). Default engage_radius=800u. Escape.PikeAdvanceLanding(me_pos, target_pos, push_dist) -> landing -- deterministic geometry helper, reusable for Force Staff offensive too. Escape.ComputeAdvanceDest(me, target, push_dist, opts) -> landing, score, breakdown -- accepts entity OR Vector target; pure decision-support, NO orders issued by lib. **Lina-side**: state.pike_advance_pick(target) thin alias passing 600u push + 800u engage + now callback. No auto-fire wiring yet -- exposes the primitive for combo integration in a later slice. Suggested threshold band: <=30 safe / 30-60 risky / >60 abort (caller picks; lib only scores). **Sniper benefit**: same lib API available immediately; any pike-carrier hero opts in without rewrite. **Files**: lib/escape.lua +222 lines (4 new entry points + extensive docstrings). Lina.lua +18 lines (one state.* alias). lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean both, no BOM Lina, lesson 15 verified. **Verification on next demo / test**: call state.pike_advance_pick(some_enemy) and observe (landing, score, breakdown). Breakdown.visible_count + fog_count should match the actual nearby+fog enemies; breakdown.visible_score should rise as enemies cluster closer to landing; breakdown.fog_score should rise when long-fogged enemies' probable-position circles reach landing. No behaviour changes to existing v0.5.75 Pike + Force + EUL + WW self-cast saves (different API path). **Deferred slices**: v0.5.77 wave-clear (HOLD trigger + lib/farm.lua), v0.5.78 R kill-confirm gate, v0.5.79 HUD power-spike chips.")
+LOG:info("Lina brain v0.5.77 (FogSnapshot + 4 fog-aware consumers): user-asked extension of v0.5.76 Pike-advance fog work. User: 'We can keep a fog aware list and make a possible gank feature or something more useful, but it has to be with in the pike advance since this can be shared'. **The refactor**: Escape.FogSnapshot(me, opts) extracted as a shared primitive returning {t, heroes={{entity, pos, age, probable_radius, visible}}}. NearbyEnemiesIncludingFog rewritten to consume it (external API unchanged). opts.snapshot now threads through all consumer functions so one scan can fuel multiple risk evaluations within a frame (SafestSpotNear uses this to run 9 grid samples against one scan instead of nine). **4 new consumers added in lib/escape.lua**: Escape.PossibleGankers(me, pos, eta_s, opts) -> {gankers={{entity, eta_seconds, dist, visibility, age}}, summary={count, soonest_eta, eta_s, max_ms}} sorts by eta ascending; per-enemy time_to_reach = dist/max_ms for visible OR max(0, dist/max_ms - age) for fog. Escape.GankImminent(me, pos, eta_s, min_count, opts) convenience predicate; default min_count=2 (the user-picked '2-man gank' signal), default eta_s 4s. Escape.MissingFromMap(me, min_age_s, opts) rotation tracker, returns {{entity, age, last_pos}} sorted longest-missing-first, default threshold 5s. Escape.InitiatorAccountedFor(me, names, opts) -> {accounted={[name]=bool}, missing, visible, unmatched} for combo gating ('is Magnus visible?'). Escape.SafestSpotNear(me, radius, opts) -> (best_pos, score) grid samples me + 8 cardinal/diagonal points at radius, picks lowest AdvanceRiskScore, GridNav.IsTraversableFromTo filtered. **Lina-side**: 5 state.* aliases (state.fog_snapshot / state.possible_gankers / state.gank_imminent_self / state.missing_from_map / state.initiators_accounted_for / state.safest_spot_near) -- no auto-action wired per user-picked design ('Expose state.* only'). One _fog_opts module-local bundles max_ms=700 + now to avoid re-allocation per call. **Sniper benefit**: same lib API available immediately. **Files**: lib/escape.lua +261 lines (FogSnapshot + 4 consumers + AdvanceRiskScore opts.snapshot plumbing + section header). Lina.lua +55 lines (6 state.* aliases + _fog_opts local). lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean both, no BOM Lina, lesson 15 verified. **Verification on next demo / test**: call state.gank_imminent_self() -- returns (false, {}) at game start (no fog yet). After enemies disappear from minimap, call state.missing_from_map(3) -- should list them with age >= 3s. state.fog_snapshot().heroes should have 5 entries for a 5v5 (visible OR fog, exclude illusions/dead). state.safest_spot_near(800) should return Lina's current pos if she is in safe lane; should pivot to a flanking spot if enemies cluster on one side. No behaviour change to v0.5.75-76 saves or Pike-advance pick. **Deferred slices renumbered**: v0.5.78 wave-clear (was v0.5.77), v0.5.79 R kill-confirm (was v0.5.78), v0.5.80 HUD chips (was v0.5.79). All 3 user-approved from earlier this session.")
 
 return callbacks

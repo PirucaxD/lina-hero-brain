@@ -7328,6 +7328,9 @@ local function setup_menu()
         .. "Written to C:\\Umbrella\\debug.log.")
     gDiag:Label("- Brain status (live) -")
     m.lbl_self     = gDiag:Label("self: not acquired")
+    -- v0.5.88: offensive combo-readiness chip (R-CD / mana% / FS / WQR-ready),
+    -- the counterpart to the defensive saves chip below.
+    m.lbl_combo    = gDiag:Label("combo: -")
     m.lbl_counters = gDiag:Label("counts: l1=0 l2=0")
     -- v0.5.80 feature D: live power-spike save readiness (owned items only).
     m.lbl_saves    = gDiag:Label("saves: -")
@@ -8285,10 +8288,48 @@ function callbacks.OnUpdateEx()
                 local hpmax = (Entity.GetMaxHealth and Entity.GetMaxHealth(state.self_npc)) or 1
                 _lbl_set(lbl_s, string.format("self: %s hp %d/%d", uname(state.self_npc), hp, hpmax))
             end
+            -- v0.5.88: combo-readiness chip. Only already-computed values: R
+            -- cooldown, mana %, Fiery Soul stacks, and whether a full W+Q+R is
+            -- castable now (all ready + mana for the combo cost). The offensive
+            -- readout the HUD lacked (it had defensive item CDs but nothing for
+            -- 'is my R up + can I WQR').
+            local lbl_cb = state.menu.lbl_combo
+            if lbl_cb then
+                local me = state.self_npc
+                local txt = "combo: -"
+                if me then
+                    local r = ability(A.R)
+                    local r_txt
+                    if ability_ready(A.R) then
+                        r_txt = "R:rdy"
+                    else
+                        local cd = (r and Ability.GetCooldown and (Ability.GetCooldown(r) or 0)) or 0
+                        r_txt = "R:" .. string.format("%.0f", cd) .. "s"
+                    end
+                    local mana = (NPC.GetMana and NPC.GetMana(me)) or 0
+                    local maxm = (NPC.GetMaxMana and NPC.GetMaxMana(me)) or 1
+                    local mp   = (maxm > 0) and (mana / maxm * 100) or 0
+                    local fs   = compute_fs_state(me)
+                    local wqr  = (ability_ready(A.W) and ability_ready(A.Q) and ability_ready(A.R)
+                                  and mana >= (ability_mana(A.W) + ability_mana(A.Q) + ability_mana(A.R)))
+                                 and "y" or "n"
+                    txt = string.format("combo: %s mana:%.0f%% FS:%d wqr:%s",
+                                        r_txt, mp, (fs and fs.stacks) or 0, wqr)
+                end
+                _lbl_set(lbl_cb, txt)
+            end
+            -- v0.5.88: lbl_counters demoted to a dev readout (verbosity >= 2).
+            -- It is a brain-internal sanity counter the player never acts on; at
+            -- default verbosity it yields its slot's attention to the live
+            -- combat chips (combo / saves / gank / missing).
             local lbl_c = state.menu.lbl_counters
             if lbl_c then
-                _lbl_set(lbl_c, string.format("counts: l1=%d l2=%d",
-                    state.l1_counter or 0, state.l2_counter or 0))
+                if v_level() >= 2 then
+                    _lbl_set(lbl_c, string.format("counts: l1=%d l2=%d",
+                        state.l1_counter or 0, state.l2_counter or 0))
+                else
+                    _lbl_set(lbl_c, "counts: (verbosity >= 2)")
+                end
             end
             -- v0.5.80 feature D: power-spike save chips. Owned items only;
             -- "rdy" or remaining CD per item. Same 1Hz cadence + pcall-safe
@@ -8315,19 +8356,28 @@ function callbacks.OnUpdateEx()
                 _lbl_set(lbl_sv, "saves: "
                     .. ((#parts > 0) and table.concat(parts, " ") or "none owned"))
             end
-            -- v0.5.84: gank-inbound chip (fog-aware). Reads possible_gankers()
-            -- once at 1Hz; shows count + soonest ETA, else "clear".
+            -- v0.5.88 optimize: ONE shared FogSnapshot for both fog chips (was
+            -- two Heroes.GetAll scans per 1Hz tick -- possible_gankers() and
+            -- missing_from_map() each scanned independently). Compute once and
+            -- pass via opts.snapshot to the lib consumers directly.
+            local me_fog   = state.self_npc
+            local snap     = (me_fog and state.fog_snapshot) and state.fog_snapshot() or nil
+            local fog_opts = snap and { max_ms = 700, now = now, snapshot = snap } or nil
+            -- v0.5.84: gank-inbound chip (fog-aware). count + soonest ETA / clear.
             local lbl_gk = state.menu.lbl_gank
             if lbl_gk then
                 local txt = "gank: clear"
-                if state.self_npc and state.possible_gankers then
-                    local pg = state.possible_gankers()
-                    local n = (pg and pg.summary and pg.summary.count) or 0
-                    if n > 0 then
-                        txt = string.format("gank: %d inbound", n)
-                        local soon = pg.summary.soonest_eta
-                        if type(soon) == "number" and soon < math.huge then
-                            txt = txt .. string.format(" ~%.1fs", soon)
+                if me_fog and snap then
+                    local p = Entity.GetAbsOrigin(me_fog)
+                    if p then
+                        local pg = Escape.PossibleGankers(me_fog, p, 4.0, fog_opts)
+                        local n = (pg and pg.summary and pg.summary.count) or 0
+                        if n > 0 then
+                            txt = string.format("gank: %d inbound", n)
+                            local soon = pg.summary.soonest_eta
+                            if type(soon) == "number" and soon < math.huge then
+                                txt = txt .. string.format(" ~%.1fs", soon)
+                            end
                         end
                     end
                 end
@@ -8338,8 +8388,8 @@ function callbacks.OnUpdateEx()
             local lbl_ms = state.menu.lbl_missing
             if lbl_ms then
                 local txt = "missing: -"
-                if state.self_npc and state.missing_from_map then
-                    local mm = state.missing_from_map()
+                if me_fog and snap then
+                    local mm = Escape.MissingFromMap(me_fog, 5.0, fog_opts)
                     if mm and #mm > 0 then
                         local names = {}
                         for i = 1, math.min(3, #mm) do
@@ -9143,6 +9193,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.87 (Blink-out escape save; offensive Blink-in queued): the 4th feature-review item, escape half only (user: 'Escape-Blink now, offensive next session'). Blink Dagger is a CORE item the brain ignored ENTIRELY (grep found item_blink only as an incoming threat). 1200u instant reposition: out-ranges Force/Pike (600u), disjoints late projectiles, breaks target-lock, exits AoE -- the canonical escape for an immobile squishy. **SAVE_FIRE.item_blink added**: unlike Force/Pike it is instant + omnidirectional, so NO turn-then-fire harness -- compute a fog-aware safe landing via state.compute_safe_dest(threat_caster, 1200) (v0.5.75 Escape.ComputeSafeDest, away from caster/centroid) then issue_item_position. **Blink-broken gate**: Blink Dagger is disabled ~3s after taking damage, and NPCLib.item_ready does NOT see that (it is not an item cooldown), so the fire checks Damage.GetRecentDamage(me, 3.0) > 0 and returns false (chain falls through to the next save) when broken -- no wasted no-op dispatch while the threat lands. tlogs blink_escape (fired) / blink_skip_broken / blink_no_safe_dest. **Chain membership**: item_blink inserted into CH.GAP_CLOSE_SAVES after the dispel/lock-break/immunity/full-dodge primaries (WW, glimmer/invis, BKB, Eul) but AHEAD of the 600u Force/Pike pushes -- it is the best physical reposition. CH.GAP_CLOSE_SAVES is shared by the 5 gap-closers (PA strike, Bara charge, Slark pounce, Tusk snowball, QoP blink) via LINA_SAVE_OVERRIDES + ANIM_SAVE_OVERRIDES, so all 5 gain a blink-out option. The .fire self-gates on broken + no-dest and falls through to Force/Pike, so the placement never strands the chain. **lib already blink-ready**: item_blink was already classified in lib/threat_data (SAVE_KIND displacement_blink, SAVE_PUSH_DISTANCE 1200); this slice supplied the missing fire + chain membership, no lib change. **Scoped to gap-close this slice**; line-intercept chain membership (Pudge hook / Mirana / Skewer / Bolt) is a trivial follow-up. **Offensive Blink-in (Blink->W->Q->R initiation) deferred to its own slice** (combo-ladder integration, higher regression risk; designed in the bridge). **Files**: Lina.lua only (SAVE_FIRE.item_blink + 1 chain insert). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: vs a gap-closer when NOT recently damaged, blink_escape fires a 1200u reposition (ahead of force/pike); when recently damaged, blink_skip_broken + chain falls to Eul/Force/Pike. No change to non-gap-close chains. **4-item feature-review batch shipped**: fog-wiring (84), W+Q kill (85), cleanup (86), Blink-escape (87); Aghs-pure dropped (wrong mechanics); offensive-Blink + minor gaps tracked in the bridge.")
+LOG:info("Lina brain v0.5.88 (HUD optimize + better usage): tighten and round out the live Diagnostics HUD before the next chat. **OPTIMIZE**: the two fog chips (gank + missing) each ran their own FogSnapshot (Heroes.GetAll walk) every 1Hz tick. Now ONE shared snapshot: compute state.fog_snapshot() once and pass it via opts.snapshot to Escape.PossibleGankers + Escape.MissingFromMap directly -- 2 enemy-enumeration scans/sec -> 1. **BETTER USAGE 1 -- new combo-readiness chip** (lbl_combo): the HUD had defensive item CDs (saves chip) but NOTHING for the offensive engine. For a hero whose identity is 'is my R up + can I WQR', the new chip shows 'combo: R:rdy mana:62%% FS:5 wqr:y' -- R cooldown (rdy or Ns), mana %, Fiery Soul stacks (compute_fs_state), and whether a full W+Q+R is castable now (all ready + mana >= W+Q+R cost). All values were already computed; zero new heavy work. The offensive counterpart to the v0.5.80 saves chip. **BETTER USAGE 2 -- demote lbl_counters**: the 'counts: l1=N l2=N' label is a brain-internal sanity counter the player never acts on. Now gated behind verbosity >= 2 (dev mode); at default it reads 'counts: (verbosity >= 2)' and yields its attention to the live combat chips. **HUD now (default verbosity)**: self hp | combo (R/mana/FS/wqr) | saves (item CDs) | gank (inbound+ETA) | missing (off-map enemies) -- a coherent offense+defense+awareness readout. **Files**: Lina.lua only (1 menu label + combo-chip block + counters demote + shared-snapshot rework of the 2 fog chips). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: Diagnostics shows the combo chip updating live (R CD ticks, mana%, FS stacks, wqr y/n flips with readiness); gank+missing chips unchanged in output but one fewer fog scan/sec; counters shows the verbosity note at default, real values at verbosity 2+. No gameplay change -- pure HUD/diagnostics. **Tracked next (bridge)**: offensive Blink-in (its own slice), line-intercept blink, auto-deny/Q-harass, camp stack-timing, commit-floor, fog-aware escape landing; a 'can-kill X' verdict could later extend the combo chip once a cheap target probe exists.")
 
 return callbacks

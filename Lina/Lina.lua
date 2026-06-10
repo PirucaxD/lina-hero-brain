@@ -579,7 +579,13 @@ CH.DEFAULT_SAVE_CHAIN = {
 CH.GAP_CLOSE_SAVES = {
     "item_wind_waker", "lina_flame_cloak", "item_glimmer_cape",
     "item_invis_sword", "item_silver_edge", "item_black_king_bar",
-    "item_cyclone", "item_force_staff", "item_hurricane_pike",
+    -- v0.5.87: item_blink slots after the dispel/lock-break/immunity/full-dodge
+    -- primaries (WW dispel, glimmer/invis lock-break, BKB, Eul full-dodge) but
+    -- AHEAD of the 600u Force/Pike pushes -- Blink is the best PHYSICAL reposition
+    -- (1200u, instant, disjoints, breaks lock). Its .fire self-gates on the
+    -- blink-broken (recent-damage) rule and falls through to Force/Pike when
+    -- broken, so this placement never strands the chain.
+    "item_cyclone", "item_blink", "item_force_staff", "item_hurricane_pike",
     "lina_w_anti_gap",  -- v0.5.44 (DEFENSE_PLAN.md sec 2.1 + Q1): tail position; W fires only when all items above are on CD. High-viability targets: Bara Charge, Bara Nether Strike, Tusk Snowball, MK Primal Spring.
 }
 local LINA_SAVE_OVERRIDES = {}
@@ -1560,6 +1566,50 @@ local SAVE_FIRE = {
         fire  = function(intent, threat_caster)
             local it = NPCLib.item(state.self_npc, "item_force_staff"); if not it then return false end
             return state.try_self_push(intent, it, "item_force_staff", 600, threat_caster)
+        end,
+    },
+    -- v0.5.87 feature-review: Blink-out escape (the offensive Blink-in half is
+    -- queued for its own slice). Blink Dagger is a CORE item the brain ignored
+    -- entirely. 1200u instant reposition: out-ranges Force/Pike (600u), disjoints
+    -- late projectiles, breaks target-lock, exits AoE -- the canonical escape for
+    -- an immobile squishy. UNLIKE Force/Pike it is instant + omnidirectional, so
+    -- NO turn-then-fire harness: just compute a fog-aware safe landing (the
+    -- v0.5.75 compute_safe_dest, 1200u away from the threat caster / enemy
+    -- centroid) and position-cast. GATE: Blink Dagger is disabled for ~3s after
+    -- taking damage; NPCLib.item_ready does NOT see that broken state (it is not
+    -- an item cooldown), so check Damage.GetRecentDamage(me, 3.0) explicitly and
+    -- return false (fall through to the next save) when broken -- avoids burning
+    -- a no-op dispatch while the threat lands. item_blink is already classified
+    -- in lib/threat_data (SAVE_KIND displacement_blink, push 1200); this is the
+    -- missing fire + chain membership.
+    item_blink = {
+        short = "blink",
+        fire  = function(intent, threat_caster)
+            local me = state.self_npc
+            local it = me and NPCLib.item(me, "item_blink")
+            if not it then return false end
+            -- blink-broken gate: any recent damage disables the dagger ~3s.
+            if Damage and Damage.GetRecentDamage then
+                local ok, dmg = pcall(Damage.GetRecentDamage, me, 3.0)
+                if ok and type(dmg) == "number" and dmg > 0 then
+                    tlog(2, "blink_skip_broken", { dmg = string.format("%.0f", dmg) })
+                    return false
+                end
+            end
+            local _, landing = state.compute_safe_dest(threat_caster, 1200)
+            if not landing then
+                if TLOG3_ENABLED then tlog(3, "blink_no_safe_dest", {}) end
+                return false
+            end
+            local ok = issue_item_position(intent, "def", it, landing)
+            if ok then
+                tlog(1, "blink_escape", {
+                    x = string.format("%.0f", landing.x),
+                    y = string.format("%.0f", landing.y),
+                    caster = threat_caster and uname(threat_caster) or "centroid",
+                })
+            end
+            return ok
         end,
     },
     -- Pike used like Sniper (hero-agnostic convention): PRIMARY is enemy-target
@@ -9093,6 +9143,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.86 (cut/cleanup pass): the feature-review cut candidates, all dead-weight removals with zero behaviour change. **1) imp_a10_mr_probe removed**: the one-shot NPC.GetMagicalResist diagnostic (+ its state.imp_a10_probed_once latch) in the ether-needed gate. The API contract is known/stable; the probe + per-tick latch check was dead weight in the offense hot path. The mr_val/mr_significant/wqr_undershoots/ether_needed computation is UNCHANGED -- only the diagnostic tlog + latch deleted. **2) override_autodisabler toggle removed**: DEPRECATED / explicit no-op since v0.5.54 (the Pike-on-Bara conflict is handled at the data layer by dropping Pike prep_time; state.AD.disable was already gone from OnUpdateEx). The menu Switch + its 13-line tooltip were read NOWHERE functional -- pure menu clutter. **3) wave-clear 'stack-aware' comment corrected**: the v0.5.78 comments oversold the feature ('mana + stack aware') -- there is NO stack-TIMING logic (no pull/stack-window scheduler). Corrected to 'mana-floor + creep-count gated' (the min-creeps gate is 'fire only on enough creeps' = effective on already-stacked camps, not a scheduler). The real stack-timing ask remains a tracked gap. **NOT cut**: lbl_counters (the review suggested demoting it, but the HUD is not slot-limited now that gank/missing chips exist; left as-is). **Files**: Lina.lua only (3 deletions + comment fixes). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. Zero behaviour change -- ether gate, wave-clear, AutoDisabler interaction all identical (the removed toggle was already no-op). **Verification on next demo**: no imp_a10_mr_probe tlog at session start (gone); the 'Override AutoDisabler' menu entry is absent; ether/wave/save behaviour unchanged. **Feature-review batch status**: move #1 fog-wiring (v0.5.84), W+Q kill predicate (v0.5.85), cleanup (v0.5.86) all shipped; the Aghs-pure half was correctly dropped as outdated mechanics. REMAINING: Blink (offense initiation + escape save) -- the largest gap, high combo-ladder regression risk, gets its own careful slice.")
+LOG:info("Lina brain v0.5.87 (Blink-out escape save; offensive Blink-in queued): the 4th feature-review item, escape half only (user: 'Escape-Blink now, offensive next session'). Blink Dagger is a CORE item the brain ignored ENTIRELY (grep found item_blink only as an incoming threat). 1200u instant reposition: out-ranges Force/Pike (600u), disjoints late projectiles, breaks target-lock, exits AoE -- the canonical escape for an immobile squishy. **SAVE_FIRE.item_blink added**: unlike Force/Pike it is instant + omnidirectional, so NO turn-then-fire harness -- compute a fog-aware safe landing via state.compute_safe_dest(threat_caster, 1200) (v0.5.75 Escape.ComputeSafeDest, away from caster/centroid) then issue_item_position. **Blink-broken gate**: Blink Dagger is disabled ~3s after taking damage, and NPCLib.item_ready does NOT see that (it is not an item cooldown), so the fire checks Damage.GetRecentDamage(me, 3.0) > 0 and returns false (chain falls through to the next save) when broken -- no wasted no-op dispatch while the threat lands. tlogs blink_escape (fired) / blink_skip_broken / blink_no_safe_dest. **Chain membership**: item_blink inserted into CH.GAP_CLOSE_SAVES after the dispel/lock-break/immunity/full-dodge primaries (WW, glimmer/invis, BKB, Eul) but AHEAD of the 600u Force/Pike pushes -- it is the best physical reposition. CH.GAP_CLOSE_SAVES is shared by the 5 gap-closers (PA strike, Bara charge, Slark pounce, Tusk snowball, QoP blink) via LINA_SAVE_OVERRIDES + ANIM_SAVE_OVERRIDES, so all 5 gain a blink-out option. The .fire self-gates on broken + no-dest and falls through to Force/Pike, so the placement never strands the chain. **lib already blink-ready**: item_blink was already classified in lib/threat_data (SAVE_KIND displacement_blink, SAVE_PUSH_DISTANCE 1200); this slice supplied the missing fire + chain membership, no lib change. **Scoped to gap-close this slice**; line-intercept chain membership (Pudge hook / Mirana / Skewer / Bolt) is a trivial follow-up. **Offensive Blink-in (Blink->W->Q->R initiation) deferred to its own slice** (combo-ladder integration, higher regression risk; designed in the bridge). **Files**: Lina.lua only (SAVE_FIRE.item_blink + 1 chain insert). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: vs a gap-closer when NOT recently damaged, blink_escape fires a 1200u reposition (ahead of force/pike); when recently damaged, blink_skip_broken + chain falls to Eul/Force/Pike. No change to non-gap-close chains. **4-item feature-review batch shipped**: fog-wiring (84), W+Q kill (85), cleanup (86), Blink-escape (87); Aghs-pure dropped (wrong mechanics); offensive-Blink + minor gaps tracked in the bridge.")
 
 return callbacks

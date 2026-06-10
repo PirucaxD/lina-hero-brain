@@ -6579,7 +6579,13 @@ state.tests["Q82_fog_escape_alias_contracts"] = {
            or type(pg.summary) ~= "table" or type(pg.summary.count) ~= "number" then
             return { pass = false, reason = "possible_gankers shape" }
         end
-        local gi, glist = state.gank_imminent_self and state.gank_imminent_self()
+        if type(state.gank_imminent_self) ~= "function" then
+            return { pass = false, reason = "gank_imminent_self missing" }
+        end
+        -- v0.5.89: do NOT write `local gi, glist = X and X()`. The `and`
+        -- truncates the call to ONE value, so glist=nil and the shape check
+        -- false-fails (the v0.5.49 multi-return lesson). Call directly.
+        local gi, glist = state.gank_imminent_self()
         if type(gi) ~= "boolean" or type(glist) ~= "table" then
             return { pass = false, reason = "gank_imminent_self shape" }
         end
@@ -6595,7 +6601,11 @@ state.tests["Q82_fog_escape_alias_contracts"] = {
         if landing ~= nil then
             return { pass = false, reason = "pike_advance_pick(nil) should be nil" }
         end
-        local sp, sc = state.safest_spot_near and state.safest_spot_near()
+        if type(state.safest_spot_near) ~= "function" then
+            return { pass = false, reason = "safest_spot_near missing" }
+        end
+        -- v0.5.89: same multi-return truncation guard as gank_imminent_self.
+        local sp, sc = state.safest_spot_near()
         if sp ~= nil or type(sc) ~= "number" then
             return { pass = false, reason = "safest_spot_near shape" }
         end
@@ -9193,6 +9203,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.88 (HUD optimize + better usage): tighten and round out the live Diagnostics HUD before the next chat. **OPTIMIZE**: the two fog chips (gank + missing) each ran their own FogSnapshot (Heroes.GetAll walk) every 1Hz tick. Now ONE shared snapshot: compute state.fog_snapshot() once and pass it via opts.snapshot to Escape.PossibleGankers + Escape.MissingFromMap directly -- 2 enemy-enumeration scans/sec -> 1. **BETTER USAGE 1 -- new combo-readiness chip** (lbl_combo): the HUD had defensive item CDs (saves chip) but NOTHING for the offensive engine. For a hero whose identity is 'is my R up + can I WQR', the new chip shows 'combo: R:rdy mana:62%% FS:5 wqr:y' -- R cooldown (rdy or Ns), mana %, Fiery Soul stacks (compute_fs_state), and whether a full W+Q+R is castable now (all ready + mana >= W+Q+R cost). All values were already computed; zero new heavy work. The offensive counterpart to the v0.5.80 saves chip. **BETTER USAGE 2 -- demote lbl_counters**: the 'counts: l1=N l2=N' label is a brain-internal sanity counter the player never acts on. Now gated behind verbosity >= 2 (dev mode); at default it reads 'counts: (verbosity >= 2)' and yields its attention to the live combat chips. **HUD now (default verbosity)**: self hp | combo (R/mana/FS/wqr) | saves (item CDs) | gank (inbound+ETA) | missing (off-map enemies) -- a coherent offense+defense+awareness readout. **Files**: Lina.lua only (1 menu label + combo-chip block + counters demote + shared-snapshot rework of the 2 fog chips). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: Diagnostics shows the combo chip updating live (R CD ticks, mana%, FS stacks, wqr y/n flips with readiness); gank+missing chips unchanged in output but one fewer fog scan/sec; counters shows the verbosity note at default, real values at verbosity 2+. No gameplay change -- pure HUD/diagnostics. **Tracked next (bridge)**: offensive Blink-in (its own slice), line-intercept blink, auto-deny/Q-harass, camp stack-timing, commit-floor, fog-aware escape landing; a 'can-kill X' verdict could later extend the combo chip once a cheap target probe exists.")
+LOG:info("Lina brain v0.5.89 (Q82 test-capture hotfix): the in-brain suite's Q82_fog_escape_alias_contracts was the only red item in the v0.5.88 demo (6/7) and it was a TEST bug, not a regression. Two capture sites used `local a, b = X and X()`; the `and` operator truncates the call's second return to ONE value (glist=nil, sc=nil), so the multi-return shape checks for state.gank_imminent_self (bool,list) and state.safest_spot_near (nil,number) false-failed. Production aliases are correct: gank_imminent_self returns false,{} when self_npc=nil; Escape.GankImminent returns bool,list; Escape.SafestSpotNear returns nil,math.huge. Fix: guard each alias with an explicit type=='function' check, then call it directly so the multi-return survives (the v0.5.49 multi-return lesson, now applied to the harness). Test-only change inside state.tests; ZERO gameplay impact. Restores the in-brain suite to 7/7. Files: Lina.lua only (Q82 test body). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified. Verification: press 'Run all brain tests' -> test_summary failed=0 passed=7 total=7, Q82 pass=y. Still queued (bridge): jungle neutral enumeration (v0.5.88 farm_gather_probe showed neutral_enum=n, Enum.TeamType.TEAM_NEUTRAL is nil on this build, lane clear works, jungle does not); escape-Blink re-demo (v0.5.88 gap-closer was Primal Beast, not one of the 5 CH.GAP_CLOSE_SAVES gap-closers); offensive Blink-in slice.")
 
 return callbacks

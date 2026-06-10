@@ -4030,6 +4030,23 @@ local Q_HALF_WIDTH, Q_LENGTH, Q_LINE_LEAD = 110, 1075, 0.8
 -- and the wqr fall-through bound any error to "engage without ethereal".
 local ETHER_MAGIC_AMP = 0.40
 
+-- v0.5.80 feature D: power-spike save chips for the live Diagnostics HUD.
+-- The at-a-glance "am I safe right now" set: high-impact defensive saves +
+-- the displacement chain heads. Only items Lina actually owns render (compact
+-- line); each shows "rdy" or remaining cooldown in seconds. Menu-label HUD
+-- (1Hz refresh), NOT an OnDraw overlay (feedback_hero_brain_iteration).
+local POWER_SPIKE_SAVES = {
+    { name = "item_black_king_bar", short = "BKB" },
+    { name = "item_lotus_orb",      short = "Lotus" },
+    { name = "item_aeon_disk",      short = "Aeon" },
+    { name = "item_ethereal_blade", short = "Ether" },
+    { name = "item_wind_waker",     short = "WW" },
+    { name = "item_cyclone",        short = "Eul" },
+    { name = "item_glimmer_cape",   short = "Glimmer" },
+    { name = "item_hurricane_pike", short = "Pike" },
+    { name = "item_force_staff",    short = "Force" },
+}
+
 -- Alive, non-illusion, non-magic-immune enemy heroes within `radius` of a point.
 -- Shared by w_aim and the teamfight cluster / Q-poke aim - only enemies W/Q can
 -- actually affect (magic-immune takes no stun/damage and gives no Fiery Soul).
@@ -7161,6 +7178,8 @@ local function setup_menu()
     gDiag:Label("- Brain status (live) -")
     m.lbl_self     = gDiag:Label("self: not acquired")
     m.lbl_counters = gDiag:Label("counts: l1=0 l2=0")
+    -- v0.5.80 feature D: live power-spike save readiness (owned items only).
+    m.lbl_saves    = gDiag:Label("saves: -")
     -- v0.5.15 OBS-08: one-press dump of armed_threats, pending_steps,
     -- responded_threats, last_save_*, fs stacks. Press fires one multi-line
     -- tlog burst at level 1 (always on at default verbosity). KEY_NONE so
@@ -8115,6 +8134,31 @@ function callbacks.OnUpdateEx()
                 _lbl_set(lbl_c, string.format("counts: l1=%d l2=%d",
                     state.l1_counter or 0, state.l2_counter or 0))
             end
+            -- v0.5.80 feature D: power-spike save chips. Owned items only;
+            -- "rdy" or remaining CD per item. Same 1Hz cadence + pcall-safe
+            -- _lbl_set as the lines above.
+            local lbl_sv = state.menu.lbl_saves
+            if lbl_sv then
+                local me = state.self_npc
+                local parts = {}
+                if me then
+                    for i = 1, #POWER_SPIKE_SAVES do
+                        local s  = POWER_SPIKE_SAVES[i]
+                        local it = NPCLib.item(me, s.name)
+                        if it then
+                            if NPCLib.item_ready(me, s.name) then
+                                parts[#parts + 1] = s.short .. ":rdy"
+                            else
+                                local cd = (Ability.GetCooldown and Ability.GetCooldown(it)) or 0
+                                parts[#parts + 1] = s.short .. ":"
+                                    .. string.format("%.0f", cd) .. "s"
+                            end
+                        end
+                    end
+                end
+                _lbl_set(lbl_sv, "saves: "
+                    .. ((#parts > 0) and table.concat(parts, " ") or "none owned"))
+            end
         end
     end
     cast_verify_tick()  -- ground-truth verification of issued casts (lesson 58)
@@ -8907,6 +8951,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.79 (feature C: Ethereal+R kill-confirm): gate the ether_wqr starter commit on a calculated post-amp magical kill. User picked C from the feature menu; spec 'Only commit Ethereal+R if calculated post-amp magical kill, uses existing lina_r_damage + lina_eff_hp_magical'. **The gate**: before the starter archetype ladder picks ether_wqr, compute ether_kill_ok = eff_hp_magical <= r_total * (1 + ETHER_MAGIC_AMP) where ETHER_MAGIC_AMP=0.40 (Ethereal Blade magic amp ~+40% in 7.4x; the IMP-A10 gate already frames ethereal as a -30 MR amp). Added `and ether_kill_ok` to the ether_wqr branch condition (alongside the existing ether_needed MR/undershoot gate). **R-centric by design**: consistent with the whole codebase's kill model (r_alone_kill + wqr_undershoots also use r_total only; there is no W/Q damage estimation anywhere). **Bounded risk**: on a no-kill verdict the ladder FALLS THROUGH to eul_wrq / ww_wrq / wqr -- Lina STILL engages but preserves the 4s-lockout Ethereal finisher for a confirmed kill. Worst case of a wrong amp is 'engaged without ethereal occasionally', NOT a missed kill or death. **Toggle** m.ether_kill_confirm (Core, default ON) gates the whole check; OFF reverts to v0.5.78 (ether_wqr fires on ether_needed regardless of kill). **tlog** ether_kill_confirm_skip (level 2) records each suppression with eff_hp / r_total / amplified / amp for demo tuning of ETHER_MAGIC_AMP. ladder-miss diag ether_ok bit updated to include ether_kill_ok. r_finisher path unchanged (already requires r_alone_kill). teamfight tick unchanged (this is starter/pick only). **No lib work** -- hero-specific kill model. **Files**: Lina.lua only (+ETHER_MAGIC_AMP const + ether_kill_ok compute + branch condition + menu toggle + banner). lib/farm + lib/escape + lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: vs a tanky/full-HP target where ether+R would not kill -> ether_kill_confirm_skip tlog + archetype falls to wqr/eul/ww (NOT ether_wqr); ethereal stays unspent. vs a killable target -> ether_wqr fires as before. Toggle OFF -> v0.5.78 behaviour. If ether_wqr is being suppressed on kills it SHOULD make (amp too low) bump ETHER_MAGIC_AMP; if it commits ethereal on non-kills, lower it. **Deferred**: v0.5.80 D Save HUD power-spike chips (last queued feature).")
+LOG:info("Lina brain v0.5.80 (feature D: save HUD power-spike chips): last item in the 4-feature batch (A wave-clear / B pike-advance / C ether kill-confirm / D this). User picked D; spec 'Menu HUD shows BKB/Lotus/Aeon/Aether ready/CD chips, pure UI on existing dispatcher state'. **Implementation**: a third live Diagnostics label m.lbl_saves (after lbl_self / lbl_counters), refreshed in the existing 1Hz block in OnUpdateEx via the same pcall-safe _lbl_set. Renders a compact 'saves: BKB:rdy Lotus:8s Aeon:rdy ...' line. **Menu-label HUD, NOT OnDraw** (feedback_hero_brain_iteration rule). **Curated power-spike set** POWER_SPIKE_SAVES (module-level local, 9 entries): item_black_king_bar (BKB), item_lotus_orb (Lotus), item_aeon_disk (Aeon), item_ethereal_blade (Ether -- the 'Aether' from the spec), item_wind_waker (WW), item_cyclone (Eul), item_glimmer_cape (Glimmer), item_hurricane_pike (Pike), item_force_staff (Force). **Owned items only render** -- the line stays compact and shows 'none owned' if Lina has no save items yet. Each chip: NPCLib.item_ready -> 'rdy', else Ability.GetCooldown -> 'Ns'. **Pure read-only UI** -- no behaviour change to combos / saves / farm / fog / kill-confirm; zero new dispatch logic. Reuses the verified label + item APIs already in production (lbl_self pattern + NPCLib.item/item_ready). **No lib work** (hero-specific HUD). **Files**: Lina.lua only (POWER_SPIKE_SAVES const + lbl_saves label decl + 1Hz refresh block + banner). lib/farm + lib/escape + lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified. **4-feature batch COMPLETE** (A v0.5.78 / B v0.5.76 / C v0.5.79 / D v0.5.80). **Verification on next demo**: Diagnostics menu shows the live 'saves:' line updating at 1Hz with rdy/CD per owned save item; matches actual item cooldowns. No gameplay change. **Open verification debt for the batch**: v0.5.78 creep-enumeration API (farm_gather_probe tlog) + v0.5.79 ETHER_MAGIC_AMP value both want a real demo to confirm/tune before building further farm/offense logic.")
 
 return callbacks

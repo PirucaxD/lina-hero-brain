@@ -1033,4 +1033,41 @@ function Escape.SafestSpotNear(me, radius, opts)
     return best_pos, best_score
 end
 
+---Offensive Blink-in landing. Pick a point to blink to so `aim_pos` ends up
+---within `engage_range` of `me`, diving as little as possible (near edge), and
+---never beyond `blink_range` from `me`. Pure geometry + a fog/proximity risk
+---score (Escape.AdvanceRiskScore). Hero-agnostic; Lina + any blink carrier.
+---@param me userdata
+---@param aim_pos table Vector {x,y,z} (target or cluster center)
+---@param blink_range number max blink travel (e.g. 1200)
+---@param engage_range number desired distance to aim_pos at landing (e.g. W range)
+---@param opts table|nil { margin=50, max_ms, now, snapshot }
+---@return table|nil landing, number risk_score, boolean reachable
+function Escape.BlinkInLanding(me, aim_pos, blink_range, engage_range, opts)
+    if not (me and aim_pos and blink_range and engage_range) then
+        return nil, math.huge, false
+    end
+    local me_pos = Entity.GetAbsOrigin(me)
+    if not me_pos then return nil, math.huge, false end
+    opts = opts or {}
+    local margin = opts.margin or 50
+    local dx, dy = me_pos.x - aim_pos.x, me_pos.y - aim_pos.y
+    local d_aim = math.sqrt(dx * dx + dy * dy)
+    if d_aim < 1e-3 then
+        return me_pos, Escape.AdvanceRiskScore(me, me_pos, opts), true
+    end
+    local ux, uy = dx / d_aim, dy / d_aim
+    local edge = math.max(0, engage_range - margin)
+    local landing = Vector(aim_pos.x + ux * edge, aim_pos.y + uy * edge, me_pos.z)
+    local ldx, ldy = landing.x - me_pos.x, landing.y - me_pos.y
+    local reachable = true
+    if math.sqrt(ldx * ldx + ldy * ldy) > blink_range then
+        local fx, fy = -ux, -uy
+        landing = Vector(me_pos.x + fx * blink_range, me_pos.y + fy * blink_range, me_pos.z)
+        local adx, ady = aim_pos.x - landing.x, aim_pos.y - landing.y
+        reachable = (math.sqrt(adx * adx + ady * ady) <= engage_range)
+    end
+    return landing, Escape.AdvanceRiskScore(me, landing, opts), reachable
+end
+
 return Escape

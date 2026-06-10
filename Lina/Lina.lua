@@ -2232,6 +2232,157 @@ state.safest_spot_near = function(radius)
     })
 end
 
+-- v0.5.92 offensive Blink-in helpers (design: Lina/BLINK_IN_DESIGN.md).
+local _blink_in_opts = { max_ms = 700, now = now }
+
+-- v0.5.95.1 crash-fix: cast_range_of is a module-local defined ~1600 lines below
+-- this block, so calling it here resolved as a nil global and crashed the tick
+-- (Lina.lua:2282, the TF blink-in path -- blink_in_tf_in_range runs BEFORE the
+-- toggle gate, so it broke TF even with the toggles OFF). Mirror cast_range_of
+-- inline: ability (line 343) + Ability.GetCastRange + FALLBACK_RANGES (line 201)
+-- are all in scope here. state.* so it adds no module-local (the 200-local limit).
+state.blink_w_range = function()
+    local a = ability("lina_light_strike_array")
+    if a and Ability.GetCastRange then
+        local ok, r = pcall(Ability.GetCastRange, a)
+        if ok and type(r) == "number" and r > 0 then return r end
+    end
+    return FALLBACK_RANGES.W
+end
+
+-- Thin alias over the lib landing-picker: 1200u blink reach, W range as engage.
+state.blink_in_pick = function(aim_pos)
+    local w_range = state.blink_w_range()
+    return Escape.BlinkInLanding(state.self_npc, aim_pos, 1200, w_range, _blink_in_opts)
+end
+
+-- Cast Blink Dagger at a ground position on the AGGRESSIVE layer (reuses the
+-- same issue path the escape-Blink uses at issue_item_position).
+state.issue_blink_to = function(pos, intent)
+    local me = state.self_npc
+    local it = me and NPCLib.item(me, "item_blink")
+    if not (it and pos) then return false end
+    return issue_item_position(intent, "agg", it, pos)
+end
+
+-- Any non-Blink escape item ready (initiate mode needs an out, since the
+-- offensive blink leaves Blink on cooldown).
+state.has_exit_item = function(me)
+    for _, name in ipairs({ "item_force_staff", "item_hurricane_pike",
+                            "item_cyclone", "item_wind_waker" }) do
+        if NPCLib.item_ready(me, name) then return true end
+    end
+    return false
+end
+
+-- Lina HP fraction 0..1 (verified Entity.* accessors; degrades to 1.0).
+state.blink_in_hp_frac = function(me)
+    if not (me and Entity.IsAlive and Entity.IsAlive(me)
+            and Entity.GetHealth and Entity.GetMaxHealth) then return 1.0 end
+    local h, m = Entity.GetHealth(me), Entity.GetMaxHealth(me)
+    if not (h and m and m > 0) then return 1.0 end
+    return h / m
+end
+
+state.blink_in_skip = function(reason)
+    tlog(2, "blink_in_skip", { reason = reason })
+end
+
+-- Range predicate for TF cluster blink-in: true when the cluster center is
+-- already within W range (no blink needed).
+state.blink_in_tf_in_range = function(center)
+    local me = state.self_npc
+    local mp = me and Entity.GetAbsOrigin(me)
+    if not (mp and center) then return true end       -- no info -> treat as in range (skip blink)
+    local w_range = state.blink_w_range()
+    local dx, dy = center.x - mp.x, center.y - mp.y
+    return (dx * dx + dy * dy) <= (w_range * w_range)
+end
+
+-- Shared offensive blink-in gate. aim_pos = target pos (starter) or cluster
+-- center (TF). kill_confirmed = a kill is locked on the aim. cluster_n = hero
+-- count at the aim (1 for single-target). Returns true if a blink was issued
+-- (caller must then `return` for the tick; next tick the in-range ladder fires).
+state.try_blink_in = function(ctx, aim_pos, name, kill_confirmed, cluster_n)
+    local m  = state.menu
+    local me = state.self_npc
+    if not (m and me and aim_pos) then return false end
+    local kill_on     = m.blink_in_kill and m.blink_in_kill:Get()
+    local initiate_on = m.blink_in_initiate and m.blink_in_initiate:Get()
+    if not (kill_on or initiate_on) then return false end       -- feature off
+
+    -- anti-spam latch: do not re-issue within 0.3s (Blink CD covers longer gaps).
+    if (now() - (state.blink_in_fired_t or 0)) < 0.3 then return false end
+
+    -- base gates
+    if not NPCLib.item_ready(me, "item_blink") then state.blink_in_skip("not_ready"); return false end
+    if Damage and Damage.GetRecentDamage then
+        local ok, dmg = pcall(Damage.GetRecentDamage, me, 3.0)
+        if ok and type(dmg) == "number" and dmg > 0 then state.blink_in_skip("broken"); return false end
+    end
+    -- v0.5.95 reserve the dagger for the engine's defensive dodge: do NOT blink
+    -- offensively while a threat is incoming (an armed homing threat, or a forming
+    -- gank). If the engine wants the dagger to escape, leave it for the engine
+    -- (the user's "do not fight the engine" direction). The v0.5.94 capitalize
+    -- path handles the case where the engine DID blink.
+    if next(state.armed_threats) ~= nil
+       or (state.gank_imminent_self and state.gank_imminent_self()) then
+        state.blink_in_skip("reserve_defense"); return false
+    end
+    -- v0.5.95 crash-fix: compute the W+Q+R mana cost inline. ability_mana is a
+    -- module-local defined ~2000 lines below, so calling it here resolved as a
+    -- nil global and crashed in v0.5.92 (Lina.lua:2308). `ability` (line 343) +
+    -- the canonical ability names + Ability.GetManaCost ARE in scope here.
+    local function _amana(n)
+        local a = ability(n)
+        return (a and Ability.GetManaCost and (Ability.GetManaCost(a) or 0)) or 0
+    end
+    local cost_wqr = _amana("lina_light_strike_array")
+                     + _amana("lina_dragon_slave") + _amana("lina_laguna_blade")
+    if (ctx.mana or 0) < cost_wqr then state.blink_in_skip("no_mana"); return false end
+
+    local landing, risk, reachable = state.blink_in_pick(aim_pos)
+    if not (landing and reachable) then state.blink_in_skip("unreachable"); return false end
+
+    -- mode select: kill-commit takes priority when a kill is confirmed.
+    local mode, risk_cap
+    if kill_on and kill_confirmed then
+        mode     = "kill"
+        risk_cap = (m.blink_in_kill_risk and m.blink_in_kill_risk:Get()) or 60
+    elseif initiate_on then
+        mode     = "initiate"
+        risk_cap = (m.blink_in_initiate_risk and m.blink_in_initiate_risk:Get()) or 30
+        if (cluster_n or 1) < 2 and (cluster_n or 1) ~= 1 then
+            -- TF initiate needs >=2; single-target (cluster_n==1) is allowed.
+            state.blink_in_skip("cluster_small"); return false
+        end
+        if not state.has_exit_item(me) then state.blink_in_skip("no_exit"); return false end
+        local hp_floor = (m.blink_in_initiate_hp and m.blink_in_initiate_hp:Get()) or 40
+        if state.blink_in_hp_frac(me) * 100 < hp_floor then state.blink_in_skip("hp_floor"); return false end
+    else
+        return false                                            -- kill mode off and no kill
+    end
+    if risk > risk_cap then state.blink_in_skip("fog_risk"); return false end
+
+    local intent = "blink_in_" .. mode .. "_" .. (name or "t")
+    local ok = state.issue_blink_to(landing, intent)
+    if ok then
+        state.blink_in_fired_t = now()
+        state.brain_blinked_t  = now()   -- v0.5.95: tag so the v0.5.94 engine-blink
+                                         -- detector does NOT treat our own blink as
+                                         -- an engine blink (the brain-cast has its
+                                         -- own next-tick combo; no double-fire).
+        tlog(1, "blink_in_fire", {
+            mode = mode, aim = name or "?",
+            x = string.format("%.0f", landing.x),
+            y = string.format("%.0f", landing.y),
+            risk = string.format("%.0f", risk),
+            kill = kill_confirmed and "y" or "n",
+        })
+    end
+    return ok
+end
+
 -- v0.5.75 dead-code deletion: state.danger_at_pos + state.safe_push_destination
 -- (the older permissive shape pre-dating the lib/escape extraction at v0.5.57)
 -- removed. Only call sites were each other; Force / Pike self-cast switched to
@@ -4889,6 +5040,21 @@ state.lina_starter_tick = function(force)
     local fast = (target and NPC.GetMoveSpeed and (NPC.GetMoveSpeed(target) or 0) >= 290) or false
     local target_fleeing_fast = ctx.kiting_us and fast and (ctx.eff_hp_magical <= ctx.r_impact)
 
+    -- v0.5.95 brain-cast blink-in (re-enabled, crash-fixed): when the target is
+    -- OUT of W range and the Blink Dagger is READY (= the engine did NOT use it),
+    -- blink to W-range; next tick the in-range ladder fires the burst. try_blink_in
+    -- reserves the dagger if a threat is incoming (leaves it for the engine's
+    -- dodge), and tags brain_blinked_t so v0.5.94 capitalize does not double-fire.
+    -- If the engine DID blink (dagger on CD), this is skipped and capitalize covers
+    -- it instead. Only when out of range (in-range combos are unchanged).
+    if not ctx.in_w_range then
+        local kill_confirmed = ctx.combo_kill or ctx.r_alone_kill
+        if state.try_blink_in(ctx, ctx.t_pos or Entity.GetAbsOrigin(target),
+                              uname(target), kill_confirmed, 1) then
+            return
+        end
+    end
+
     -- Wind Waker dual role: it is both a cyclone SETUP source and Lina's top
     -- defensive SAVE. Reserve 175 mana for it on combos that do NOT spend it
     -- (Gate 11: never die with a usable save); the WW-cyclone combo spends it,
@@ -5454,6 +5620,20 @@ state.lina_teamfight_tick = function(force)
         local q_range = cast_range_of(ability(A.Q), FALLBACK_RANGES.Q)
         local mana    = (NPC.GetMana and NPC.GetMana(me)) or 0
         local q_in_range = me_pos and me_pos:Distance2D(cluster_center) <= q_range
+        -- v0.5.95.2 TF blink-in (FIXED placement): the cluster is OUT of W range
+        -- here, so THIS is where a brain-cast blink must gap-close it. The v0.5.92
+        -- block was wrongly placed AFTER this early-return, so it only ran when
+        -- already in range and never blinked an out-of-range cluster in. Try to
+        -- blink; if it fires, return (next tick we are in W range -> tf_burst),
+        -- else fall through to the Q poke. try_blink_in self-gates on toggle /
+        -- dagger-ready / reserve-for-defense, so this is a no-op when OFF.
+        do
+            local r_range_b = cast_range_of(ability(A.R), FALLBACK_RANGES.R)
+            local kc = state.tf_r_value_target(me, cluster_center, 250, r_range_b) ~= nil
+            if state.try_blink_in({ mana = mana }, cluster_center, "cluster", kc, cluster_n or 1) then
+                return
+            end
+        end
         if not layer1_in_lock() and ability_ready(A.Q) and q_in_range
            and mana >= ability_mana(A.Q) then
             -- v0.5.21 IMP-A5: tf_q_poke is purely stack-feeding (Q at distant
@@ -5632,6 +5812,11 @@ state.lina_teamfight_tick = function(force)
     -- re-clustered on each (re)issue) - consistent with starter's live w_aim. See
     -- build_lina_tf_steps. cluster_center above is still used for the range gate +
     -- the r_target snipe selection.
+
+    -- v0.5.95.2: the TF brain-cast blink-in MOVED UP into the not-cluster_in_range
+    -- branch (a blink must gap-close a cluster that is OUT of W range; by this point
+    -- we are already in W range, so a blink dispatch here only ever no-op'd).
+    -- state.blink_in_tf_in_range is now unused (left dormant).
 
     -- tf_burst: W+Q on the cluster + R on the cluster-local snipe. Fires through
     -- the light (seq) lock; the R commit then hard-locks re-entry for 3s.
@@ -6148,6 +6333,39 @@ state.combo_key_tick = function()
         state.combo_hold_active_mode = nil
     end
     state.combo_key_was_down = down
+end
+
+-- v0.5.94 engine-blink CAPITALIZE: for a short window after the engine blinks
+-- Lina, run the combo dispatch as if engaged (the engine repositioned us; the
+-- brain bursts). Default OFF. The brain does NOT cast blink (that fights the
+-- engine + crashed in v0.5.92); it seizes the engine's blink. Gated so a
+-- defensive/escape blink does not become a suicide commit: HP floor + not-into-a-
+-- gank. The dispatch idles on its own if there is no target in range / no mana
+-- (a blink AWAY from enemies capitalizes on nothing). Defined here (right after
+-- combo_key_tick) so offense_enabled / self_alive_ok / count_engaged_enemies /
+-- lina_*_tick are all already in scope (the v0.5.92 forward-reference lesson).
+state.blink_capitalize_tick = function()
+    local m = state.menu
+    if not (m and m.blink_capitalize and m.blink_capitalize:Get()) then return end
+    if not state.blink_seen_t then return end
+    if (state.frame_t - state.blink_seen_t) >= 1.0 then return end   -- 1.0s window
+    if state.combo_hold_active then return end          -- user already comboing
+    if not offense_enabled() then return end
+    local me = state.self_npc
+    if not (me and self_alive_ok()) then return end
+    local hp_floor = (m.blink_capitalize_hp and m.blink_capitalize_hp:Get()) or 35
+    if state.blink_in_hp_frac(me) * 100 < hp_floor then
+        tlog(2, "blink_capitalize_skip", { reason = "hp_floor" }); return
+    end
+    if state.gank_imminent_self and state.gank_imminent_self() then
+        tlog(2, "blink_capitalize_skip", { reason = "gank" }); return
+    end
+    local enemies = state.count_engaged_enemies()
+    tlog(1, "blink_capitalize", {
+        enemies = string.format("%d", enemies),
+        hp      = string.format("%.2f", state.blink_in_hp_frac(me)),
+    })
+    if enemies >= 3 then state.lina_teamfight_tick(false) else state.lina_starter_tick(false) end
 end
 
 -- v0.5.78 wave-clear: gather farmable units (lane creeps + neutrals) near Lina.
@@ -7255,6 +7473,28 @@ local function setup_menu()
         .. "reserve. Faster clear + a Fiery Soul stack; spends the stun. OFF = "
         .. "Q only.")
 
+    -- v0.5.94: engine-blink CAPITALIZE -- the brain does not cast Blink; it seizes
+    -- the engine's blink to fire a free-gap-close combo. Default OFF.
+    m.blink_capitalize = gCore:Switch("Blink-capitalize (auto-combo on engine blink)", false)
+    m.blink_capitalize:ToolTip("When the framework blinks Lina into range of a "
+        .. "target, fire the W-Q-R combo (use the engine's blink as a free "
+        .. "gap-close). Gated on HP floor + not-into-a-gank. Default OFF.")
+    m.blink_capitalize_hp = gCore:Slider("Blink-capitalize: min HP %", 0, 90, 35)
+    -- v0.5.95: brain-cast Blink-in (re-enabled FALLBACK) -- when the engine did NOT
+    -- blink (dagger ready) + you hold combo on an out-of-range target, the brain
+    -- blinks in itself, then combos. Reserves the dagger if a threat is incoming.
+    -- Both default OFF.
+    m.blink_in_kill = gCore:Switch("Blink-in kill-commit (brain-cast)", false)
+    m.blink_in_kill:ToolTip("Brain casts Blink to secure a CONFIRMED kill on an "
+        .. "out-of-range target, only when the engine did not blink. Default OFF.")
+    m.blink_in_initiate = gCore:Switch("Blink-in initiate (brain-cast, no-kill)", false)
+    m.blink_in_initiate:ToolTip("Brain casts Blink to engage without a guaranteed "
+        .. "kill -- gated on exit item + HP + fog, and reserves the dagger if a "
+        .. "threat is incoming. Default OFF.")
+    m.blink_in_kill_risk = gCore:Slider("Blink-in kill: max fog-risk score", 0, 100, 60)
+    m.blink_in_initiate_risk = gCore:Slider("Blink-in initiate: max fog-risk score", 0, 100, 30)
+    m.blink_in_initiate_hp = gCore:Slider("Blink-in initiate: min HP %", 0, 90, 40)
+
     ------------------------------------------------------------- Defense --
     m.auto_defense = gDef:Switch("Enable auto-defense (Layer 2)", true)
     m.auto_defense:ToolTip("Always-on save layer: Wind Waker / Flame Cloak / "
@@ -8240,7 +8480,23 @@ function callbacks.OnUpdateEx()
         state.pending_steps_tick() -- fire deferred combo steps at their delays
         state.r_abort_tick()       -- STOP a doomed R mid-cast (refund mana/CD)
         state.lina_r_kill_steal_tick()
+        -- v0.5.94 engine-blink detection: a Blink Dagger CD jump (ready -> on-CD)
+        -- means the engine/user blinked Lina (the brain no longer casts Blink),
+        -- so stamp the time for blink_capitalize_tick to seize the reposition.
+        do
+            local _bd = NPCLib.item(state.self_npc, "item_blink")
+            local _bd_cd = (_bd and Ability.GetCooldown and (Ability.GetCooldown(_bd) or 0)) or 0
+            -- v0.5.95: exclude a BRAIN-cast blink (it stamps brain_blinked_t).
+            -- Capitalize is for ENGINE blinks; the brain-cast has its own combo.
+            local _brain = state.brain_blinked_t and (state.frame_t - state.brain_blinked_t) < 0.5
+            if (state.blink_cd_prev or 0) <= 0.1 and _bd_cd > 0.5 and not _brain then
+                state.blink_seen_t = state.frame_t
+                tlog(2, "blink_seen", { cd = string.format("%.1f", _bd_cd) })
+            end
+            state.blink_cd_prev = _bd_cd
+        end
         state.combo_key_tick()     -- HOLD/TAP classify + starter/teamfight dispatch
+        state.blink_capitalize_tick()  -- v0.5.94: seize engine blinks (auto-combo, default OFF)
         state.wave_clear_tick()    -- v0.5.78: HOLD wave-clear (Q line + W dense camp), mana-floor + creep-count gated
         state.dump_key_tick()      -- v0.5.15 OBS-08: one-press brain state dump bind
         state.panic_key_tick()     -- v0.5.37 MAINT-05: one-press 2.0s panic throttle-bypass bind
@@ -9221,6 +9477,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.91 (kill-calc fix: instant-impact R, drop phantom Slow-Burn DoT): demo showed r_finisher firing R-alone on Puck (r_kill=1) but the solo Laguna did not kill -- Puck ate the hit and walked. Root cause: lina_r_damage credited a hardcoded impact*0.64 Slow-Burn 4s DoT (NOT KV-backed; Laguna is a single instant nuke) into r_total, so EVERY R kill predicate (r_alone_kill, combo_total/combo_kill, wqr_undershoots, target_fleeing_fast) was inflated to 1.64x of the real instant burst. The brain thought solo R bursts a target at up to 1.64x the real instant damage, fired the solo R via the r_finisher archetype (which schedules ONLY the R step), and the target survived. Fix: all R kill predicates now use the INSTANT impact only; lina_r_damage returns impact (burn removed); r_total = impact (kept for readers, no longer DoT-inflated). r_alone_kill additionally requires a 1.05x headroom margin (user-picked over exact) so solo R commits only on a clear one-shot, else the ladder falls to wqr = W-stun -> Q -> R (the spec: lead with the W stun, then R). combo_kill stays exact to preserve the v0.5.85 ether W+Q+R intent. This also corrects the foundation the future offensive Blink-in kill-commit will reuse. Files: Lina.lua only (4 predicate sites + lina_r_damage return + docstring). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified. Verification on next demo: vs a target R-alone cannot one-shot, archetype=wqr (NOT r_finisher) and the brain fires W (stun) -> Q -> R; r_finisher only when the instant Laguna clearly kills with the 1.05x margin. No more solo-R-no-kill. Still queued: offensive Blink-in design (paused, now resting on this corrected kill calc).")
+LOG:info("Lina brain v0.5.95.2 (TF blink-in placement fix; with the v0.5.95.1 crash fix): the v0.5.95 demo showed TF firing no skills. TWO TF wiring bugs found. (1) CRASH (fixed v0.5.95.1): state.blink_in_tf_in_range called cast_range_of (a module-local defined ~1600 lines below) as a nil global -> crash at Lina.lua:2282; it runs UNCONDITIONALLY in the TF tick, so it aborted the tick right before tf_burst, regardless of blinking -> that is the 'TF not working even without blinking in'. Fixed via the inline state.blink_w_range. (2) PLACEMENT (fixed here): the TF brain-cast blink-in dispatch sat AFTER the not-cluster_in_range early-return, so it only ran when the cluster was ALREADY in W range, where no blink is needed. It could never gap-close an out-of-range cluster (the exact thing it is for). Moved the dispatch INTO the not-cluster_in_range branch (before the Q poke, where mana is already computed): now an out-of-W-range cluster triggers a brain-cast blink (dagger ready + engine did not blink + safe), then next tick tf_burst fires. The starter blink-in was already correctly placed at the top of the ladder. state.blink_in_tf_in_range is now unused (dormant). Both fixes are no-ops for base TF with the blink toggles OFF (try_blink_in returns false early). Files: Lina.lua only (TF dispatch moved + banner; the v0.5.95.1 state.blink_w_range is already in). lib/escape + Sniper.lua + other libs unchanged. luac clean, no BOM, lesson 15 verified. Verification on next demo: TF fires W/Q/R (combo_classify mode=tf -> lina_teamfight archetype=tf_burst / tf_sustain), NO Lua error at 2282. With brain-cast blink ON + cluster out of W range -> blink_in_fire aim=cluster -> next tick tf_burst. Tune fog caps / HP floors from the log.")
 
 return callbacks

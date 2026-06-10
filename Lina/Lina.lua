@@ -246,15 +246,8 @@ state.pending_cast_verify  = nil  -- counter -> {ability, t_check, ...} (cast_ve
 -- actually issued (HR/OW pause held the order). Bounded by combo*short names;
 -- entries are checked against a 3s window so staleness self-resolves.
 state.recently_aborted_intents = {}
--- v0.5.28 task-9 (IMP-A10 NPC.GetMagicalResist diagnostic): one-shot guard.
--- Populated by the IMP-A10 gate to emit a single `imp_a10_mr_probe` tlog per
--- session (NOT per target). Captures the raw API return (type + value) +
--- decision context so the user can verify the actual contract on this
--- Umbrella build and decide the v0.5.29 fix (correct API name / threshold
--- bump / fallback-on-zero handling).
--- v0.5.39 P1-IMP-A10-ONCE: collapsed from per-target table to one-shot bool;
--- the API contract is uniform across targets so one probe per session suffices.
-state.imp_a10_probed_once = false
+-- v0.5.86 cleanup: removed state.imp_a10_probed_once + the imp_a10_mr_probe
+-- diagnostic (the NPC.GetMagicalResist contract is known/stable; dead weight).
 -- v0.5.29 task-6-A diag: throttle cursor for the tf_r_value_pick summary
 -- tlog. Set to now() each time a picked-target summary fires; gated to ~1Hz
 -- to keep default-verbosity log clean during sustained combo holds.
@@ -4958,26 +4951,9 @@ state.lina_starter_tick = function(force)
         if mr_val ~= nil then
             ether_needed = mr_significant or wqr_undershoots
         end
-        -- v0.5.39 P1-IMP-A10-ONCE: one-shot per session (was per-target). The
-        -- API contract is uniform across targets so a single probe diagnoses
-        -- the build; per-target stamping was bloat under sustained combo holds.
-        local tname = uname(target)
-        if not state.imp_a10_probed_once then
-            state.imp_a10_probed_once = true
-            tlog(1, "imp_a10_mr_probe", {
-                target          = tname,
-                api_ok          = ok and "y" or "n",
-                raw_type        = type(mr),
-                raw_value       = tostring(mr),
-                mr_val          = (mr_val ~= nil) and string.format("%.3f", mr_val) or "nil",
-                mr_significant  = mr_significant and "y" or "n",
-                wqr_undershoots = wqr_undershoots and "y" or "n",
-                r_alone_kill    = ctx.r_alone_kill and "y" or "n",
-                eff_hp_magical  = string.format("%.0f", ctx.eff_hp_magical or 0),
-                r_total         = string.format("%.0f", ctx.r_total or 0),
-                ether_needed    = ether_needed and "y" or "n",
-            })
-        end
+        -- v0.5.86 cleanup: removed the one-shot imp_a10_mr_probe diagnostic +
+        -- its state.imp_a10_probed_once latch. The NPC.GetMagicalResist contract
+        -- is known/stable; the probe was dead weight in the ether gate.
     end
     -- v0.5.79 feature C + v0.5.85: Ethereal+R kill-confirm. ether_wqr spends
     -- Ethereal (4s lockout) + the full W/Q/R combo, and Ethereal amplifies ALL
@@ -7170,7 +7146,10 @@ local function setup_menu()
         .. "behaviour (ether_wqr fires whenever ethereal is 'needed' per the "
         .. "MR / undershoot gate, kill or not).")
 
-    -- v0.5.78 wave-clear (HOLD): mana + stack aware lane/jungle farm. Q (Dragon
+    -- v0.5.78 wave-clear (HOLD): mana-floor + creep-count gated lane/jungle farm
+    -- (v0.5.86: comment corrected -- there is NO stack-TIMING logic; the
+    -- min-creeps gate is "fire only on enough creeps", i.e. effective on already-
+    -- stacked camps, not a pull/stack-window scheduler). Q (Dragon
     -- Slave) line nuke at the aim hitting the most creeps; optional W on a dense
     -- camp. Opt-in: KEY_NONE default so the bind does nothing until assigned.
     m.wave_key = gCore:Bind("Wave-clear key (HOLD)", Enum.ButtonCode.KEY_NONE)
@@ -7283,28 +7262,10 @@ local function setup_menu()
         .. "Edge/Ether/Wind Waker). Restored at POST_GAME so the change is "
         .. "scoped to one match. Off = Dodger and brain both fire (causes "
         .. "double-fires on Bara WW+Pike etc. observed in v0.5.42 demo).")
-    -- v0.5.54: AutoDisabler override is now OPT-IN (was default ON in
-    -- v0.5.52). Per user spec, AutoDisabler is a verified native
-    -- script with broad coverage; disabling it gave up that coverage
-    -- for one local Pike-on-Bara conflict. The brain now gates the
-    -- conflict at the data layer (Pike has no prep_time so the brain
-    -- catalog gate doesn't fire it) instead of zeroing the framework
-    -- subsystem. The toggle is preserved for users who explicitly
-    -- want the v0.5.52 override behavior (not recommended).
-    m.override_autodisabler = gDef:Switch('Override AutoDisabler Force Interrupt items', false)
-    m.override_autodisabler:ToolTip("DEPRECATED (default OFF in v0.5.54). "
-        .. "v0.5.52 default ON zeroed AutoDisabler's Force Interrupt "
-        .. "items (Pike + Force Staff) at GAME_IN_PROGRESS to prevent "
-        .. "brain-vs-framework double-fire on Bara charge. v0.5.54 "
-        .. "reverses this: AutoDisabler stays active per its native "
-        .. "config and the brain stays out of its lane by dropping "
-        .. "prep_time from Pike. The toggle is preserved for users "
-        .. "who explicitly want the v0.5.52 override behavior but is "
-        .. "now no-op by default. To re-enable: turn this on, then "
-        .. "Pike + Force Staff in AutoDisabler/Force Interrupt/Usage "
-        .. "are zeroed at GAME_IN_PROGRESS (state.AD.disable is gone "
-        .. "from OnUpdateEx; this toggle's ON state has no effect in "
-        .. "v0.5.54+ -- it is preserved for menu compatibility only).")
+    -- v0.5.86 cleanup: removed m.override_autodisabler. It was DEPRECATED /
+    -- explicit no-op since v0.5.54 (the Pike-on-Bara conflict is handled at the
+    -- data layer by dropping Pike's prep_time; state.AD.disable is gone from
+    -- OnUpdateEx). The toggle was read nowhere functional -- pure menu clutter.
     m.preface_enable = gDef:Switch("Pre-face incoming threats", false)
     m.preface_enable:ToolTip("Turn to face an approaching enemy that has a "
         .. "ready targeted threat, so Lina's 0.6 turn rate does not delay her "
@@ -8199,7 +8160,7 @@ function callbacks.OnUpdateEx()
         state.r_abort_tick()       -- STOP a doomed R mid-cast (refund mana/CD)
         state.lina_r_kill_steal_tick()
         state.combo_key_tick()     -- HOLD/TAP classify + starter/teamfight dispatch
-        state.wave_clear_tick()    -- v0.5.78: HOLD wave-clear (Q line + W dense camp), mana+stack aware
+        state.wave_clear_tick()    -- v0.5.78: HOLD wave-clear (Q line + W dense camp), mana-floor + creep-count gated
         state.dump_key_tick()      -- v0.5.15 OBS-08: one-press brain state dump bind
         state.panic_key_tick()     -- v0.5.37 MAINT-05: one-press 2.0s panic throttle-bypass bind
         state.test_key_tick()      -- v0.5.17 Track 1: one-press run-all-tests bind
@@ -9132,6 +9093,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.85 (W+Q combo-kill predicate): the valid half of the review's kill-model fix (the Aghs-pure half was dropped in v0.5.84 as outdated mechanics). The kill model was R-only everywhere (r_alone_kill / wqr_undershoots use r_total), so the brain under-credited Lina's full burst: Dragon Slave + Light Strike Array add real magic damage that lands inside the same commit. **New helpers** lina_q_damage() + lina_w_damage() read the KV-verified per-level damage (dragon_slave_damage {65,125,185,245}, light_strike_array_damage {80,120,160,200}; both magical per lib/ability_data.lua) with fallback tables, mirroring lina_r_damage. **ctx additions**: ctx.q_dmg, ctx.w_dmg, ctx.combo_total = r_total + q_dmg + w_dmg, ctx.combo_kill = eff_hp_magical <= combo_total (the bare W+Q+R combo kills). **ether_kill_ok upgraded** (v0.5.79 -> v0.5.85): Ethereal amplifies ALL magic damage on the target, and ether_wqr fires W+Q+R inside that window, so the kill-confirm now amplifies combo_total (R+Q+W) instead of r_total alone. The v0.5.79 R-only form was too strict and suppressed legit W+Q+R kills (the exact under-commit the review flagged). Falls back to r_total if combo_total is nil. tlog ether_kill_confirm_skip now reports combo_total (was r_total). All damage is magical so it compares against the same eff_hp_magical -- consistent with the verified-correct magical kill model (NO Aghs-pure assumption; Laguna is always magical in 7.41C per notes.md L175). **Behaviour change**: ether_wqr now commits in more real-kill cases (W+Q+R kills but amplified-R-alone did not); on a no-kill verdict it still falls through to eul/ww/wqr (engages without ethereal). ctx.combo_kill is also exposed for future consumers (e.g. a combo-readiness HUD chip). **Files**: Lina.lua only (2 damage helpers + 4 ctx fields + ether_kill_ok formula + tlog). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: vs a target where amplified W+Q+R kills but amplified-R-alone did not, ether_wqr now FIRES (was suppressed in v0.5.79-84). ether_kill_confirm_skip tlog shows combo_total. r_finisher / non-ether archetypes unchanged. **Next**: v0.5.86 Blink (offense init + escape), v0.5.87 cleanup.")
+LOG:info("Lina brain v0.5.86 (cut/cleanup pass): the feature-review cut candidates, all dead-weight removals with zero behaviour change. **1) imp_a10_mr_probe removed**: the one-shot NPC.GetMagicalResist diagnostic (+ its state.imp_a10_probed_once latch) in the ether-needed gate. The API contract is known/stable; the probe + per-tick latch check was dead weight in the offense hot path. The mr_val/mr_significant/wqr_undershoots/ether_needed computation is UNCHANGED -- only the diagnostic tlog + latch deleted. **2) override_autodisabler toggle removed**: DEPRECATED / explicit no-op since v0.5.54 (the Pike-on-Bara conflict is handled at the data layer by dropping Pike prep_time; state.AD.disable was already gone from OnUpdateEx). The menu Switch + its 13-line tooltip were read NOWHERE functional -- pure menu clutter. **3) wave-clear 'stack-aware' comment corrected**: the v0.5.78 comments oversold the feature ('mana + stack aware') -- there is NO stack-TIMING logic (no pull/stack-window scheduler). Corrected to 'mana-floor + creep-count gated' (the min-creeps gate is 'fire only on enough creeps' = effective on already-stacked camps, not a scheduler). The real stack-timing ask remains a tracked gap. **NOT cut**: lbl_counters (the review suggested demoting it, but the HUD is not slot-limited now that gank/missing chips exist; left as-is). **Files**: Lina.lua only (3 deletions + comment fixes). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. Zero behaviour change -- ether gate, wave-clear, AutoDisabler interaction all identical (the removed toggle was already no-op). **Verification on next demo**: no imp_a10_mr_probe tlog at session start (gone); the 'Override AutoDisabler' menu entry is absent; ether/wave/save behaviour unchanged. **Feature-review batch status**: move #1 fog-wiring (v0.5.84), W+Q kill predicate (v0.5.85), cleanup (v0.5.86) all shipped; the Aghs-pure half was correctly dropped as outdated mechanics. REMAINING: Blink (offense initiation + escape save) -- the largest gap, high combo-ladder regression risk, gets its own careful slice.")
 
 return callbacks

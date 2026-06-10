@@ -3766,6 +3766,30 @@ local function lina_r_damage()
     return impact, impact * 0.64
 end
 
+-- v0.5.85: per-level magical nuke damage for Q (Dragon Slave) and W (Light
+-- Strike Array), KV keys + fallbacks verified against lib/ability_data.lua
+-- (dragon_slave_damage {65,125,185,245}, light_strike_array_damage
+-- {80,120,160,200}; both damage_type=magical). Feeds the combo-kill predicate
+-- so the brain accounts for the full W+Q+R burst, not R alone.
+local function lina_q_damage()
+    local q = ability(A.Q)
+    if not q or Ability.GetLevel(q) <= 0 then return 0 end
+    if Ability.GetLevelSpecialValueFor then
+        local ok, v = pcall(Ability.GetLevelSpecialValueFor, q, "dragon_slave_damage")
+        if ok and type(v) == "number" and v > 0 then return v end
+    end
+    return ({ 65, 125, 185, 245 })[Ability.GetLevel(q)] or 0
+end
+local function lina_w_damage()
+    local w = ability(A.W)
+    if not w or Ability.GetLevel(w) <= 0 then return 0 end
+    if Ability.GetLevelSpecialValueFor then
+        local ok, v = pcall(Ability.GetLevelSpecialValueFor, w, "light_strike_array_damage")
+        if ok and type(v) == "number" and v > 0 then return v end
+    end
+    return ({ 80, 120, 160, 200 })[Ability.GetLevel(w)] or 0
+end
+
 -- Effective magical HP to kill `target`: current MR + barriers (via
 -- Target.EffectiveHpVs) plus the HP it regens during R's 0.55s press-to-damage.
 local function lina_eff_hp_magical(target)
@@ -3929,6 +3953,16 @@ local function build_layer1_ctx(target, out)
     ctx.r_total          = impact + burn
     ctx.eff_hp_magical   = lina_eff_hp_magical(target)
     ctx.r_alone_kill     = impact > 0 and ctx.eff_hp_magical <= ctx.r_total
+    -- v0.5.85: full W+Q+R magical burst. The kill model was R-only
+    -- (r_alone_kill / wqr_undershoots), so the brain under-credited the combo:
+    -- Dragon Slave + Light Strike Array add real magic damage that lands inside
+    -- the same commit. All three are magical, so they compare against the same
+    -- eff_hp_magical. combo_kill = the bare W+Q+R combo kills (no ethereal amp);
+    -- the ether kill-confirm below amplifies combo_total instead of r_total.
+    ctx.q_dmg            = lina_q_damage()
+    ctx.w_dmg            = lina_w_damage()
+    ctx.combo_total      = ctx.r_total + ctx.q_dmg + ctx.w_dmg
+    ctx.combo_kill       = ctx.eff_hp_magical <= ctx.combo_total
 
     ctx.r_range = cast_range_of(r, FALLBACK_RANGES.R)
     ctx.w_range = cast_range_of(w, FALLBACK_RANGES.W)
@@ -4945,25 +4979,26 @@ state.lina_starter_tick = function(force)
             })
         end
     end
-    -- v0.5.79 feature C: Ethereal+R kill-confirm. ether_wqr spends Ethereal
-    -- (4s lockout) + the full W/Q/R combo; only commit it when the ethereal-
-    -- amplified R secures the kill. Consistent with the codebase's R-centric
-    -- kill model (r_alone_kill / wqr_undershoots also use r_total only). On
-    -- failure the ladder falls through to eul/ww/wqr -- Lina STILL engages but
-    -- preserves the ethereal finisher for a confirmed kill. Toggle (default ON)
-    -- gates the whole check; a tlog records each suppression for demo tuning.
+    -- v0.5.79 feature C + v0.5.85: Ethereal+R kill-confirm. ether_wqr spends
+    -- Ethereal (4s lockout) + the full W/Q/R combo, and Ethereal amplifies ALL
+    -- magic damage on the target -- so the confirm measures the amplified FULL
+    -- COMBO (combo_total = R + Q + W), not R alone (the v0.5.79 R-only form was
+    -- too strict and suppressed legit W+Q+R kills). On failure the ladder falls
+    -- through to eul/ww/wqr -- Lina STILL engages but preserves the ethereal
+    -- finisher for a confirmed kill. Toggle (default ON) gates the whole check;
+    -- a tlog records each suppression for demo tuning.
     local ether_kill_ok = true
     local kill_confirm_on = state.menu and state.menu.ether_kill_confirm
                             and state.menu.ether_kill_confirm:Get()
     if kill_confirm_on and ctx.ether_ready then
-        local amplified = (ctx.r_total or 0) * (1 + ETHER_MAGIC_AMP)
+        local amplified = (ctx.combo_total or ctx.r_total or 0) * (1 + ETHER_MAGIC_AMP)
         ether_kill_ok = (ctx.eff_hp_magical or math.huge) <= amplified
         if not ether_kill_ok then
             tlog(2, "ether_kill_confirm_skip", {
-                eff_hp    = string.format("%.0f", ctx.eff_hp_magical or 0),
-                r_total   = string.format("%.0f", ctx.r_total or 0),
-                amplified = string.format("%.0f", amplified),
-                amp       = string.format("%.2f", ETHER_MAGIC_AMP),
+                eff_hp      = string.format("%.0f", ctx.eff_hp_magical or 0),
+                combo_total = string.format("%.0f", ctx.combo_total or 0),
+                amplified   = string.format("%.0f", amplified),
+                amp         = string.format("%.2f", ETHER_MAGIC_AMP),
             })
         end
     end
@@ -9097,6 +9132,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.84 (wire the dormant fog suite): the feature-review's single highest-leverage move -- the v0.5.76-77 fog/gank awareness suite was VERIFIED test-harness-only (only consumer was the Q82 smoke test), ~0 in-game value despite being the most expensive recent work. v0.5.84 gives it live consumers. **Wave-clear gank gate**: state.wave_clear_tick now bails when state.gank_imminent_self() (2 enemies arrivable in 4s, fog-aware via Hero.GetLastMaphackPos/GetLastVisibleTime) -- a squishy immobile Lina holding the farm key while 2 enemies rotate from fog no longer keeps nuking the lane into a pick. Throttled 5Hz, only while the key is held, so FogSnapshot cost is bounded. tlog wave_clear_gank_pause at level 3. **Two new 1Hz HUD chips** (Diagnostics labels, same _lbl_set menu-label pattern as the v0.5.80 save chips, NOT OnDraw): lbl_gank 'gank: N inbound ~T.Ts' / 'gank: clear' from possible_gankers().summary; lbl_missing 'missing: Sven 8s, Lion 5s' (top 3 off-minimap >=5s) from missing_from_map(). Pure info, zero false-positive action cost, maps directly to Lina's defining weakness (getting picked from fog). **DROPPED from this slice: the Aghs-pure R kill-model fix the review recommended.** VERIFIED WRONG against Lina notes.md L175: 'Aghs Scepter does NOT modify Laguna damage type (confirmed Liquipedia; dotacoach pure-damage claim is wrong)'. In 7.41C Aghs Scepter = Flame Cloak, Aghs Shard = Fiery-Soul-to-12; Laguna is ALWAYS magical, BKB blocks. The review agent assumed the OLD pure-line-Laguna mechanic. lina_eff_hp_magical hardcoding MAGICAL is CORRECT; an Aghs-pure branch would INVERT the bug (over-commit Lagunas into BKB/high-MR). verify-before-acting caught it. **The real kill-model fix (W+Q magical nuke damage not counted) is valid and ships next as v0.5.85.** **Files**: Lina.lua only (wave_clear gank gate + 2 menu labels + 2 HUD-refresh chip blocks + banner). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: Diagnostics shows live 'gank:' + 'missing:' chips updating at 1Hz; while holding wave-clear with 2 enemies missing+approaching, farm pauses (wave_clear_gank_pause at verbosity 3). Existing wave-clear / combos / saves unchanged. **Next**: v0.5.85 W+Q combo-kill predicate, v0.5.86 Blink (offense+escape), v0.5.87 cleanup.")
+LOG:info("Lina brain v0.5.85 (W+Q combo-kill predicate): the valid half of the review's kill-model fix (the Aghs-pure half was dropped in v0.5.84 as outdated mechanics). The kill model was R-only everywhere (r_alone_kill / wqr_undershoots use r_total), so the brain under-credited Lina's full burst: Dragon Slave + Light Strike Array add real magic damage that lands inside the same commit. **New helpers** lina_q_damage() + lina_w_damage() read the KV-verified per-level damage (dragon_slave_damage {65,125,185,245}, light_strike_array_damage {80,120,160,200}; both magical per lib/ability_data.lua) with fallback tables, mirroring lina_r_damage. **ctx additions**: ctx.q_dmg, ctx.w_dmg, ctx.combo_total = r_total + q_dmg + w_dmg, ctx.combo_kill = eff_hp_magical <= combo_total (the bare W+Q+R combo kills). **ether_kill_ok upgraded** (v0.5.79 -> v0.5.85): Ethereal amplifies ALL magic damage on the target, and ether_wqr fires W+Q+R inside that window, so the kill-confirm now amplifies combo_total (R+Q+W) instead of r_total alone. The v0.5.79 R-only form was too strict and suppressed legit W+Q+R kills (the exact under-commit the review flagged). Falls back to r_total if combo_total is nil. tlog ether_kill_confirm_skip now reports combo_total (was r_total). All damage is magical so it compares against the same eff_hp_magical -- consistent with the verified-correct magical kill model (NO Aghs-pure assumption; Laguna is always magical in 7.41C per notes.md L175). **Behaviour change**: ether_wqr now commits in more real-kill cases (W+Q+R kills but amplified-R-alone did not); on a no-kill verdict it still falls through to eul/ww/wqr (engages without ethereal). ctx.combo_kill is also exposed for future consumers (e.g. a combo-readiness HUD chip). **Files**: Lina.lua only (2 damage helpers + 4 ctx fields + ether_kill_ok formula + tlog). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: vs a target where amplified W+Q+R kills but amplified-R-alone did not, ether_wqr now FIRES (was suppressed in v0.5.79-84). ether_kill_confirm_skip tlog shows combo_total. r_finisher / non-ether archetypes unchanged. **Next**: v0.5.86 Blink (offense init + escape), v0.5.87 cleanup.")
 
 return callbacks

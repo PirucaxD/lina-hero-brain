@@ -6178,6 +6178,16 @@ state.wave_clear_tick = function()
     if (t - (state.last_wave_clear_t or 0)) < 0.2 then return end
     state.last_wave_clear_t = t
 
+    -- v0.5.84: pause farm when a gank is inbound. A squishy, immobile Lina
+    -- holding the wave-clear key while 2+ enemies rotate from fog gets picked.
+    -- gank_imminent_self() (2 arrivable in 4s, fog-aware) gates the whole tick
+    -- -- the first live consumer of the v0.5.77 fog suite. Throttled (5Hz, only
+    -- while the key is held), so the FogSnapshot cost is bounded.
+    if state.gank_imminent_self and state.gank_imminent_self() then
+        if TLOG3_ENABLED then tlog(3, "wave_clear_gank_pause", {}) end
+        return
+    end
+
     local me = state.self_npc
     local me_pos = me and Entity.GetAbsOrigin(me)
     if not (me and me_pos) then return end
@@ -7275,6 +7285,11 @@ local function setup_menu()
     m.lbl_counters = gDiag:Label("counts: l1=0 l2=0")
     -- v0.5.80 feature D: live power-spike save readiness (owned items only).
     m.lbl_saves    = gDiag:Label("saves: -")
+    -- v0.5.84: wire the dormant v0.5.77 fog suite to the live 1Hz HUD.
+    -- gank   = enemies arrivable soon at Lina's pos (fog-aware, 2-in-4s signal).
+    -- missing = enemies off-minimap >= 5s (rotation tracker), longest first.
+    m.lbl_gank     = gDiag:Label("gank: -")
+    m.lbl_missing  = gDiag:Label("missing: -")
     -- v0.5.15 OBS-08: one-press dump of armed_threats, pending_steps,
     -- responded_threats, last_save_*, fs stacks. Press fires one multi-line
     -- tlog burst at level 1 (always on at default verbosity). KEY_NONE so
@@ -8254,6 +8269,42 @@ function callbacks.OnUpdateEx()
                 _lbl_set(lbl_sv, "saves: "
                     .. ((#parts > 0) and table.concat(parts, " ") or "none owned"))
             end
+            -- v0.5.84: gank-inbound chip (fog-aware). Reads possible_gankers()
+            -- once at 1Hz; shows count + soonest ETA, else "clear".
+            local lbl_gk = state.menu.lbl_gank
+            if lbl_gk then
+                local txt = "gank: clear"
+                if state.self_npc and state.possible_gankers then
+                    local pg = state.possible_gankers()
+                    local n = (pg and pg.summary and pg.summary.count) or 0
+                    if n > 0 then
+                        txt = string.format("gank: %d inbound", n)
+                        local soon = pg.summary.soonest_eta
+                        if type(soon) == "number" and soon < math.huge then
+                            txt = txt .. string.format(" ~%.1fs", soon)
+                        end
+                    end
+                end
+                _lbl_set(lbl_gk, txt)
+            end
+            -- v0.5.84: missing-enemies chip (off-minimap >= 5s, longest first,
+            -- top 3). Pure info, no false-positive action cost.
+            local lbl_ms = state.menu.lbl_missing
+            if lbl_ms then
+                local txt = "missing: -"
+                if state.self_npc and state.missing_from_map then
+                    local mm = state.missing_from_map()
+                    if mm and #mm > 0 then
+                        local names = {}
+                        for i = 1, math.min(3, #mm) do
+                            names[#names + 1] = uname(mm[i].entity)
+                                .. " " .. string.format("%.0fs", mm[i].age or 0)
+                        end
+                        txt = "missing: " .. table.concat(names, ", ")
+                    end
+                end
+                _lbl_set(lbl_ms, txt)
+            end
         end
     end
     cast_verify_tick()  -- ground-truth verification of issued casts (lesson 58)
@@ -9046,6 +9097,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.83 (4 medium-risk optimizations, focused pass): the deferred medium-risk findings from the v0.5.82 optimization workflow, all behaviour-neutral. **Fix 1 combo_key_tick alloc**: it allocated up to 3 closures/frame on the hot path (a force_release local + two pcall(function() return w:IsDown() end) thunks). Hoisted force_release to module-level combo_force_release + added a module-level key_down(w) helper (w.IsDown(w) == w:IsDown(), pcall-guarded, no per-call closure). Applied key_down to all 5 key-tick sites (combo/wave/dump/panic/test) to dedup the same per-frame thunk pattern. **Fix 4 build_layer1_ctx double-fetch**: q/w/r/FC handles were each resolved twice per tick (ability() then ability_ready() re-resolves by name; FC fetched again in the in-flight block). Added ready_from(h) (handle-taking, keeps the GetLevel>0 unlearned-slot guard); capture q,w,r,fc ONCE and derive readiness off the handles; reuse fc in the flame_cloak_in_flight block. 8 NPC.GetAbility -> 4, identical results. **Fix 2 lib/escape PickDir double-score**: the no-threat-hint (centroid) path scanned DangerAtPos ~21x for 7 candidates (SafePushDestination computed both landing + current danger per candidate, then PickDir re-scanned landing for ranking). SafePushDestination now takes an optional precomputed danger_now and RETURNS the landing danger (d_land); PickDir hoists danger_now once and reuses d_land for ranking. ~21 -> ~8 scans. Backward compatible: Sniper passes 3 args (danger_now nil -> local scan) and ignores the extra return; threat-hint path is bit-identical (returns no d_land, ranked by a direct scan as before). **Fix 3 lib/defense ResolveSaveOrder tlog alloc**: each of the 7 return branches built a 3-field kv-table for a level-3 diagnostic even at default verbosity (c.tlog drops it by level only AFTER it is built), once per armed threat. Added cfg.tlog_level (Lina registers v_level); ResolveSaveOrder computes diag_on once + routes all 7 emits through a gated pick_log() helper. diag_on defaults TRUE when cfg.tlog_level is absent, so Sniper (no accessor) keeps the exact prior always-build behaviour. **Deferred-no-more**: all 4 v0.5.82 medium-risk items done. **Files**: Lina.lua (key_down/ready_from helpers + combo_force_release + 5 key sites + ctx + cfg.tlog_level) + lib/escape.lua (SafePushDestination + PickDir) + lib/defense.lua (ResolveSaveOrder gate). lib/threat_data + lib/farm + Sniper.lua unchanged. luac clean all, offline tests 19/19, no BOM Lina, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: identical HOLD-combo classify, wave/dump/panic/test key behaviour, escape self-push targeting, and save-chain resolution; only allocation/scan/call counts drop. resolve_save_order_pick tlogs still fire at verbosity 3.")
+LOG:info("Lina brain v0.5.84 (wire the dormant fog suite): the feature-review's single highest-leverage move -- the v0.5.76-77 fog/gank awareness suite was VERIFIED test-harness-only (only consumer was the Q82 smoke test), ~0 in-game value despite being the most expensive recent work. v0.5.84 gives it live consumers. **Wave-clear gank gate**: state.wave_clear_tick now bails when state.gank_imminent_self() (2 enemies arrivable in 4s, fog-aware via Hero.GetLastMaphackPos/GetLastVisibleTime) -- a squishy immobile Lina holding the farm key while 2 enemies rotate from fog no longer keeps nuking the lane into a pick. Throttled 5Hz, only while the key is held, so FogSnapshot cost is bounded. tlog wave_clear_gank_pause at level 3. **Two new 1Hz HUD chips** (Diagnostics labels, same _lbl_set menu-label pattern as the v0.5.80 save chips, NOT OnDraw): lbl_gank 'gank: N inbound ~T.Ts' / 'gank: clear' from possible_gankers().summary; lbl_missing 'missing: Sven 8s, Lion 5s' (top 3 off-minimap >=5s) from missing_from_map(). Pure info, zero false-positive action cost, maps directly to Lina's defining weakness (getting picked from fog). **DROPPED from this slice: the Aghs-pure R kill-model fix the review recommended.** VERIFIED WRONG against Lina notes.md L175: 'Aghs Scepter does NOT modify Laguna damage type (confirmed Liquipedia; dotacoach pure-damage claim is wrong)'. In 7.41C Aghs Scepter = Flame Cloak, Aghs Shard = Fiery-Soul-to-12; Laguna is ALWAYS magical, BKB blocks. The review agent assumed the OLD pure-line-Laguna mechanic. lina_eff_hp_magical hardcoding MAGICAL is CORRECT; an Aghs-pure branch would INVERT the bug (over-commit Lagunas into BKB/high-MR). verify-before-acting caught it. **The real kill-model fix (W+Q magical nuke damage not counted) is valid and ships next as v0.5.85.** **Files**: Lina.lua only (wave_clear gank gate + 2 menu labels + 2 HUD-refresh chip blocks + banner). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: Diagnostics shows live 'gank:' + 'missing:' chips updating at 1Hz; while holding wave-clear with 2 enemies missing+approaching, farm pauses (wave_clear_gank_pause at verbosity 3). Existing wave-clear / combos / saves unchanged. **Next**: v0.5.85 W+Q combo-kill predicate, v0.5.86 Blink (offense+escape), v0.5.87 cleanup.")
 
 return callbacks

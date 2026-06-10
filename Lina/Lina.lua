@@ -3793,10 +3793,11 @@ local function resolve_live_cast_point(caster, ability_name, default)
     return default or 0
 end
 
--- Laguna impact damage at current level (KV "damage" = 380/565/750) + the
--- Slow Burn innate DoT (burn_damage_pct 64 -> +0.64x impact over 4s). Returns
--- (impact, burn). r_total = impact + burn (1.64x); the 4s DoT is optimistic
--- for a kill predicate, so r_alone_kill stays user-tunable.
+-- Laguna Blade instant impact damage at current level (KV "damage" =
+-- 380/565/750, hardcoded fallback). Laguna is a single instant nuke: there is
+-- NO "Slow Burn" DoT. v0.5.91 removed the old impact*0.64 burn credit, which
+-- was hardcoded (not KV-backed) and inflated every R kill predicate ~64%.
+-- Returns the instant impact only.
 local function lina_r_damage()
     local r = ability(A.R)
     if not r or Ability.GetLevel(r) <= 0 then return 0, 0 end
@@ -3806,7 +3807,7 @@ local function lina_r_damage()
         if ok and type(v) == "number" and v > 0 then impact = v end
     end
     if impact == 0 then impact = ({ 380, 565, 750 })[Ability.GetLevel(r)] or 380 end
-    return impact, impact * 0.64
+    return impact
 end
 
 -- v0.5.85: per-level magical nuke damage for Q (Dragon Slave) and W (Light
@@ -3990,12 +3991,20 @@ local function build_layer1_ctx(target, out)
     ctx.fs_shard_window   = fs_state.shard_window
     ctx.fs_at_cap         = fs_state.at_cap
 
-    local impact, burn = lina_r_damage()
+    -- v0.5.91 kill-calc fix: ALL R kill predicates use the INSTANT Laguna impact.
+    -- The prior r_total = impact + 0.64*impact credited a 4s "Slow Burn" DoT
+    -- (hardcoded, NOT KV-backed; Laguna is a single instant nuke) as if it were
+    -- burst, inflating every R kill check ~64%. That made r_finisher fire R-alone
+    -- on targets it could not one-shot (demo: Puck ate the solo R and survived)
+    -- instead of leading with the W stun. r_impact is the instant value.
+    local impact         = lina_r_damage()
     ctx.r_dmg            = impact
-    ctx.slow_burn_pending = burn
-    ctx.r_total          = impact + burn
+    ctx.r_impact         = impact
+    ctx.r_total          = impact   -- no longer DoT-inflated; kept for readers
     ctx.eff_hp_magical   = lina_eff_hp_magical(target)
-    ctx.r_alone_kill     = impact > 0 and ctx.eff_hp_magical <= ctx.r_total
+    -- r_alone_kill requires 5% headroom (user-picked margin over exact): commit
+    -- solo R only when the instant hit clearly kills, else fall to W-stun-Q-R.
+    ctx.r_alone_kill     = impact > 0 and (ctx.eff_hp_magical * 1.05 <= impact)
     -- v0.5.85: full W+Q+R magical burst. The kill model was R-only
     -- (r_alone_kill / wqr_undershoots), so the brain under-credited the combo:
     -- Dragon Slave + Light Strike Array add real magic damage that lands inside
@@ -4004,7 +4013,7 @@ local function build_layer1_ctx(target, out)
     -- the ether kill-confirm below amplifies combo_total instead of r_total.
     ctx.q_dmg            = lina_q_damage()
     ctx.w_dmg            = lina_w_damage()
-    ctx.combo_total      = ctx.r_total + ctx.q_dmg + ctx.w_dmg
+    ctx.combo_total      = ctx.r_impact + ctx.q_dmg + ctx.w_dmg
     ctx.combo_kill       = ctx.eff_hp_magical <= ctx.combo_total
 
     ctx.r_range = cast_range_of(r, FALLBACK_RANGES.R)
@@ -4878,7 +4887,7 @@ state.lina_starter_tick = function(force)
 
     local ctx = build_layer1_ctx(target)
     local fast = (target and NPC.GetMoveSpeed and (NPC.GetMoveSpeed(target) or 0) >= 290) or false
-    local target_fleeing_fast = ctx.kiting_us and fast and (ctx.eff_hp_magical <= ctx.r_total)
+    local target_fleeing_fast = ctx.kiting_us and fast and (ctx.eff_hp_magical <= ctx.r_impact)
 
     -- Wind Waker dual role: it is both a cyclone SETUP source and Lina's top
     -- defensive SAVE. Reserve 175 mana for it on combos that do NOT spend it
@@ -4997,7 +5006,7 @@ state.lina_starter_tick = function(force)
         local ok, mr = pcall(NPC.GetMagicalResist, target)
         local mr_val = (ok and type(mr) == "number") and mr or nil
         local mr_significant  = (mr_val ~= nil) and (mr_val >= 0.25) or false
-        local wqr_undershoots = (not ctx.r_alone_kill) and (ctx.eff_hp_magical > ctx.r_total)
+        local wqr_undershoots = (not ctx.r_alone_kill) and (ctx.eff_hp_magical > ctx.r_impact)
         if mr_val ~= nil then
             ether_needed = mr_significant or wqr_undershoots
         end
@@ -6765,6 +6774,14 @@ local DODGER_CHAIN_ITEMS = {
     "item_cyclone", "item_ethereal_blade", "item_ghost",
     "item_glimmer_cape", "item_invis_sword", "item_lotus_orb",
     "item_silver_edge", "item_wind_waker",
+    -- v0.5.90: the framework Dodger raced the brain's v0.5.87 escape-Blink. The
+    -- v0.5.89 demo log showed 2_dodger.lua:6565 firing a position self-save on a
+    -- PA Phantom Strike while the brain's blink_escape never fired. Add item_blink
+    -- so the override zeros it too, IF the Dodger defensive-items list exposes a
+    -- Blink entry. If it does not, the write is a harmless no-op and the new
+    -- `failed=` field on dodger_chain_disabled names item_blink on the next demo
+    -- (then Blink lives in a separate Dodger toggle and needs a different gate).
+    "item_blink",
 }
 local DODGER_MENU_PATH = {
     "General", "Main", "Dodger",
@@ -6822,10 +6839,10 @@ local function dodger_chain_disable()
         saved[item] = v
         read_shape = read_shape or shape
     end
-    local n_set, write_shape = 0, nil
+    local n_set, write_shape, failed = 0, nil, {}
     for _, item in ipairs(DODGER_CHAIN_ITEMS) do
         local ok, shape = _dodger_write(item, false)
-        if ok then n_set = n_set + 1 end
+        if ok then n_set = n_set + 1 else failed[#failed + 1] = item end
         write_shape = write_shape or shape
     end
     state.dodger_saved = saved
@@ -6833,6 +6850,7 @@ local function dodger_chain_disable()
     tlog(1, "dodger_chain_disabled", {
         items      = tostring(#DODGER_CHAIN_ITEMS),
         set_ok     = tostring(n_set),
+        failed     = (#failed > 0) and table.concat(failed, ",") or "-",
         read_shape = tostring(read_shape or "nil"),
         write_shape = tostring(write_shape or "nil"),
     })
@@ -9203,6 +9221,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.89 (Q82 test-capture hotfix): the in-brain suite's Q82_fog_escape_alias_contracts was the only red item in the v0.5.88 demo (6/7) and it was a TEST bug, not a regression. Two capture sites used `local a, b = X and X()`; the `and` operator truncates the call's second return to ONE value (glist=nil, sc=nil), so the multi-return shape checks for state.gank_imminent_self (bool,list) and state.safest_spot_near (nil,number) false-failed. Production aliases are correct: gank_imminent_self returns false,{} when self_npc=nil; Escape.GankImminent returns bool,list; Escape.SafestSpotNear returns nil,math.huge. Fix: guard each alias with an explicit type=='function' check, then call it directly so the multi-return survives (the v0.5.49 multi-return lesson, now applied to the harness). Test-only change inside state.tests; ZERO gameplay impact. Restores the in-brain suite to 7/7. Files: Lina.lua only (Q82 test body). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified. Verification: press 'Run all brain tests' -> test_summary failed=0 passed=7 total=7, Q82 pass=y. Still queued (bridge): jungle neutral enumeration (v0.5.88 farm_gather_probe showed neutral_enum=n, Enum.TeamType.TEAM_NEUTRAL is nil on this build, lane clear works, jungle does not); escape-Blink re-demo (v0.5.88 gap-closer was Primal Beast, not one of the 5 CH.GAP_CLOSE_SAVES gap-closers); offensive Blink-in slice.")
+LOG:info("Lina brain v0.5.91 (kill-calc fix: instant-impact R, drop phantom Slow-Burn DoT): demo showed r_finisher firing R-alone on Puck (r_kill=1) but the solo Laguna did not kill -- Puck ate the hit and walked. Root cause: lina_r_damage credited a hardcoded impact*0.64 Slow-Burn 4s DoT (NOT KV-backed; Laguna is a single instant nuke) into r_total, so EVERY R kill predicate (r_alone_kill, combo_total/combo_kill, wqr_undershoots, target_fleeing_fast) was inflated to 1.64x of the real instant burst. The brain thought solo R bursts a target at up to 1.64x the real instant damage, fired the solo R via the r_finisher archetype (which schedules ONLY the R step), and the target survived. Fix: all R kill predicates now use the INSTANT impact only; lina_r_damage returns impact (burn removed); r_total = impact (kept for readers, no longer DoT-inflated). r_alone_kill additionally requires a 1.05x headroom margin (user-picked over exact) so solo R commits only on a clear one-shot, else the ladder falls to wqr = W-stun -> Q -> R (the spec: lead with the W stun, then R). combo_kill stays exact to preserve the v0.5.85 ether W+Q+R intent. This also corrects the foundation the future offensive Blink-in kill-commit will reuse. Files: Lina.lua only (4 predicate sites + lina_r_damage return + docstring). all libs + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified. Verification on next demo: vs a target R-alone cannot one-shot, archetype=wqr (NOT r_finisher) and the brain fires W (stun) -> Q -> R; r_finisher only when the instant Laguna clearly kills with the 1.05x margin. No more solo-R-no-kill. Still queued: offensive Blink-in design (paused, now resting on this corrected kill calc).")
 
 return callbacks

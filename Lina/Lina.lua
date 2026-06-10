@@ -4022,6 +4022,13 @@ local W_AOE, W_LEAD = 250, 0.95
 -- half ~110; length 1075; representative lead = cast 0.35 + ~half-length travel
 -- at 1200 u/s).
 local Q_HALF_WIDTH, Q_LENGTH, Q_LINE_LEAD = 110, 1075, 0.8
+-- v0.5.79 feature C: Ethereal Blade magic-damage amplification used by the
+-- ether_wqr kill-confirm. Ethereal's debuff amplifies magic damage taken by
+-- the target (~+40% in 7.4x; the IMP-A10 gate frames it as "-30 MR amp"). The
+-- kill-confirm multiplies r_total by (1 + this) and compares to eff_hp_magical.
+-- Tunable here if the live amp differs; the kill-confirm toggle (default ON)
+-- and the wqr fall-through bound any error to "engage without ethereal".
+local ETHER_MAGIC_AMP = 0.40
 
 -- Alive, non-illusion, non-magic-immune enemy heroes within `radius` of a point.
 -- Shared by w_aim and the teamfight cluster / Q-poke aim - only enemies W/Q can
@@ -4884,6 +4891,28 @@ state.lina_starter_tick = function(force)
             })
         end
     end
+    -- v0.5.79 feature C: Ethereal+R kill-confirm. ether_wqr spends Ethereal
+    -- (4s lockout) + the full W/Q/R combo; only commit it when the ethereal-
+    -- amplified R secures the kill. Consistent with the codebase's R-centric
+    -- kill model (r_alone_kill / wqr_undershoots also use r_total only). On
+    -- failure the ladder falls through to eul/ww/wqr -- Lina STILL engages but
+    -- preserves the ethereal finisher for a confirmed kill. Toggle (default ON)
+    -- gates the whole check; a tlog records each suppression for demo tuning.
+    local ether_kill_ok = true
+    local kill_confirm_on = state.menu and state.menu.ether_kill_confirm
+                            and state.menu.ether_kill_confirm:Get()
+    if kill_confirm_on and ctx.ether_ready then
+        local amplified = (ctx.r_total or 0) * (1 + ETHER_MAGIC_AMP)
+        ether_kill_ok = (ctx.eff_hp_magical or math.huge) <= amplified
+        if not ether_kill_ok then
+            tlog(2, "ether_kill_confirm_skip", {
+                eff_hp    = string.format("%.0f", ctx.eff_hp_magical or 0),
+                r_total   = string.format("%.0f", ctx.r_total or 0),
+                amplified = string.format("%.0f", amplified),
+                amp       = string.format("%.2f", ETHER_MAGIC_AMP),
+            })
+        end
+    end
     -- v0.5.15 IMP-A2: pick_offense_target prefers attackers/nearest, but the
     -- finisher wants the lowest-eff-HP killable-in-R-range enemy (which may be
     -- a different hero entirely). Rebuild layer1 ctx only on a target swap;
@@ -4902,7 +4931,7 @@ state.lina_starter_tick = function(force)
         archetype, steps = "r_finisher", state.build_lina_r_finisher_steps(r_ctx)
     elseif r_finish_only then
         tlog(3, "lina_starter", { decision = "throttled", lock = "seq" }); return
-    elseif ctx.ether_ready and ctx.in_ether_range and ctx.in_w_range and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_ether and ether_needed then
+    elseif ctx.ether_ready and ctx.in_ether_range and ctx.in_w_range and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_ether and ether_needed and ether_kill_ok then
         archetype, steps = "ether_wqr", state.build_lina_ether_wqr_steps(ctx)
     elseif ctx.eul_ready and ctx.in_eul_range and cyclone_safe and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_eul then
         archetype, steps = "eul_wrq", state.build_lina_cyclone_wrq_steps(ctx, "item_cyclone")
@@ -4916,7 +4945,7 @@ state.lina_starter_tick = function(force)
         -- v0.5.15 OBS-03 (ladder-miss diag): every higher-tier gate failed,
         -- log per-tier ok bits so the trace explains WHY we landed on sustain.
         tlog(3, "lina_starter_ladder_miss", {
-            ether_ok = (ctx.ether_ready and ctx.in_ether_range and ctx.in_w_range and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_ether and ether_needed) and "y" or "n",
+            ether_ok = (ctx.ether_ready and ctx.in_ether_range and ctx.in_w_range and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_ether and ether_needed and ether_kill_ok) and "y" or "n",
             eul_ok   = (ctx.eul_ready and ctx.in_eul_range and cyclone_safe and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_eul) and "y" or "n",
             ww_ok    = (ww_ready and in_ww_range and not ww_threatened and ww_healthy and cyclone_safe and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_ww) and "y" or "n",
             wqr_ok   = (ctx.ready_w and ctx.ready_r and ctx.in_w_range and ctx.mana >= cost_wqr and not (target_fleeing_fast and not force)) and "y" or "n",
@@ -6971,6 +7000,19 @@ local function setup_menu()
         .. "same as the starter and tf_burst sites; shares the 1.5s "
         .. "state.last_fc_dispatch_t throttle.")
 
+    -- v0.5.79 feature C: Ethereal+R kill-confirm. Gate the ether_wqr starter
+    -- commit on a calculated post-amp magical kill so Lina does not blow the
+    -- 4s-lockout Ethereal on a target it will not finish. On a no-kill verdict
+    -- the ladder falls through to eul/ww/wqr (still engages, ethereal saved).
+    m.ether_kill_confirm = gCore:Switch("Ethereal+R kill-confirm", true)
+    m.ether_kill_confirm:ToolTip("Only commit the Ethereal+W+Q+R starter combo "
+        .. "when the ethereal-amplified Laguna (r_total x 1.40) covers the "
+        .. "target's effective magical HP. If it would not kill, skip ethereal "
+        .. "and fall through to Eul / Wind Waker / bare WQR so the 4s-lockout "
+        .. "Ethereal finisher is preserved for a confirmed kill. OFF = v0.5.78 "
+        .. "behaviour (ether_wqr fires whenever ethereal is 'needed' per the "
+        .. "MR / undershoot gate, kill or not).")
+
     -- v0.5.78 wave-clear (HOLD): mana + stack aware lane/jungle farm. Q (Dragon
     -- Slave) line nuke at the aim hitting the most creeps; optional W on a dense
     -- camp. Opt-in: KEY_NONE default so the bind does nothing until assigned.
@@ -8865,6 +8907,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.78 (wave-clear: HOLD, mana + stack aware): first farm feature. User: 'clear wave button to farm (aware of the amount of stacks so it is effective to farm jungle)' + chose HOLD trigger + Q+W scope + Entity.GetUnitsInRadius+TeamType gather. **New lib/farm.lua** (hero-agnostic, PURE GEOMETRY -- zero engine API calls, caller passes a unit-position list): Farm.BestLineAim(origin, units, length, half_width) -> aim_pos hitting most units (candidate dirs toward each unit, tie-break by summed hp); Farm.BestPointAim(units, radius) -> best AoE circle center; Farm.CountInLine(...); Farm.WorthCasting(hit_count, min_count). Reusable for any line/AoE nuke (offense W/Q aim could consume later). **Lina-side**: state.farm_gather_creeps(radius) DEFENSIVE enumeration -- enemy non-hero units = Entity.GetUnitsInRadius(TEAM_ENEMY) MINUS Entity.GetHeroesInRadius(TEAM_ENEMY) (set-difference avoids unverified NPC.IsHero); neutrals = Entity.GetUnitsInRadius(TEAM_NEUTRAL) only if Enum.TeamType.TEAM_NEUTRAL exists (guarded); skip dead/illusion (lib/target) + invulnerable (NPC.IsInvulnerable). ALL pcall-guarded -> degrades to no-creeps instead of crashing if a name/enum is wrong on this build. One-shot farm_gather_probe tlog dumps raw counts so the first demo confirms the API empirically. state.wave_clear_tick() HOLD handler: gather within Q range (1075) -> Farm.BestLineAim -> gate (hit>=min_creeps AND mana>=Qcost AND post-Q mana>=R reserve AND mana%>=floor) -> issue_cast_position Q; then W on dense camp (BestPointAim, hit>=min+1) when mana-rich. Player owns movement; brain only nukes creeps already in range. Skipped while combo active. **Menu (Core)**: Wave-clear key (HOLD, KEY_NONE default opt-in), min-creeps slider (1-6, def 3), mana-floor % slider (0-90, def 30), reserve-R switch (def on), uses-W switch (def on). Wired into OnUpdateEx after combo_key_tick. **Files**: lib/farm.lua NEW (169 lines pure geometry). Lina.lua +~190 (require + 2 state fns + 5 menu items + 1 tick wire). lib/escape + lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean both, no BOM Lina, lesson 15 verified. **Verification on next demo**: HOLD wave-clear key over a creep wave -> farm_gather_probe tlog shows enemy_units/neutral_units/farmable counts + neutral_enum=y|n (CONFIRMS the creep API on this build). wave_clear_q hits=N when >=min creeps in line; wave_clear_w on dense camps. If farmable=0 with creeps present, the gather API needs adjustment (check neutral_enum + enemy_units count). No behaviour change to combos / saves / fog primitives. **Deferred**: v0.5.79 R kill-confirm, v0.5.80 HUD chips.")
+LOG:info("Lina brain v0.5.79 (feature C: Ethereal+R kill-confirm): gate the ether_wqr starter commit on a calculated post-amp magical kill. User picked C from the feature menu; spec 'Only commit Ethereal+R if calculated post-amp magical kill, uses existing lina_r_damage + lina_eff_hp_magical'. **The gate**: before the starter archetype ladder picks ether_wqr, compute ether_kill_ok = eff_hp_magical <= r_total * (1 + ETHER_MAGIC_AMP) where ETHER_MAGIC_AMP=0.40 (Ethereal Blade magic amp ~+40% in 7.4x; the IMP-A10 gate already frames ethereal as a -30 MR amp). Added `and ether_kill_ok` to the ether_wqr branch condition (alongside the existing ether_needed MR/undershoot gate). **R-centric by design**: consistent with the whole codebase's kill model (r_alone_kill + wqr_undershoots also use r_total only; there is no W/Q damage estimation anywhere). **Bounded risk**: on a no-kill verdict the ladder FALLS THROUGH to eul_wrq / ww_wrq / wqr -- Lina STILL engages but preserves the 4s-lockout Ethereal finisher for a confirmed kill. Worst case of a wrong amp is 'engaged without ethereal occasionally', NOT a missed kill or death. **Toggle** m.ether_kill_confirm (Core, default ON) gates the whole check; OFF reverts to v0.5.78 (ether_wqr fires on ether_needed regardless of kill). **tlog** ether_kill_confirm_skip (level 2) records each suppression with eff_hp / r_total / amplified / amp for demo tuning of ETHER_MAGIC_AMP. ladder-miss diag ether_ok bit updated to include ether_kill_ok. r_finisher path unchanged (already requires r_alone_kill). teamfight tick unchanged (this is starter/pick only). **No lib work** -- hero-specific kill model. **Files**: Lina.lua only (+ETHER_MAGIC_AMP const + ether_kill_ok compute + branch condition + menu toggle + banner). lib/farm + lib/escape + lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: vs a tanky/full-HP target where ether+R would not kill -> ether_kill_confirm_skip tlog + archetype falls to wqr/eul/ww (NOT ether_wqr); ethereal stays unspent. vs a killable target -> ether_wqr fires as before. Toggle OFF -> v0.5.78 behaviour. If ether_wqr is being suppressed on kills it SHOULD make (amp too low) bump ETHER_MAGIC_AMP; if it commits ethereal on non-kills, lower it. **Deferred**: v0.5.80 D Save HUD power-spike chips (last queued feature).")
 
 return callbacks

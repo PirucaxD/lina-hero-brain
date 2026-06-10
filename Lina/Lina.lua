@@ -352,6 +352,22 @@ local function ability_ready(name)
     local a = ability(name)
     return a ~= nil and Ability.GetLevel(a) > 0 and Ability.IsReady(a)
 end
+-- v0.5.83: handle-taking readiness check (same GetLevel>0 + IsReady semantics
+-- as ability_ready, but skips the by-name NPC.GetAbility re-resolve when the
+-- caller already holds the handle). The GetLevel>0 guard MUST stay so an
+-- unlearned slot (e.g. FC not yet leveled) reads not-ready.
+local function ready_from(h)
+    return h ~= nil and Ability.GetLevel(h) > 0 and Ability.IsReady(h)
+end
+-- v0.5.83: per-frame key-state read without allocating a fresh pcall closure
+-- each frame. w:IsDown() is identical to w.IsDown(w); pcall guards a missing
+-- widget / ABI shift. Replaces the `pcall(function() return w:IsDown() end)`
+-- thunk pattern at the five key-tick sites.
+local function key_down(w)
+    if not w then return false end
+    local ok, v = pcall(w.IsDown, w)
+    return (ok and v) and true or false
+end
 
 -- Queue dedup: never duplicate an order baseline/framework already queued.
 local function queue_has_baseline(order_type, ability_h, target_h, unit_h, position)
@@ -2419,6 +2435,11 @@ defense_dispatcher = Defense.New {
     armed_threats           = state.armed_threats,
     now                     = now,
     tlog                    = tlog,
+    -- v0.5.83: lets ResolveSaveOrder skip building its level-3 diagnostic
+    -- kv-table at default verbosity (the per-armed-threat alloc the optimization
+    -- pass flagged). v_level is the live verbosity accessor; optional on the lib
+    -- side so a hero that does not register it keeps the always-build behaviour.
+    tlog_level              = v_level,
     dist_to                 = dist_to,
     defense_enabled         = defense_enabled,
     -- v0.5.40 TIER 0: dispatcher lock primitives. canonicalize_mod folds
@@ -3844,11 +3865,15 @@ local function build_layer1_ctx(target, out)
     ctx.t_pos = target and Entity.GetAbsOrigin(target) or nil
     ctx.mana  = (me and NPC.GetMana) and (NPC.GetMana(me) or 0) or 0
 
-    local q, w, r = ability(A.Q), ability(A.W), ability(A.R)
-    ctx.ready_q = ability_ready(A.Q)
-    ctx.ready_w = ability_ready(A.W)
-    ctx.ready_r = ability_ready(A.R)
-    ctx.flame_cloak_ready = ability_ready(A.FC)
+    -- v0.5.83: resolve each ability handle ONCE and derive readiness off the
+    -- handle (ready_from) instead of re-resolving by name via ability_ready.
+    -- Cuts NPC.GetAbility calls in this per-frame ctx-builder from 8 to 4
+    -- (q/w/r/fc were each fetched twice). Identical level/ready results.
+    local q, w, r, fc = ability(A.Q), ability(A.W), ability(A.R), ability(A.FC)
+    ctx.ready_q = ready_from(q)
+    ctx.ready_w = ready_from(w)
+    ctx.ready_r = ready_from(r)
+    ctx.flame_cloak_ready = ready_from(fc)
     -- v0.5.33 FC-A-05: don't re-fire FC during its 7s active window (cooldown
     -- is 25s, so a re-fire would waste the next 18s of CD for zero gain). The
     -- buff modifier name is per LIQUIPEDIA_REF L485; if the live KV string
@@ -3868,7 +3893,7 @@ local function build_layer1_ctx(target, out)
     -- AND the live cooldown / cast phase so any of three signals blocks the
     -- duplicate dispatch. Replaces ctx.flame_cloak_active at both gate sites.
     do
-        local fc_h = ability(A.FC)
+        local fc_h = fc   -- v0.5.83: reuse the handle captured above (was a 2nd ability(A.FC))
         local fc_cd = (fc_h and Ability.GetCooldown and (Ability.GetCooldown(fc_h) or 0)) or 0
         local fc_phase = (fc_h and Ability.IsInAbilityPhase and Ability.IsInAbilityPhase(fc_h)) or false
         ctx.flame_cloak_in_flight = ctx.flame_cloak_active or (fc_cd > 0) or fc_phase
@@ -5995,31 +6020,27 @@ local function update_hitrun_pause()
     end
 end
 
+-- v0.5.83: hoisted out of combo_key_tick so the per-frame tick allocates no
+-- closure. Forces a clean release of the combo-hold latches on toggle-off:
+-- otherwise combo_hold_active stays latched, update_hitrun_pause keeps native
+-- Hit & Run paused indefinitely, and combo_key_was_down=true blocks the next
+-- press-edge from firing on re-enable (the v0.5.4 fix).
+local function combo_force_release()
+    state.combo_hold_active      = false
+    state.combo_hold_active_mode = nil
+    state.combo_key_was_down     = false
+end
+
 -- TAP/HOLD classifier. Reads the combo key each tick; press<0.18s = TAP (stub),
 -- longer = HOLD routed to starter (1-2) / teamfight (3+), latched on hold-start.
 state.combo_key_tick = function()
     local m = state.menu
     if not m or not m.combo_key then return end
-    -- v0.5.4: if the user holds the combo key and then toggles master/offense
-    -- OFF, we must force a clean release before bailing - otherwise
-    -- combo_hold_active stays latched, update_hitrun_pause keeps native Hit &
-    -- Run paused indefinitely, and combo_key_was_down=true blocks the next
-    -- press-edge from firing on re-enable.
-    local function force_release()
-        state.combo_hold_active      = false
-        state.combo_hold_active_mode = nil
-        state.combo_key_was_down     = false
-    end
-    if not offense_enabled() then force_release(); return end
-    if m.enable_offense and not m.enable_offense:Get() then force_release(); return end
-    local down = false
-    local ok, v = pcall(function() return m.combo_key:IsDown() end)
-    if ok then down = v and true or false end
-    local force_down = false
-    if m.force_key then
-        local okf, fv = pcall(function() return m.force_key:IsDown() end)
-        if okf then force_down = fv and true or false end
-    end
+    if not offense_enabled() then combo_force_release(); return end
+    if m.enable_offense and not m.enable_offense:Get() then combo_force_release(); return end
+    -- v0.5.83: key_down() reads IsDown without allocating a pcall-closure per frame.
+    local down = key_down(m.combo_key)
+    local force_down = key_down(m.force_key)
     local was = state.combo_key_was_down
 
     if down and not was then
@@ -6150,9 +6171,7 @@ state.wave_clear_tick = function()
     if m.enable and not m.enable:Get() then return end
     -- combo takes priority over farm
     if state.combo_hold_active then return end
-    local down = false
-    local ok, v = pcall(function() return m.wave_key:IsDown() end)
-    if ok then down = v and true or false end
+    local down = key_down(m.wave_key)   -- v0.5.83: no per-frame pcall-closure
     if not down then return end
     -- light throttle: re-evaluate ~5x/sec (Q CD + safe_issue dedup do the rest)
     local t = now()
@@ -6319,9 +6338,7 @@ end
 state.dump_key_tick = function()
     local m = state.menu
     if not m or not m.dump_key then return end
-    local down = false
-    local ok, v = pcall(function() return m.dump_key:IsDown() end)
-    if ok then down = v and true or false end
+    local down = key_down(m.dump_key)   -- v0.5.83: no per-frame pcall-closure
     if down and not state.dump_key_was_down then
         state.dump_brain_state()
     end
@@ -6340,9 +6357,7 @@ end
 state.panic_key_tick = function()
     local m = state.menu
     if not m or not m.panic_key then return end
-    local down = false
-    local ok, v = pcall(function() return m.panic_key:IsDown() end)
-    if ok then down = v and true or false end
+    local down = key_down(m.panic_key)   -- v0.5.83: no per-frame pcall-closure
     if down and not state.panic_key_was_down then
         state.panic_override_until = now() + 2.0
         tlog(1, "panic_key_pressed", { window = "2.0",
@@ -6433,9 +6448,7 @@ end
 state.test_key_tick = function()
     local m = state.menu
     if not m or not m.test_key then return end
-    local down = false
-    local ok, v = pcall(function() return m.test_key:IsDown() end)
-    if ok then down = v and true or false end
+    local down = key_down(m.test_key)   -- v0.5.83: no per-frame pcall-closure
     if down and not state.test_key_was_down then
         state.run_all_tests()
     end
@@ -9033,6 +9046,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.82 (optimization pass + quality checks): from a fan-out optimization Workflow (8 reviewers + adversarial verify; 32 raised, 15 confirmed, 0 high-risk). User: 'run the same process on the optimization side setting up quality checks'. Applied the 2 high-value low-risk opts + added in-brain contract tests; quality-check tooling lands repo-side. **Opt 1 (highest value) sample_attacker_latches**: was running the WIDEST per-frame hero enumeration in the whole tick chain (Entity.GetHeroesInRadius 3200u TEAM_ENEMY + per-hero IsAttacking loop) EVERY frame with NO gate, even when the commit-attacker feature is off, and stamping latches out to 3200u that the consumer (is_committed_attacker_on_self) rejects beyond 700u. Fix: gate on state.menu.enable_commit_attacker like scan_and_arm already does + narrow radius to K.LINA_ATTACK_ENGAGE_RADIUS (700). Behaviour-neutral (accept window unchanged); kills a large per-frame cost. **Opt 2 wave_clear_tick W dedup**: the v0.5.81 fix added a SECOND state.farm_gather_creeps(w_range) call (2-3 engine enumerations + full per-unit predicate pass) after the Q-range gather. Since the Q list (1075) is a strict superset of W range, filter it in-memory by squared distance <= w_range instead of re-querying the engine. Removes the redundant sweep; identical W creep set. **In-brain test Q82_fog_escape_alias_contracts**: new state.tests entry (runs via the Diagnostics test key) that nils state.self_npc and asserts all 7 v0.5.76-78 fog/escape/farm aliases (fog_snapshot, possible_gankers, gank_imminent_self, missing_from_map, initiators_accounted_for, pike_advance_pick, safest_spot_near) return their documented shape with no throw -- the exact nil-deref/shape class the workflow flagged. **Quality-check tooling (repo-side, this version)**: tools/run_tests.lua gains a Vector stub + lib/farm unit tests (BestLineAim/BestPointAim/CountInLine/WorthCasting); a .luacheckrc with the UCZone framework-globals allowlist; tools/predeploy_check.ps1 codifying the luac + lesson-15 banner + no-BOM + hash protocol. **Deferred (reported, not applied -- 4 medium-risk)**: combo_key_tick per-frame closure+thunk alloc; PickDir double-scoring DangerAtPos; ResolveSaveOrder tlog-table alloc when L3 off; build_layer1_ctx ability double-fetch. All touch shared-lib / battle-tested offense-defense paths; left for a focused pass. **Files**: Lina.lua only (deployed). lib/* + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: commit-attacker OFF -> no 3200u enum in the tick (was every frame); wave-clear W identical targeting at lower cost; run the test key -> Q82 + existing tests pass.")
+LOG:info("Lina brain v0.5.83 (4 medium-risk optimizations, focused pass): the deferred medium-risk findings from the v0.5.82 optimization workflow, all behaviour-neutral. **Fix 1 combo_key_tick alloc**: it allocated up to 3 closures/frame on the hot path (a force_release local + two pcall(function() return w:IsDown() end) thunks). Hoisted force_release to module-level combo_force_release + added a module-level key_down(w) helper (w.IsDown(w) == w:IsDown(), pcall-guarded, no per-call closure). Applied key_down to all 5 key-tick sites (combo/wave/dump/panic/test) to dedup the same per-frame thunk pattern. **Fix 4 build_layer1_ctx double-fetch**: q/w/r/FC handles were each resolved twice per tick (ability() then ability_ready() re-resolves by name; FC fetched again in the in-flight block). Added ready_from(h) (handle-taking, keeps the GetLevel>0 unlearned-slot guard); capture q,w,r,fc ONCE and derive readiness off the handles; reuse fc in the flame_cloak_in_flight block. 8 NPC.GetAbility -> 4, identical results. **Fix 2 lib/escape PickDir double-score**: the no-threat-hint (centroid) path scanned DangerAtPos ~21x for 7 candidates (SafePushDestination computed both landing + current danger per candidate, then PickDir re-scanned landing for ranking). SafePushDestination now takes an optional precomputed danger_now and RETURNS the landing danger (d_land); PickDir hoists danger_now once and reuses d_land for ranking. ~21 -> ~8 scans. Backward compatible: Sniper passes 3 args (danger_now nil -> local scan) and ignores the extra return; threat-hint path is bit-identical (returns no d_land, ranked by a direct scan as before). **Fix 3 lib/defense ResolveSaveOrder tlog alloc**: each of the 7 return branches built a 3-field kv-table for a level-3 diagnostic even at default verbosity (c.tlog drops it by level only AFTER it is built), once per armed threat. Added cfg.tlog_level (Lina registers v_level); ResolveSaveOrder computes diag_on once + routes all 7 emits through a gated pick_log() helper. diag_on defaults TRUE when cfg.tlog_level is absent, so Sniper (no accessor) keeps the exact prior always-build behaviour. **Deferred-no-more**: all 4 v0.5.82 medium-risk items done. **Files**: Lina.lua (key_down/ready_from helpers + combo_force_release + 5 key sites + ctx + cfg.tlog_level) + lib/escape.lua (SafePushDestination + PickDir) + lib/defense.lua (ResolveSaveOrder gate). lib/threat_data + lib/farm + Sniper.lua unchanged. luac clean all, offline tests 19/19, no BOM Lina, lesson 15 verified via predeploy_check.ps1. **Verification on next demo**: identical HOLD-combo classify, wave/dump/panic/test key behaviour, escape self-push targeting, and save-chain resolution; only allocation/scan/call counts drop. resolve_save_order_pick tlogs still fire at verbosity 3.")
 
 return callbacks

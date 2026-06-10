@@ -54,6 +54,10 @@ GlobalVars.GetCurTime = function() return 0 end
 Enum = Enum or {}
 Enum.ModifierState = setmetatable({}, { __index = function(_, k) return k end })
 
+-- v0.5.82: Vector stub for lib/farm pure-geometry tests. farm only reads
+-- .x / .y and constructs Vector(x, y, z) for aim points; no Vector methods.
+Vector = Vector or function(x, y, z) return { x = x, y = y, z = z } end
+
 -- Patch package.path so requires from lib/ resolve.
 package.path = "./?.lua;./?/init.lua;" .. package.path
 
@@ -160,6 +164,59 @@ describe("lib/timing , EscapeReadiness", function()
     it("returns 0 for entity without items", function()
         local r = Timing.EscapeReadiness({ idx = 1 }, 2.0)
         assert_eq(r, 0)
+    end)
+end)
+
+local Farm = require("lib.farm")
+
+describe("lib/farm , pure geometry (v0.5.82)", function()
+    local function u(x, y, hp) return { pos = { x = x, y = y, z = 0 }, hp = hp or 100 } end
+    local origin = { x = 0, y = 0, z = 0 }
+
+    it("WorthCasting respects min_count", function()
+        assert_true(Farm.WorthCasting(3, 3))
+        assert_false(Farm.WorthCasting(2, 3))
+        assert_true(Farm.WorthCasting(1))          -- default min 1
+        assert_false(Farm.WorthCasting(0, 1))
+    end)
+
+    it("CountInLine counts units inside the line band", function()
+        -- origin -> +x, length 1000, half-width 100
+        local units = { u(100, 0), u(500, 50), u(500, 300), u(-100, 0), u(1200, 0) }
+        local n = Farm.CountInLine(origin, { x = 1, y = 0, z = 0 }, 1000, 100, units)
+        -- in:  (100,0), (500,50 perp<=100)
+        -- out: (500,300 perp), (-100,0 behind), (1200,0 past length)
+        assert_eq(n, 2, "expected 2 in-line")
+    end)
+
+    it("BestLineAim picks the densest direction", function()
+        local units = { u(200, 0), u(400, 0), u(600, 0), u(0, 400) }
+        local aim, hit = Farm.BestLineAim(origin, units, 1075, 110)
+        assert_eq(hit, 3, "expected 3 hits on the +x line")
+        assert_true(aim ~= nil and aim.x > aim.y, "aim should point +x")
+    end)
+
+    it("BestLineAim tie-break prefers the closer pack (v0.5.81)", function()
+        -- both candidate lines hit exactly 1 unit, equal hp; nearer must win
+        local near = u(300, 0, 100)
+        local far  = u(0, 900, 100)
+        local aim, hit = Farm.BestLineAim(origin, { far, near }, 1075, 110)
+        assert_eq(hit, 1)
+        assert_true(aim.x > aim.y, "tie-break should favor the nearer (+x) unit")
+    end)
+
+    it("BestPointAim finds the densest cluster center", function()
+        local units = { u(0, 0), u(50, 0), u(60, 30), u(1000, 1000) }
+        local center, hit = Farm.BestPointAim(units, 250)
+        assert_eq(hit, 3, "cluster of 3 within 250")
+        assert_true(center ~= nil)
+    end)
+
+    it("empty / degenerate inputs are safe", function()
+        local aim, h1 = Farm.BestLineAim(origin, {}, 1000, 100)
+        assert_true(aim == nil and h1 == 0)
+        local c, h2 = Farm.BestPointAim({}, 250)
+        assert_true(c == nil and h2 == 0)
     end)
 end)
 

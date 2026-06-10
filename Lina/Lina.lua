@@ -982,8 +982,20 @@ state.W_aim_at_caster_mods          = state.W_aim_at_caster_mods or {
 state.sample_attacker_latches = function()
     local me = state.self_npc
     if not (me and Entity.IsEntity and Entity.IsEntity(me)) then return end
+    -- v0.5.82 perf: gate on the commit-attacker toggle like scan_and_arm does,
+    -- and narrow the enumeration radius. The latches this writes are consumed
+    -- ONLY by is_committed_attacker_on_self / scan_and_arm, both of which
+    -- early-return when the toggle is off -- so the (widest-in-the-tick) 3200u
+    -- enumeration was pure waste while disabled. And is_committed_attacker_on_self
+    -- rejects anything beyond K.LINA_ATTACK_ENGAGE_RADIUS (700), so heroes
+    -- stamped past 700 were dead latches. Both changes are behaviour-neutral
+    -- (the feature's accept window is unchanged). This is the highest-value
+    -- hot-path win from the v0.5.82 optimization pass.
+    if not (state.menu and state.menu.enable_commit_attacker
+            and state.menu.enable_commit_attacker:Get()) then return end
     if not (Entity.GetHeroesInRadius and Enum and Enum.TeamType) then return end
-    local ok, list = pcall(Entity.GetHeroesInRadius, me, 3200, Enum.TeamType.TEAM_ENEMY)
+    local ok, list = pcall(Entity.GetHeroesInRadius, me,
+                           K.LINA_ATTACK_ENGAGE_RADIUS, Enum.TeamType.TEAM_ENEMY)
     if not ok or type(list) ~= "table" then return end
     local t = now()
     -- v0.5.46 Problem A diag: count stamps per scan; surfaced in the
@@ -6202,7 +6214,22 @@ state.wave_clear_tick = function()
             -- what is already in range" contract.
             local w_range = cast_range_of(ability("lina_light_strike_array"),
                                           FALLBACK_RANGES.W)
-            local w_creeps = state.farm_gather_creeps(w_range)
+            -- v0.5.82 perf: filter the already-gathered Q-range `creeps` list to
+            -- W range instead of a second farm_gather_creeps engine sweep (which
+            -- ran 2-3 GetUnitsInRadius/GetHeroesInRadius calls + a full per-unit
+            -- predicate pass). creeps was gathered at Q_LENGTH (1075) >= w_range,
+            -- so it is a strict superset; the squared-distance filter yields the
+            -- identical in-W-range set the second gather would have.
+            local w_r2 = w_range * w_range
+            local w_creeps = {}
+            for i = 1, #creeps do
+                local c = creeps[i]
+                local dx = c.pos.x - me_pos.x
+                local dy = c.pos.y - me_pos.y
+                if (dx * dx + dy * dy) <= w_r2 then
+                    w_creeps[#w_creeps + 1] = c
+                end
+            end
             local center, w_hit = Farm.BestPointAim(w_creeps, W_AOE)
             -- dense = at least one more than the Q gate (a real pack, not a pair)
             if center and Farm.WorthCasting(w_hit, min_creeps + 1) then
@@ -6443,6 +6470,52 @@ state.tests["A9_pudge_chain_order"] = {
             end
         end
         return { pass = true, reason = "6/6 positions match" }
+    end,
+}
+
+-- v0.5.82 quality: contract / no-throw smoke test for the v0.5.76-78 lib-alias
+-- surface (fog + escape + farm). Drives each alias with state.self_npc = nil
+-- and asserts the documented return shape WITHOUT erroring -- exactly the class
+-- of nil-deref / shape-divergence the optimization workflow flagged. Mock-driven:
+-- nils self_npc via the cleanup stack, restores after. Complements the offline
+-- tools/run_tests.lua pure-lib tests by covering the Lina-side glue (aliases +
+-- _fog_opts + arg passing).
+state.tests["Q82_fog_escape_alias_contracts"] = {
+    desc = "v0.5.82: fog/escape/farm aliases return correct shape + no-throw with self_npc=nil",
+    fn = function(cu)
+        local saved = state.self_npc
+        _cu_push(cu, function() state.self_npc = saved end)
+        state.self_npc = nil
+        local snap = state.fog_snapshot and state.fog_snapshot()
+        if type(snap) ~= "table" or type(snap.heroes) ~= "table" then
+            return { pass = false, reason = "fog_snapshot shape" }
+        end
+        local pg = state.possible_gankers and state.possible_gankers()
+        if type(pg) ~= "table" or type(pg.gankers) ~= "table"
+           or type(pg.summary) ~= "table" or type(pg.summary.count) ~= "number" then
+            return { pass = false, reason = "possible_gankers shape" }
+        end
+        local gi, glist = state.gank_imminent_self and state.gank_imminent_self()
+        if type(gi) ~= "boolean" or type(glist) ~= "table" then
+            return { pass = false, reason = "gank_imminent_self shape" }
+        end
+        local mm = state.missing_from_map and state.missing_from_map()
+        if type(mm) ~= "table" then
+            return { pass = false, reason = "missing_from_map shape" }
+        end
+        local ia = state.initiators_accounted_for and state.initiators_accounted_for({})
+        if type(ia) ~= "table" or type(ia.accounted) ~= "table" then
+            return { pass = false, reason = "initiators_accounted_for shape" }
+        end
+        local landing = state.pike_advance_pick and state.pike_advance_pick(nil)
+        if landing ~= nil then
+            return { pass = false, reason = "pike_advance_pick(nil) should be nil" }
+        end
+        local sp, sc = state.safest_spot_near and state.safest_spot_near()
+        if sp ~= nil or type(sc) ~= "number" then
+            return { pass = false, reason = "safest_spot_near shape" }
+        end
+        return { pass = true, reason = "7 aliases: correct shape, no throw" }
     end,
 }
 
@@ -8960,6 +9033,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.81 (ralph-loop bug-hunt fixes): 3 confirmed low-risk bugs fixed from a fan-out workflow review of all libs + Lina (11 reviewers + adversarial verify; 8 raised, 3 real, 0 medium/high, 5 correctly rejected). User: 'use ralph loop to bug hunt all libs and lina script, fix all that is not high risk'. **Fix 1 (lib/farm.lua BestLineAim)**: the docstring promised a 3rd-level tie-break (nearer cluster / shorter mean projection) that was never implemented -- on a count+hp tie the winner was just iteration order. Implemented it: _count_in_line now accumulates sum-of-projection (sumt), BestLineAim tracks best_proj = sumt/n and adds the 3rd tie-break level (mean_proj < best_proj). Closer/denser pack now wins ties (desirable for wave-clear). Pure geometry, single consumer. **Fix 2 (lib/target.lua EffectiveHpVs)**: bare NPC.GetArmorDamageMultiplier (L241) + NPC.GetMagicalArmorDamageMultiplier (L248) calls had no presence guard, unlike every other consumer (lib/damage.lua, Sniper.lua use `(NPC.X and NPC.X(t)) or 1.0`). On a build lacking the API the bare call throws and breaks the magical kill-confirm hot path (Lina ether+R gate via lina_eff_hp_magical, + Sniper). Mirrored the guarded `or 1.0` pattern. Localized nil-guard, benefits both heroes. **Fix 3 (Lina.lua wave_clear_tick W branch)**: W center was picked from the Q-range (1075) creep list but W cast range is ~700; a camp 700-1075u away won BestPointAim and issue_cast_position has no range gate, so the engine WALKED Lina to it -- breaking the HOLD 'only nukes what is already in range' contract. Fix: gather a W-RANGE creep list (state.farm_gather_creeps(w_range) where w_range = cast_range_of(W, FALLBACK_RANGES.W)) and run BestPointAim on it, so the unit-centered result is in W range by construction; recovers a valid in-range pack a plain gate would drop. Q unaffected (aim = origin + dir*Q_LENGTH at Q's range, in range by construction). **5 rejected findings** (verifier debunked): DistSpeed fog fallback (fog units keep real GetAbsOrigin; caster never nil on that path), generic resolver channel_at_caster alias (pcall+fall-through safe), GetBarriers guard (no evidence absent; pre-existing), possible_gankers nil-guard shape (no readers of soonest_eta), FogSnapshot IsDormant fallback (IsDormant universally present; degrades safe). **Files**: lib/farm.lua + lib/target.lua + Lina.lua. lib/escape + lib/threat_data + lib/defense + Sniper.lua unchanged. luac clean all, no BOM Lina, lesson 15 verified. **Verification on next demo**: wave-clear W never drags Lina out of position (only fires on camps within ~700u); ether/R kill-confirm survives a build without the multiplier API; BestLineAim prefers the closer pack on exact ties. No behaviour change to combos / saves / fog / dispatch beyond these three.")
+LOG:info("Lina brain v0.5.82 (optimization pass + quality checks): from a fan-out optimization Workflow (8 reviewers + adversarial verify; 32 raised, 15 confirmed, 0 high-risk). User: 'run the same process on the optimization side setting up quality checks'. Applied the 2 high-value low-risk opts + added in-brain contract tests; quality-check tooling lands repo-side. **Opt 1 (highest value) sample_attacker_latches**: was running the WIDEST per-frame hero enumeration in the whole tick chain (Entity.GetHeroesInRadius 3200u TEAM_ENEMY + per-hero IsAttacking loop) EVERY frame with NO gate, even when the commit-attacker feature is off, and stamping latches out to 3200u that the consumer (is_committed_attacker_on_self) rejects beyond 700u. Fix: gate on state.menu.enable_commit_attacker like scan_and_arm already does + narrow radius to K.LINA_ATTACK_ENGAGE_RADIUS (700). Behaviour-neutral (accept window unchanged); kills a large per-frame cost. **Opt 2 wave_clear_tick W dedup**: the v0.5.81 fix added a SECOND state.farm_gather_creeps(w_range) call (2-3 engine enumerations + full per-unit predicate pass) after the Q-range gather. Since the Q list (1075) is a strict superset of W range, filter it in-memory by squared distance <= w_range instead of re-querying the engine. Removes the redundant sweep; identical W creep set. **In-brain test Q82_fog_escape_alias_contracts**: new state.tests entry (runs via the Diagnostics test key) that nils state.self_npc and asserts all 7 v0.5.76-78 fog/escape/farm aliases (fog_snapshot, possible_gankers, gank_imminent_self, missing_from_map, initiators_accounted_for, pike_advance_pick, safest_spot_near) return their documented shape with no throw -- the exact nil-deref/shape class the workflow flagged. **Quality-check tooling (repo-side, this version)**: tools/run_tests.lua gains a Vector stub + lib/farm unit tests (BestLineAim/BestPointAim/CountInLine/WorthCasting); a .luacheckrc with the UCZone framework-globals allowlist; tools/predeploy_check.ps1 codifying the luac + lesson-15 banner + no-BOM + hash protocol. **Deferred (reported, not applied -- 4 medium-risk)**: combo_key_tick per-frame closure+thunk alloc; PickDir double-scoring DangerAtPos; ResolveSaveOrder tlog-table alloc when L3 off; build_layer1_ctx ability double-fetch. All touch shared-lib / battle-tested offense-defense paths; left for a focused pass. **Files**: Lina.lua only (deployed). lib/* + Sniper.lua unchanged. luac clean, no BOM, lesson 15 verified. **Verification on next demo**: commit-attacker OFF -> no 3200u enum in the tick (was every frame); wave-clear W identical targeting at lower cost; run the test key -> Q82 + existing tests pass.")
 
 return callbacks

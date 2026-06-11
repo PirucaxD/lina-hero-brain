@@ -39,6 +39,7 @@ if package and package.loaded then
     package.loaded["lib.native"]      = nil
     package.loaded["lib.defense"]     = nil
     package.loaded["lib.escape"]      = nil
+    package.loaded["lib.item_saves"]  = nil
 end
 local Signal = require("lib.signal")
 local Target = require("lib.target")      -- v0.2.0: IsAlive / NotIllusion / NotClone
@@ -50,6 +51,7 @@ local Native = require("lib.native")      -- v0.4.4: pause native Hit & Run / Or
 local Defense = require("lib.defense")    -- v0.5.0: generic Layer-2 save dispatcher (Tier-2)
 local Escape = require("lib.escape")      -- v0.5.57: danger-aware escape destination picker (Phase 5)
 local Farm   = require("lib.farm")        -- v0.5.78: stateless farm geometry (line/point AoE optimizers + worth-casting)
+local ItemSaves = require("lib.item_saves") -- v0.5.108: hero-agnostic defensive item save bodies
 
 local MS = Enum.ModifierState
 local UO = Enum.UnitOrder
@@ -1330,7 +1332,28 @@ state.scan_and_arm_committed_attackers = function()
                     committed = committed and "y" or "n",
                 })
             end
+            -- v0.5.108.2 double-save guard: skip the committed-attacker
+            -- dispatch when this caster ALREADY has an active armed spell-
+            -- threat entry (instant-blink / charge / channel / cast-point).
+            -- A PA Phantom Strike double-fired W (committed_attacker_melee)
+            -- + Pike (instant_blink:phantom_strike) because the two systems
+            -- use DIFFERENT threat_mods, so the dispatcher per-(target, mod,
+            -- caster) lock did not dedup them (demo: W @30.9 + Pike @31.1 on
+            -- one blink). The committed-attacker system is the FALLBACK for
+            -- plain auto-attackers with NO spell threat (v0.5.45 intent); when
+            -- the armed path is already tracking this caster, let it own the
+            -- save. After a gap-closer's displacement save the caster is
+            -- pushed out of the 700u melee gate anyway, so the reverse order
+            -- (blink fires+clears before the committed scan) self-resolves.
+            local caster_armed = false
             if committed then
+                for _, _e in pairs(state.armed_threats) do
+                    if _e and _e.caster == h then caster_armed = true; break end
+                end
+            end
+            if committed and caster_armed then
+                if emit_diag then tlog(3, "committed_skip_armed", { h = uname(h) }) end
+            elseif committed then
                 local ok2, idx = pcall(Entity.GetIndex, h)
                 if ok2 and idx then
                     local last_arm = state.committed_attacker_armed_t[idx] or 0
@@ -1628,359 +1651,64 @@ local LINA_EXPECTED_DAMAGE = {
 -- ones (Flame Cloak ability, Ethereal Blade self-cast). Aeon is passive
 -- auto-trigger, so it has NO fire entry (the chain skips it; the brain only
 -- logs the proc). Force/Pike self-push gate on safe_push_destination (E10).
+-- v0.5.108: the 12 defensive ITEM save bodies now live in lib/item_saves.lua
+-- (hero-agnostic). SAVE_CFG bundles the cast primitives + the hero-policy
+-- hooks (thin wrappers over existing state.* aliases). The two Lina ABILITY
+-- saves (lina_flame_cloak, lina_w_anti_gap) stay as the literal below; the
+-- item entries are merged in from ItemSaves.build after it. The lotus_gate
+-- closure ports the v0.5.107 item_lotus_orb damage gate verbatim. See
+-- Lina/ITEM_SAVES_LIFT_DESIGN.md.
+local SAVE_CFG = {
+    self_npc        = function() return state.self_npc end,
+    item            = function(n) return NPCLib.item(state.self_npc, n) end,
+    issue_self      = function(intent, it) return issue_item_self(intent, "def", it) end,
+    issue_target    = function(intent, it, t) return issue_item_target(intent, "def", it, t) end,
+    issue_position  = function(intent, it, p) return issue_item_position(intent, "def", it, p) end,
+    issue_no_target = function(intent, it) return issue_item_no_target(intent, "def", it) end,
+    tlog            = tlog,
+    uname           = uname,
+    dist_to         = function(u) return dist_to(u) end,
+    -- policy hooks (thin wrappers over existing state.* aliases)
+    armed_cp_t            = function() return state.cur_armed_cp_t end,
+    armed_threat_mod      = function() return state.cur_armed_threat_mod end,
+    cyclone_target        = function(mod, caster, item, range) return state.ca_cyclone_target(mod, caster, item, range) end,
+    queue_post_move       = function(short, dist, caster, mod, movable) return state.queue_safe_post_move(short, dist, caster, mod, movable) end,
+    self_push             = function(intent, it, name, range, caster) return state.try_self_push(intent, it, name, range, caster) end,
+    pike_enemy_range      = function() return state.pike_enemy_range() end,
+    pike_after_target_fire = function(caster)
+        if not state.pike_primed then
+            state.pike_reissue = { caster = caster, t = now(), self_cast = false }
+        end
+    end,
+    compute_safe_dest     = function(caster, dist) return state.compute_safe_dest(caster, dist) end,
+    recent_damage         = function(s)
+        if Damage and Damage.GetRecentDamage then
+            local ok, d = pcall(Damage.GetRecentDamage, state.self_npc, s)
+            if ok and type(d) == "number" then return d end
+        end
+        return 0
+    end,
+    lotus_gate            = function(threat_mod)
+        -- Port of the v0.5.107 item_lotus_orb gate: fire when expected damage
+        -- >= 30% current HP OR the threat is LOTUS_WORTHY_INCOMING; else skip.
+        -- Threats absent from LINA_EXPECTED_DAMAGE fall back to the 0.85 HP gate.
+        local me = state.self_npc
+        local hp    = (me and Entity.GetHealth    and Entity.GetHealth(me))    or 0
+        local hpmax = (me and Entity.GetMaxHealth and Entity.GetMaxHealth(me)) or 1
+        local hp_frac = (hpmax > 0) and (hp / hpmax) or 1
+        local is_worthy = LOTUS_WORTHY_INCOMING and threat_mod and LOTUS_WORTHY_INCOMING[threat_mod] or false
+        local exp_dmg = threat_mod and LINA_EXPECTED_DAMAGE[threat_mod] or nil
+        if exp_dmg ~= nil then
+            if exp_dmg < hp * 0.30 and not is_worthy then return false end
+            return true
+        end
+        return is_worthy or (hp_frac <= 0.85)
+    end,
+}
+
+-- HERO-SPECIFIC ABILITY saves (not items). Kept as a literal; item entries
+-- merged in below.
 local SAVE_FIRE = {
-    item_wind_waker   = {
-        short = "windwaker",
-        -- v0.5.16 Group 4 guard + v0.5.20 instrumentation: log every closure
-        -- invocation regardless of guard/fire outcome so we can correlate
-        -- user-observed in-game saves against actual brain dispatch.
-        -- v0.5.60 Phase 5 slice 3 / v0.5.62 fix: cast in place (WW lifts
-        -- Lina airborne 3s untargetable), then arm the tick-driven
-        -- state.pending_post_airborne_move which (a) pauses Native HR/OW
-        -- so the baseline orbwalker cannot preempt and (b) issues the
-        -- MOVE_TO_POSITION when the modifier_wind_waker clears. v0.5.60
-        -- queue=true alone was preempted by USER-tagged baseline orders
-        -- the moment cyclone ended (per v0.5.61 demo log L3254 etc.).
-        fire  = function(intent, threat_caster, threat_mod)
-            local guarded = NPC.HasModifier(state.self_npc, "modifier_wind_waker")
-            tlog(1, "save_fire_invoked", { item = "item_wind_waker", intent = tostring(intent),
-                guarded = guarded and "y" or "n" })
-            if guarded then return false end
-            -- v0.5.107 (user rule from the v0.5.106 demo: "with eul and WW
-            -- the heroes gets invulnerable; if it is used before the skill
-            -- is launched it will just cancel the enemies action and he can
-            -- re-use it. The best action is to use it in a way that the
-            -- skill was used in vain"). Vs a CAST-POINT-armed threat the
-            -- untargetable lift must come AFTER the cast completes:
-            -- mid-cast it aborts the enemy cast with NO cooldown spent (the
-            -- demo: Eul at cp_t=0.50 cancelled Sniper's cast; the re-cast
-            -- landed with Eul down). cur_armed_cp_t is stashed by
-            -- armed_post_fire for cast-point entries ONLY (nil on every
-            -- other dispatch path). The during-cast marker (= the threat
-            -- modifier on Lina, e.g. the Assassinate crosshair: present
-            -- while casting AND while the projectile flies, destroyed on
-            -- cancel/impact) tells launched from cancelled:
-            --   cp_t > -0.05 + marker  -> DEFER (the armed row re-attempts
-            --     at ~10Hz; we accept once launched).
-            --   cp_t > -0.05 + no marker -> anim-armed INSTANT (Finger
-            --     class: no projectile = no post-launch window) -> legacy
-            --     immediate fire (cancelling still beats eating it).
-            --   cp_t <= -0.05 + marker  -> LAUNCHED, cooldown spent,
-            --     projectile in flight -> fire NOW (dodged in vain).
-            --   cp_t <= -0.05 + no marker -> cancelled / already impacted
-            --     -> refuse (the cast-point branch GCs the row).
-            -- Lotus/BKB are unaffected: they do not break targeting, the
-            -- enemy cast completes through them (demo-proven v0.5.102).
-            if state.cur_armed_cp_t then
-                local marker = state.cur_armed_threat_mod
-                    and NPC.HasModifier(state.self_npc, state.cur_armed_threat_mod)
-                if state.cur_armed_cp_t > -0.05 then
-                    if marker then
-                        tlog(2, "cyclone_wait_for_launch", { item = "item_wind_waker",
-                            cp_t = string.format("%.2f", state.cur_armed_cp_t) })
-                        return false
-                    end
-                elseif not marker then
-                    tlog(2, "cyclone_skip_cast_gone", { item = "item_wind_waker",
-                        cp_t = string.format("%.2f", state.cur_armed_cp_t) })
-                    return false
-                end
-            end
-            -- v0.5.101 Note 2: vs the committed RANGED non-lethal harasser
-            -- (synthetic mod only), cyclone the TARGET when Lina is free /
-            -- SELF when mid-combo -- state.ca_cyclone_target resolves the
-            -- situational aim (nil = self-cast as before). Targeted cast
-            -- skips queue_safe_post_move (Lina is not the one airborne).
-            local tgt = state.ca_cyclone_target(threat_mod, threat_caster,
-                                                "item_wind_waker", FALLBACK_RANGES.WW)
-            if tgt then
-                local ok_t = issue_item_target(intent, "def",
-                    NPCLib.item(state.self_npc, "item_wind_waker"), tgt)
-                if ok_t then
-                    tlog(1, "cyclone_harasser_target", { item = "item_wind_waker",
-                        target = uname(tgt) })
-                    return true
-                end
-            end
-            local ok = issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_wind_waker"))
-            if ok then
-                -- v0.5.64: WW self-cast allows movement at fixed 300 MS
-                -- during the 2.5s airborne (per Liquipedia: "they can
-                -- move freely at a fixed speed, free pathing, ignores
-                -- turn rates"). Pass moves_during_airborne=true so the
-                -- tick reissues MOVE while the modifier is still active
-                -- and Lina actually travels during the lift instead of
-                -- walking the full distance afterward.
-                state.queue_safe_post_move("ww", 600, threat_caster, "modifier_wind_waker", true)
-            end
-            return ok
-        end,
-    },
-    item_cyclone      = {
-        short = "eul",
-        -- v0.5.65 (user spec: "IF EUL does not move while on air, do
-        -- nothing"): EUL is a FULL disable per Liquipedia (STUNNED +
-        -- INVULNERABLE + NO_HEALTH_BAR, "no horizontal movement is
-        -- possible during the effect"). The brain cannot reposition
-        -- Lina during airborne, and forcing a post-airborne walk in a
-        -- direction Lina did not choose just fights the player's
-        -- positioning intent. So EUL is pure cast-and-survive: fire
-        -- the immunity, land in place, let the player / baseline
-        -- orbwalker handle positioning afterward. Unlike WW (which CAN
-        -- move at 300 MS during airborne and DOES call
-        -- queue_safe_post_move), EUL just casts and returns.
-        fire  = function(intent, threat_caster, threat_mod)
-            local guarded = NPC.HasModifier(state.self_npc, "modifier_eul_cyclone")
-            tlog(1, "save_fire_invoked", { item = "item_cyclone", intent = tostring(intent),
-                guarded = guarded and "y" or "n" })
-            if guarded then return false end
-            -- v0.5.107: same post-launch ("skill used in vain") gate as WW
-            -- above -- vs a cast-point threat with a during-cast marker,
-            -- defer until the cast COMPLETES so the enemy's cooldown is
-            -- spent before the lift dodges the projectile.
-            if state.cur_armed_cp_t then
-                local marker = state.cur_armed_threat_mod
-                    and NPC.HasModifier(state.self_npc, state.cur_armed_threat_mod)
-                if state.cur_armed_cp_t > -0.05 then
-                    if marker then
-                        tlog(2, "cyclone_wait_for_launch", { item = "item_cyclone",
-                            cp_t = string.format("%.2f", state.cur_armed_cp_t) })
-                        return false
-                    end
-                elseif not marker then
-                    tlog(2, "cyclone_skip_cast_gone", { item = "item_cyclone",
-                        cp_t = string.format("%.2f", state.cur_armed_cp_t) })
-                    return false
-                end
-            end
-            -- v0.5.101 Note 2: same situational aim as WW above (target when
-            -- free, self when mid-combo; only the committed-ranged synthetic
-            -- mod activates it).
-            local tgt = state.ca_cyclone_target(threat_mod, threat_caster,
-                                                "item_cyclone", FALLBACK_RANGES.EUL)
-            if tgt then
-                local ok_t = issue_item_target(intent, "def",
-                    NPCLib.item(state.self_npc, "item_cyclone"), tgt)
-                if ok_t then
-                    tlog(1, "cyclone_harasser_target", { item = "item_cyclone",
-                        target = uname(tgt) })
-                    return true
-                end
-            end
-            return issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_cyclone"))
-        end,
-    },
-    -- v0.5.2 C: HP gate on chain-walked Lotus. DEMO 3 showed 5x Lotus fires in
-    -- one session against real reflectable threats but mostly low-impact
-    -- (enemy Lina R at low level, Bara Nether Strike). 14s CD is too expensive
-    -- for routine reflection. Rule: skip Lotus from the chain when Lina is
-    -- healthy (HP > 0.85) AND the threat is not in LOTUS_WORTHY_INCOMING. The
-    -- worthy path (try_save_lotus_first via OnModifierCreate) is unaffected -
-    -- it has its own dispatch + the lib curates LOTUS_WORTHY_INCOMING for
-    -- always-reflect targets (Lina R, Lion Finger, +v0.5.2 Sniper Assassinate).
-    -- Returning false lets the chain fall through to BKB / WW / Glimmer / etc.
-    item_lotus_orb    = {
-        short           = "lotus",
-        -- v0.5.55: prep_time / active_duration removed -- no consumer
-        -- left after the chain-walker catalog gate was removed.
-        fire  = function(intent, threat_caster, threat_mod)
-            -- v0.5.21 IMP-A8: HP-fraction gate replaced with expected-damage
-            -- gate keyed on threat_mod (full modifier_* name; matches the
-            -- canonical key namespace used everywhere else in this file).
-            -- FIRE Lotus when expected damage >= 30% of current HP OR when
-            -- the threat is LOTUS_WORTHY_INCOMING. SKIP Lotus when expected
-            -- damage is below the 30% threshold (low-impact threat not worth
-            -- the 14s Lotus CD). If threat_mod is absent from LINA_EXPECTED_DAMAGE
-            -- we fall back to the original 0.85 HP-fraction gate so unknown
-            -- threats keep current behaviour (no regression).
-            local me = state.self_npc
-            local hp    = (me and Entity.GetHealth    and Entity.GetHealth(me))    or 0
-            local hpmax = (me and Entity.GetMaxHealth and Entity.GetMaxHealth(me)) or 1
-            local hp_frac = (hpmax > 0) and (hp / hpmax) or 1
-            local is_worthy = LOTUS_WORTHY_INCOMING and threat_mod
-                              and LOTUS_WORTHY_INCOMING[threat_mod] or false
-            local exp_dmg = threat_mod and LINA_EXPECTED_DAMAGE[threat_mod] or nil
-            if exp_dmg ~= nil then
-                local threshold = hp * 0.30
-                if exp_dmg < threshold and not is_worthy then
-                    tlog(3, "lotus_dmg_gate_skip", {
-                        exp_dmg = tostring(exp_dmg),
-                        hp = tostring(hp),
-                        threshold = string.format("%.0f", threshold),
-                        mod = threat_mod or "-",
-                    })
-                    return false
-                end
-            else
-                -- v0.5.72 Phase 4 slice 7 (audit rec #5): severity-derived
-                -- fallback when LINA_EXPECTED_DAMAGE has no entry for the
-                -- threat. Maps TD.SeverityOf:
-                --   "high"   -> ignore HP gate, fire (high-severity threats
-                --               warrant Lotus regardless of HP)
-                --   "low"    -> skip Lotus (low-severity not worth 14s CD)
-                --   "medium" / unknown -> existing 0.85 HP fallback
-                -- Auto-covers ~180 mods that have severity tier in the lib
-                -- but aren't hand-listed in LINA_EXPECTED_DAMAGE (5 entries).
-                local sev = (TD.SeverityOf and threat_mod) and TD.SeverityOf(threat_mod) or nil
-                if sev == "high" then
-                    tlog(3, "lotus_sev_gate_fire", { sev = "high", mod = threat_mod or "-" })
-                    -- fall through to issue (fire)
-                elseif sev == "low" then
-                    tlog(3, "lotus_sev_gate_skip", {
-                        sev = "low", mod = threat_mod or "-",
-                    })
-                    return false
-                elseif hp_frac > 0.85 and not is_worthy then
-                    tlog(3, "lotus_hp_gate_skip", {
-                        hp_frac = string.format("%.2f", hp_frac),
-                        mod = threat_mod or "-",
-                        sev = sev or "-",
-                    })
-                    return false
-                end
-            end
-            return issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_lotus_orb"))
-        end,
-    },
-    item_glimmer_cape = {
-        short = "glimmer",
-        fire  = function(intent)
-            local guarded = NPC.HasModifier(state.self_npc, "modifier_item_glimmer_cape_fade")
-            tlog(1, "save_fire_invoked", { item = "item_glimmer_cape", intent = tostring(intent),
-                guarded = guarded and "y" or "n" })
-            if guarded then return false end
-            return issue_item_self(intent, "def", NPCLib.item(state.self_npc, "item_glimmer_cape"))
-        end,
-    },
-    item_manta        = { short = "manta",     fire = function(intent) return issue_item_no_target(intent, "def", NPCLib.item(state.self_npc, "item_manta")) end },
-    item_black_king_bar = {
-        short           = "bkb",
-        -- v0.5.55: prep_time / active_duration removed -- no consumer
-        -- left after the chain-walker catalog gate was removed.
-        fire  = function(intent)
-            local guarded = NPC.HasModifier(state.self_npc, "modifier_black_king_bar_immune")
-            tlog(1, "save_fire_invoked", { item = "item_black_king_bar", intent = tostring(intent),
-                guarded = guarded and "y" or "n" })
-            if guarded then return false end
-            return issue_item_no_target(intent, "def", NPCLib.item(state.self_npc, "item_black_king_bar"))
-        end,
-    },
-    item_invis_sword  = { short = "shadowblade", fire = function(intent) return issue_item_no_target(intent, "def", NPCLib.item(state.self_npc, "item_invis_sword")) end },
-    item_silver_edge  = { short = "silveredge",  fire = function(intent) return issue_item_no_target(intent, "def", NPCLib.item(state.self_npc, "item_silver_edge")) end },
-    item_force_staff  = {
-        short = "force",
-        -- v0.5.58 Phase 5 slice 2: Force pushes 600u along Lina's CURRENT
-        -- facing, same shape as Pike's self-cast. Route through the shared
-        -- state.try_self_push harness: danger-aware destination pick via
-        -- Escape.PickDir + two-phase turn-then-fire. The legacy gate-only
-        -- state.safe_push_destination(threat_caster, 600) check is REPLACED
-        -- by the helper (the helper does its own threat-distance + terrain
-        -- + danger-aware ranking via Escape.SafePushDestination internally).
-        fire  = function(intent, threat_caster)
-            local it = NPCLib.item(state.self_npc, "item_force_staff"); if not it then return false end
-            return state.try_self_push(intent, it, "item_force_staff", 600, threat_caster)
-        end,
-    },
-    -- v0.5.87 feature-review: Blink-out escape (the offensive Blink-in half is
-    -- queued for its own slice). Blink Dagger is a CORE item the brain ignored
-    -- entirely. 1200u instant reposition: out-ranges Force/Pike (600u), disjoints
-    -- late projectiles, breaks target-lock, exits AoE -- the canonical escape for
-    -- an immobile squishy. UNLIKE Force/Pike it is instant + omnidirectional, so
-    -- NO turn-then-fire harness: just compute a fog-aware safe landing (the
-    -- v0.5.75 compute_safe_dest, 1200u away from the threat caster / enemy
-    -- centroid) and position-cast. GATE: Blink Dagger is disabled for ~3s after
-    -- taking damage; NPCLib.item_ready does NOT see that broken state (it is not
-    -- an item cooldown), so check Damage.GetRecentDamage(me, 3.0) explicitly and
-    -- return false (fall through to the next save) when broken -- avoids burning
-    -- a no-op dispatch while the threat lands. item_blink is already classified
-    -- in lib/threat_data (SAVE_KIND displacement_blink, push 1200); this is the
-    -- missing fire + chain membership.
-    item_blink = {
-        short = "blink",
-        fire  = function(intent, threat_caster)
-            local me = state.self_npc
-            local it = me and NPCLib.item(me, "item_blink")
-            if not it then return false end
-            -- blink-broken gate: any recent damage disables the dagger ~3s.
-            if Damage and Damage.GetRecentDamage then
-                local ok, dmg = pcall(Damage.GetRecentDamage, me, 3.0)
-                if ok and type(dmg) == "number" and dmg > 0 then
-                    tlog(2, "blink_skip_broken", { dmg = string.format("%.0f", dmg) })
-                    return false
-                end
-            end
-            local _, landing = state.compute_safe_dest(threat_caster, 1200)
-            if not landing then
-                if TLOG3_ENABLED then tlog(3, "blink_no_safe_dest", {}) end
-                return false
-            end
-            local ok = issue_item_position(intent, "def", it, landing)
-            if ok then
-                tlog(1, "blink_escape", {
-                    x = string.format("%.0f", landing.x),
-                    y = string.format("%.0f", landing.y),
-                    caster = threat_caster and uname(threat_caster) or "centroid",
-                })
-            end
-            return ok
-        end,
-    },
-    -- Pike used like Sniper (hero-agnostic convention): PRIMARY is enemy-target
-    -- - cast on the threat caster, which pushes them + Lina apart radially,
-    -- FACING-INDEPENDENT - a reliable defensive semi-blink. Self-cast (push in
-    -- Lina's facing) is only a fallback when no enemy is in cast range, gated by
-    -- safe_push_destination (lesson 61). This is the v0.2.3 fix for Pike
-    -- self-refusing vs a faced melee attacker (fire_returned_false).
-    item_hurricane_pike = {
-        short           = "pike",
-        -- v0.5.54: prep_time + active_duration REMOVED. Per user spec
-        -- "AutoDisabler is a native script that is 100% verified and
-        -- working ... Pike is a skill disable", Pike belongs to the
-        -- framework AutoDisabler's Force Interrupt path. Brain stays
-        -- out of AD's lane: no prep_time = neither v0.5.51 hero-side
-        -- catalog gate nor v0.5.53 lib catalog gate triggers on Pike,
-        -- and AD handles Pike's fire timing. The chain still passes
-        -- through Pike (via legacy distance gate) as a fallback when
-        -- AD hasn't / can't, but the v0.5.51 catalog double-fire
-        -- pattern (brain catalog_eta_pike on top of AutoDisabler.lua
-        -- casts) is gone. Glimmer / BKB / Lotus / WW / Eul / FC / W
-        -- KEEP their prep_time -- they're brain-owned saves (dodges /
-        -- escape / arrival-stun), not AD-owned disables.
-        -- v0.5.11 PE-03 (Sniper S29 port): the engine silently drops the FIRST
-        -- cast of a freshly-acquired item (Pike included) -- the order reaches
-        -- ExecuteOrder, cooldown stays 0, and Lina's first real Pike save of the
-        -- game is eaten without feedback. Two-part Pike-scoped work-around,
-        -- mirroring Sniper Sniper.lua L5976-6028 / L6145-6152:
-        --   PRIME : when Lina owns an un-primed Pike and is safe (no enemies
-        --           within state.COMBO_CLASSIFY_RADIUS, no recent combo press),
-        --           pike_prime_tick fires one throwaway Pike-on-self to spend
-        --           the doomed first cast early.
-        --   DOUBLE: if a real Pike save fires before Pike was primed, the fire
-        --           closure stamps state.pike_reissue and pike_prime_tick
-        --           re-issues Pike once the next frame -- the 2nd cast lands.
-        -- state.pike_primed flips true ONLY on positive proof (cooldown > 0).
-        -- v0.5.57 / v0.5.58 (Phase 5): enemy-target primary branch is
-        -- unchanged (Pike-on-enemy pushes them apart radially, no facing
-        -- dependency). The self-cast fallback routes through the shared
-        -- state.try_self_push harness (v0.5.58 slice 2) which does a
-        -- danger-aware Escape.PickDir + two-phase turn-then-fire so the
-        -- 600u push along Lina's CURRENT facing lands in a safe spot.
-        -- Mirrors Sniper.lua:5877 pike_self_reposition. v0.5.58 also wires
-        -- Force Staff through the same helper.
-        fire  = function(intent, threat_caster, threat_mod)
-            local it = NPCLib.item(state.self_npc, "item_hurricane_pike"); if not it then return false end
-            if threat_caster and Entity.IsEntity(threat_caster) and Target.IsAlive(threat_caster)
-               and not (NPC.HasState and NPC.HasState(threat_caster, MS.MODIFIER_STATE_MAGIC_IMMUNE))
-               and dist_to(threat_caster) <= state.pike_enemy_range() then
-                local ok = issue_item_target(intent, "def", it, threat_caster)
-                if ok and not state.pike_primed then
-                    state.pike_reissue = { caster = threat_caster, t = now(), self_cast = false }
-                end
-                return ok
-            end
-            return state.try_self_push(intent, it, "item_hurricane_pike", 600, threat_caster)
-        end,
-    },
     -- HERO-SPECIFIC: Flame Cloak (Aghs Scepter ability; gate GetLevel>0).
     lina_flame_cloak = {
         short = "flame_cloak",
@@ -2350,16 +2078,12 @@ local SAVE_FIRE = {
             return issue_cast_position(intent, w, pos, "def")
         end,
     },
-    -- HERO-SPECIFIC: Ethereal Blade self-cast (3-4s physical immune; niche vs
-    -- physical burst; still takes magic).
-    item_ethereal_blade_self = {
-        short = "ether_self",
-        fire  = function(intent)
-            local eb = NPCLib.item(state.self_npc, "item_ethereal_blade"); if not eb then return false end
-            return issue_item_target(intent, "def", eb, state.self_npc)
-        end,
-    },
 }
+
+-- v0.5.108: merge the hero-agnostic item save bodies onto the ability literal.
+for _name, _entry in pairs(ItemSaves.build(SAVE_CFG)) do
+    SAVE_FIRE[_name] = _entry
+end
 
 -- v0.5.17 Track 1: expose SAVE_FIRE map for the in-Brain test harness so a
 -- test can call SAVE_FIRE[item].fire(intent) directly and assert the return
@@ -10309,6 +10033,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.107 (cyclone 'in vain' launch timing + Dodger-BKB lazy-panel retry; from the v0.5.106 demo readout). USER RULE: 'with eul and WW the heroes gets invulnerable; if it is used before the skill is launched it will just cancel the enemies action and he can re-use it. The best action is to use it in a way that the skill was used in vain.' The demo log PROVED it x3: Eul fired at cp_t=0.50 vs Sniper Assassinate -> cast CANCELLED with no cooldown spent -> the RE-CAST looped fire attempts cp_t 0.50 to -0.20 with everything down and LANDED on Lina; WW repeated the early-cancel on cast 3. FIX (WW + Eul SAVE_FIRE bodies, cast-point-armed threats only): new post-launch gate driven by state.cur_armed_cp_t (stashed by armed_post_fire for cast-point entries, nil everywhere else) + the during-cast MARKER (the threat modifier on Lina, e.g. the Assassinate crosshair: present while casting AND in flight, destroyed on cancel/impact). cp_t > -0.05 with marker -> DEFER (tlog cyclone_wait_for_launch; the armed row re-attempts at ~10Hz); cp_t > -0.05 without marker -> anim-armed INSTANT (Finger class, no post-launch window) -> legacy immediate fire; cp_t <= -0.05 with marker -> LAUNCHED, cooldown spent, projectile in flight -> fire (dodged in vain); cp_t <= -0.05 without marker -> cancelled/impacted -> refuse. Lotus/BKB unaffected (they do not break targeting; demo-proven the cast completes through them). SUPPORTING: cast-point branch gains a marker-gone GC (cast_point_cast_gone: past cast end with no marker = cancelled or impacted, GC immediately so no save fires on a dead threat) and the panic timeout widens -0.3 -> -1.5 (covers the in-flight fire window, max-range Assassinate flies ~1.2s; cancels are bounded by the GC). DODGER-BKB: the v0.5.106 skip5_* shapes ALSO failed (set_ok=1 again) -> the Specific Settings panel is most likely lazy-built; new DODGER_BKB.retry_tick re-attempts the failed widgets every 15s up to 4 tries (late captures merge into dodger_bkb_saved for the POST_GAME restore; no probe spam on retries; tlog dodger_bkb_retry try/set_ok/remain). Lina.lua only; no lib change. Verify on next demo: Sniper Assassinate with only WW/Eul ready -> cyclone_wait_for_launch rows while casting, then armed_threat_fire at cp_t <= -0.05 + layer2_save eul|windwaker, Sniper's Assassinate ON COOLDOWN (skill wasted) and the projectile never connects; Sniper CANCELS his cast -> cast_point_cast_gone + NO save spent; dodger_bkb_retry rows at ~15s intervals (set_ok=2 if the panel appears, else remain=2 x4 tries).")
+LOG:info("Lina brain v0.5.108.2 (committed-attacker double-save guard; PA blink fired W + Pike). The v0.5.108.1 demo showed a PA Phantom Strike drawing TWO saves on one blink-in: W via the committed-attacker melee chain (committed_attacker_melee @30.9s) AND Pike via the instant_blink armed entry (instant_blink:phantom_strike @31.1s). Two separate systems with DIFFERENT threat_mods (lina_committed_attacker_melee vs modifier_phantom_assassin_phantom_strike_target), so the dispatcher per-(target, mod, caster) lock never deduped them. PRE-EXISTING (both paths existed in v0.5.107; Pike crashing in v0.5.108 briefly hid it, v0.5.108.1 re-enabled Pike so it resurfaced) -- NOT a lift bug. Fix (Lina.lua scan_and_arm_committed_attackers): skip the committed-attacker dispatch when the caster ALREADY has an active armed spell-threat entry (instant-blink / charge / channel / cast-point) -- the committed-attacker is the FALLBACK for plain auto-attackers with no spell (v0.5.45 intent), so when the armed path already tracks this caster it owns the save. The instant_blink arms BEFORE the committed scan (anim_gap_close @1201 -> instant_blink_armed @1202 -> committed_attacker_armed @1216), so the guard catches it; the reverse order self-resolves because a gap-closer's displacement save pushes the caster out of the 700u melee gate. New tlog committed_skip_armed (lvl 3). The item-saves LIFT is now parity-clean (v0.5.108.1 demo confirmed 11/12 items + the Pike fix; this guard fixes a pre-existing dispatch overlap). lib/item_saves.lua unchanged from v0.5.108.1. Verify on next demo: PA blink -> ONE save (the blink-path Pike), NO committed-attacker W on the same blink; a plain auto-attacker with no spell still gets the committed W.")
 
 return callbacks

@@ -589,7 +589,7 @@ CH.DEFAULT_SAVE_CHAIN = {
     "item_wind_waker", "item_cyclone", "item_lotus_orb", "item_manta",
     "item_glimmer_cape", "item_invis_sword", "item_silver_edge",
     "item_hurricane_pike", "item_force_staff",
-    "item_black_king_bar", "item_aeon_disk",
+    "item_black_king_bar",
 }
 
 -- Per-modifier AUTHORITATIVE overrides: bypass the generic kind/tether
@@ -620,6 +620,14 @@ for _, m in ipairs({
     "modifier_slark_pounce",
     "modifier_tusk_snowball_movement",
     "modifier_queenofpain_blink",
+    -- v0.5.126: Riki Blink Strike. Riki blinks behind Lina FROM INVISIBILITY,
+    -- so OnUnitAnimation never fires (no visible cast) and there is no armed
+    -- entry -- it is recognized REACTIVELY when the 0.4s slow debuff lands
+    -- (see LINA_EXTRA_THREATS) and routed to the same close-gap escape chain
+    -- to break the now-adjacent engage. LATE save by nature (fires after the
+    -- strike connects); the escape still breaks the follow-up. Name VPK +
+    -- modseen confirmed (modifier_riki_blinkstrike_slow).
+    "modifier_riki_blinkstrike_slow",
 }) do
     LINA_SAVE_OVERRIDES[m] = CH.GAP_CLOSE_SAVES
 end
@@ -647,20 +655,22 @@ end
 --
 -- v0.5.39 BUG-2: chain reordered for the Lotus-defer punishment intent.
 -- Lotus heads the chain (reflect = punishment-intent payoff); BKB second as
--- the magic-immune fallback when Lotus is unavailable; cheap displacement
--- (Force / Pike) third so Lina exits the projectile lock cone when Lotus and
--- BKB are both on CD; WW as the heavy displacement backstop (longer CD,
--- saved for cases where Force/Pike refuse via K.SAVE_FIRE_DISTANCE_SELF_PUSH_FLOOR);
--- Glimmer (40% MR) next, then Aeon Disk (lethal-damage block backstop) and
--- Flame Cloak (35% MR + spell amp) as deep MR tails. The lotus_defer_if_close
+-- the magic-immune fallback when Lotus is unavailable.
+-- v0.5.110.1 (user demo note 1: "pike does not counter assassinate"):
+-- Force + Pike REMOVED. Assassinate's projectile CANNOT be disjointed
+-- (Liquipedia), so displacement counters nothing -- the v0.5.39 "exits the
+-- projectile lock cone" rationale was wrong mechanics, and the v0.5.110
+-- demo showed Pike firing a wasted self-turnaway at cp_t=0.50 while the
+-- real dodges (Eul/WW invulnerable airborne, fire-in-vain post-launch per
+-- v0.5.107) sat behind it in the chain. Order now: Lotus reflect > BKB
+-- immunity > Eul/WW full dodges > Glimmer (40% MR) > Aeon (lethal-damage
+-- block backstop) > Flame Cloak (35% MR) deep tail. The lotus_defer_if_close
 -- gate (grep `local function lotus_defer_if_close`) only commits to this chain
 -- after the cooldown-deferral window closes, so the head Lotus slot fires
 -- whenever the deferred-fire path armed under the assassinate cast point.
 LINA_SAVE_OVERRIDES["modifier_sniper_assassinate"] = {
     "item_lotus_orb",
     "item_black_king_bar",
-    "item_force_staff",
-    "item_hurricane_pike",
     -- v0.5.104 (user notes 3+4): Eul self-cast = 2.5s INVULNERABLE airborne,
     -- a clean Assassinate dodge (projectile never connects) on a cheaper CD
     -- than WW. Every other dodge-class chain (Doom / Chrono / BH / Ravage /
@@ -671,7 +681,6 @@ LINA_SAVE_OVERRIDES["modifier_sniper_assassinate"] = {
     "item_cyclone",
     "item_wind_waker",
     "item_glimmer_cape",
-    "item_aeon_disk",
     "lina_flame_cloak",
 }
 -- v0.5.39 BUG-3: Sniper Assassinate now routes via the lib's CAST_POINT_THREATS
@@ -679,7 +688,7 @@ LINA_SAVE_OVERRIDES["modifier_sniper_assassinate"] = {
 -- runtime-add to LOTUS_WORTHY_INCOMING is deleted: the new arming branch in
 -- handle_threat_on_self fires the save AT END of cast point via the chain head's
 -- SAVE_ETA_TRIGGER, which is strictly better than the previous lotus-first
--- snap-fire at modifier-create. LINA_SAVE_OVERRIDES entry retained -- consulted
+-- snap-fire at modifier-create. LINA_SAVE_OVERRIDES entry retained - consulted
 -- by ResolveSaveOrder when the armed entry's category=targeted_burst routes
 -- through the dispatcher.
 
@@ -718,6 +727,72 @@ CH.PUDGE_DISMEMBER  = {
     "item_manta",
     "item_black_king_bar",
 }
+CH.PRIMAL_PULVERIZE = {
+    -- v0.5.121 (user correction of v0.5.120): Pike/Force are NOT wasted -- they
+    -- are cast on PRIMAL BEAST (the caster), not self, to KEEP HIM AWAY (the
+    -- Sniper/Drow/Lina pike idiom: distance-keep the threat). The log confirmed
+    -- the fire was target=primal_beast (push him off). And per the wiki Pulverize
+    -- "ends early if Primal Beast is moved too far" -- so Pike/Force-on-caster
+    -- works BOTH pre-grab (target leaves cast range -> grab fizzles) AND
+    -- mid-channel (move him too far -> channel breaks). My v0.5.120 removed them
+    -- on the wrong premise that "the victim can't be force-moved" (true, but the
+    -- save pushes the CASTER, the displacement_at_source counter). So: Pike/Force
+    -- lead (keep-away, works both phases, keeps Lina active), WW/Eul self-cyclone
+    -- next (airborne+untargetable escape if grabbed / pikes on CD; user's "WW as
+    -- escape"). NO BKB (pierces spell immunity). (v0.5.122: dropped the dead
+    -- item_aeon_disk tail -- Aeon is a PASSIVE, no .fire, the slot only logged
+    -- no_entry; it auto-protects regardless.) Authoritative override (keeps both
+    -- the keep-away and the escape; the composed axis had Pike but no WW fallback).
+    "item_hurricane_pike",
+    "item_force_staff",
+    "item_wind_waker",
+    "item_cyclone",
+}
+CH.MARS_ARENA = {
+    -- v0.5.123 (demo S4 + Liquipedia): Mars Arena of Blood is a SOLID wall ring.
+    -- Force/Pike CANNOT push the victim out (the wall stops forced movement at the
+    -- boundary -- demo-confirmed Pike failed), and BKB does NOT escape (it blocks
+    -- the spear damage but you stay trapped). The ONLY escapes are airborne
+    -- (WW/Eul = invuln + untargetable, lifts you clear of the spear window) or a
+    -- Blink past the wall. profile: blocks_forced_movement=true, pierces=false.
+    -- So: WW, Eul, Blink. NO Force/Pike/BKB. Authoritative override.
+    "item_wind_waker",
+    "item_cyclone",
+    "item_blink",
+}
+CH.PRIMAL_ONSLAUGHT = {
+    -- v0.5.128.1 (demo: "WW was not used on Onslaught"; user: "WW is instant so
+    -- it should be used by proximity like bara charge"): Onslaught is a line DASH
+    -- that STUNS + knocks back on impact (KV stun 0.7/1/1.3/1.6, knockback_radius
+    -- 190, charge_speed 1200), so a REACTIVE save is impossible (the knockback +
+    -- modifier_stunned land together = Lina stunned before any chain casts; both
+    -- logged threat_unrecognized). It is handled like Bara charge: ARM on the
+    -- dash modifier and fire WW by PROXIMITY (armed_threats_tick eta gate) -- WW
+    -- is an INSTANT cast, so firing when the charging Primal closes in lifts Lina
+    -- airborne in time. Proximity also gates aim for free: if the dash brings him
+    -- close the eta drops and fires; if he charges away the distance never drops.
+    -- Same escape set as Mars Arena: WW/Eul are airborne + untargetable (no
+    -- knockback/stun applies to a cycloned unit, regardless of position); Blink
+    -- repositions clear. NO Force/Pike (push along Lina's facing, lesson 61 /
+    -- reference_pike_force_keep_away -- for a line dash that is along the corridor,
+    -- not out). NO BKB (physical). Authoritative via ANIM_SAVE_OVERRIDES.
+    "item_wind_waker",
+    "item_cyclone",
+    "item_blink",
+}
+CH.TREANT_OVERGROWTH = {
+    -- v0.5.123 (demo S7, user order "WW, BKB, Pike"): Overgrowth is an AoE root.
+    -- All three work via DIFFERENT mechanisms, so order them exactly as the user
+    -- specified: WW (strong dispel removes the root + airborne), BKB (basic-dispel-
+    -- on-cast removes the root -- NOT its immunity, which Overgrowth pierces),
+    -- Pike (forced movement relocates a rooted unit OUT of the 800 AoE -- root
+    -- blocks self-move/blink but not being moved by another source). Force = Pike's
+    -- same-role twin (force-out fallback when Pike is on CD).
+    "item_wind_waker",
+    "item_black_king_bar",
+    "item_hurricane_pike",
+    "item_force_staff",
+}
 CH.BANE_GRIP        = {
     -- WW > Manta > Eul > BKB (user spec). Bane Fiend Grip pierces magic immunity
     -- (Sniper note line 6459), so BKB is a desperate last-resort that does NOT
@@ -754,22 +829,21 @@ CH.LEGION_DUEL      = {
     "item_black_king_bar",
     "item_manta",
     "item_cyclone",
-    "item_aeon_disk",
 }
 CH.DISRUPTOR_KFR    = {
-    -- WW > Eul > Force > Pike-self (user spec). Sniper v6.15.10 / v6.15.247
-    -- empirically showed that displacement-over-time (Pike / Force sliding push)
-    -- is INTERCEPTED by the Kinetic Field wall -- only instant impulse motions
-    -- cross. Lina lacks Sniper's grenade, but WW (2.5s airborne + invuln + 2.5s
-    -- cyclone duration outlasts KFR's 2.6s) and Eul (same airborne, 2.5s) BOTH
-    -- carry Lina UP and over the wall via the airborne dispel-and-relocate
-    -- mechanic. Force/Pike kept as last-ditch -- they often fail vs the wall
-    -- but firing-and-failing is better than no_effective_save when WW/Eul are
-    -- on CD. Authoritative bypass keeps the chain from being culled by the
-    -- displacement_perp SaveCounters filter (lib/threat_data line 268).
+    -- v0.5.118 user spec: "the correct order is WW, BKB and Pike." Liquipedia
+    -- (confirmed this session): Kinetic Field's barrier blocks OUTWARD forced
+    -- movement -- "Force Staff will push units INTO it but will NOT normally
+    -- push units out" -- so plain Pike/Force is UNRELIABLE; the only
+    -- deterministic escape is magic immunity (a spell-immune unit crosses the
+    -- field freely). Order: WW first (airborne carries Lina up + over the wall,
+    -- strong-dispel), BKB second (magic-immune -> the reliable cross-out, the
+    -- counter the old chain was missing entirely), Pike last-ditch (push usually
+    -- fails vs the solid wall but fire-and-fail beats no save). Authoritative
+    -- bypass keeps this chain from being culled by the displacement SaveCounters
+    -- filter.
     "item_wind_waker",
-    "item_cyclone",
-    "item_force_staff",
+    "item_black_king_bar",
     "item_hurricane_pike",
 }
 
@@ -792,6 +866,7 @@ state.lina_chains = {
     enigma_bh       = CH.ENIGMA_BH,
     beastmaster_pr  = CH.BEASTMASTER_PR,
     tide_ravage     = CH.TIDE_RAVAGE,
+    primal_onslaught = CH.PRIMAL_ONSLAUGHT,  -- v0.5.128
 }
 
 -- v0.5.47 Phase 1: WD Death Ward + Underlord Pit of Malice chains. Both
@@ -889,7 +964,6 @@ CH.FV_CHRONO = {
     "item_cyclone",           -- airborne immune
     "item_force_staff",      -- escape sphere radius (425u) pre-cast
     "item_hurricane_pike",   -- same
-    "item_aeon_disk",        -- lethal-block during Chrono; last resort
 }
 
 -- Enigma Black Hole: PBAoE channel 4s, hard-disable. Cast point 0.45s.
@@ -901,7 +975,6 @@ CH.ENIGMA_BH = {
     "item_force_staff",      -- push out of 400u BH radius pre-cast
     "item_hurricane_pike",   -- same
     "item_black_king_bar",   -- LAST resort (pierces BKB) -- in chain only for the magic damage component
-    "item_aeon_disk",        -- lethal-block fallback
 }
 
 -- Beastmaster Primal Roar: line skillshot, primary target 4s stun + cone
@@ -930,10 +1003,22 @@ CH.TIDE_RAVAGE = {
 
 -- Modifier-keyed (self path, threat detected via OnModifierCreate).
 LINA_SAVE_OVERRIDES["modifier_pudge_dismember_pull"]            = CH.PUDGE_DISMEMBER
+LINA_SAVE_OVERRIDES["modifier_primal_beast_pulverize"]          = CH.PRIMAL_PULVERIZE  -- v0.5.121: Pike/Force keep-away (on the CASTER) + WW/Eul escape + Aeon; no BKB (pierces)
+LINA_SAVE_OVERRIDES["modifier_mars_arena_of_blood"]             = CH.MARS_ARENA       -- v0.5.123: WW/Eul/Blink only (wall blocks Force/Pike AND BKB). base name = anim-path key (inert reactively; never lands on victim)
+LINA_SAVE_OVERRIDES["modifier_mars_arena_of_blood_leash"]       = CH.MARS_ARENA       -- v0.5.124: the REAL trapped-state victim modifier (reactive path)
+LINA_SAVE_OVERRIDES["modifier_mars_arena_of_blood_marker"]      = CH.MARS_ARENA       -- v0.5.124: the other real victim modifier (belt-and-suspenders)
+LINA_SAVE_OVERRIDES["modifier_treant_overgrowth"]               = CH.TREANT_OVERGROWTH -- v0.5.123: WW, BKB, Pike (user order; all valid via dispel/dispel-on-cast/force-out)
+-- v0.5.128.1: Primal Onslaught -> WW/Eul/Blink by PROXIMITY (armed like Bara/Tusk).
+-- The armed tick resolves the chain via ANIM_SAVE_OVERRIDES[entry.ability] (KV-stable
+-- ability key, same as bara_charge); the modifier-keyed override is the belt-and-
+-- suspenders for the threat_mod path. Keyed on the DASH modifier (spans the charge,
+-- the bara-analog), NOT the windup (which ends before the dash).
+state.ANIM_SAVE_OVERRIDES["primal_beast_onslaught"]                         = CH.PRIMAL_ONSLAUGHT
+LINA_SAVE_OVERRIDES["modifier_primal_beast_onslaught_movement_adjustable"]  = CH.PRIMAL_ONSLAUGHT
 LINA_SAVE_OVERRIDES["modifier_bane_fiends_grip"]                = CH.BANE_GRIP
 LINA_SAVE_OVERRIDES["modifier_pugna_life_drain"]                = CH.PUGNA_DRAIN
 LINA_SAVE_OVERRIDES["modifier_legion_commander_duel"]           = CH.LEGION_DUEL
-LINA_SAVE_OVERRIDES["modifier_disruptor_kinetic_field_remnant"] = CH.DISRUPTOR_KFR
+LINA_SAVE_OVERRIDES["modifier_disruptor_kinetic_field"]         = CH.DISRUPTOR_KFR  -- v0.5.118: REAL modifier name. v0.5.116.1 renamed the lib (_remnant -> _kinetic_field) but missed this override key (+ the eta resolver below + the anim override), so the override never matched and KF fell through to the axis (composed -> Pike, which the user flagged as the wrong counter). Now matches -> fires WW/BKB/Pike.
 LINA_SAVE_OVERRIDES["modifier_witch_doctor_death_ward"]         = CH.WD_DEATH_WARD  -- v0.5.47
 LINA_SAVE_OVERRIDES["modifier_abyssal_underlord_pit_of_malice_ensare"] = CH.UNDERLORD_PIT  -- v0.5.47
 -- v0.5.71 Phase 4 slice 6 high-impact ult overrides:
@@ -943,6 +1028,31 @@ LINA_SAVE_OVERRIDES["modifier_faceless_void_chronosphere"]       = CH.FV_CHRONO
 LINA_SAVE_OVERRIDES["modifier_enigma_black_hole"]                = CH.ENIGMA_BH
 LINA_SAVE_OVERRIDES["modifier_beastmaster_primal_roar"]          = CH.BEASTMASTER_PR  -- v0.5.73: canonical name (was _stun in v0.5.71)
 LINA_SAVE_OVERRIDES["modifier_tidehunter_ravage"]                = CH.TIDE_RAVAGE
+-- v0.5.111.1 (demo: "Ghost scepter did not fire vs jugg ult"): Omnislash is
+-- PHYSICAL attack-based, so Ghost-self (4s ethereal = attack-immune, and
+-- Lina can still CAST while ethereal) is the strongest answer. In the demo
+-- the threat resolved via the COMPOSED channel_on_self backbone (tier 3,
+-- source=composed -- first wild sighting), which carries no Ghost, so it
+-- could never fire and WW answered instead. Bespoke escape-hatch chain:
+-- Ghost > Eul (2.5s invuln dodge) > WW (movable airborne) > Aeon
+-- (lethal-damage backstop). BKB/Glimmer deliberately absent (the damage is
+-- physical; magic resist is dead weight). Keyed on BOTH the modifier
+-- (modcreate/armed path) and the ability name (the channel anim path that
+-- fired in the demo resolves anim_save_overrides[ability] FIRST; ability
+-- names are stable KV, lesson 111/210).
+-- v0.5.113.1 (demo: "Ghost ok, ethereal blade no" -- Omni cast 2 walked
+-- ghost/eul/ww not_ready then item_aeon_disk skipped with reason=no_entry):
+-- (a) item_ethereal_blade_self ADDED after Ghost -- same ethereal effect,
+-- and the standard build UPGRADES Ghost into E-blade, so a Lina carrying
+-- only E-blade had NO ethereal answer (note: Ghost + E-blade share the
+-- "ethereal" cooldown group, so the second slot only matters when Ghost is
+-- not owned); (b) item_aeon_disk REMOVED -- Aeon is a PASSIVE (no .fire
+-- entry exists; the slot could never fire and just logged no_entry).
+CH.JUGG_OMNI = {
+    "item_ghost", "item_ethereal_blade_self", "item_cyclone", "item_wind_waker",
+}
+LINA_SAVE_OVERRIDES["modifier_juggernaut_omni_slash"] = CH.JUGG_OMNI
+state.ANIM_SAVE_OVERRIDES["juggernaut_omni_slash"]    = CH.JUGG_OMNI
 
 ----------------------------------------------- commit-attacker close-gap ---
 -- v0.5.45 CA (DEFENSE_PLAN.md sec 4.2 commit-attacker track): port of
@@ -991,42 +1101,109 @@ K.LINA_ATTACK_ENGAGE_RADIUS      = 700  -- MELEE commit radius (Sniper parity; c
 -- by the per-attacker gate).
 K.LINA_ATTACK_ENGAGE_RADIUS_RANGED = 1100
 K.LINA_COMMITTED_ATTACKER_RETREAT_BUFFER = 200  -- attacker further than 700+200=900 = released
+-- v0.5.113.1 introduced this as a 0.17s blanket against charge-acceleration
+-- model error. v0.5.114 (user: "instead of using a fixed value look for
+-- bara acceleration ramp on liquipedia ... with this we can do a precise
+-- calc"): the model error is now integrated away EXACTLY -- the lib ramp
+-- model (TD.RampTravel / RampImpactT / ChargeRampKinematics) uses the
+-- Liquipedia-verified mechanic (linear wind-up from 25 percent of the
+-- per-level max bonus over windup_time=1.5s from charge start, then
+-- constant; per-level accel from live KV; remaining wind-up from the
+-- armed_t stamp). What remains here is the small ORDER-LATENCY pad
+-- (decision-to-cast ~1-2 frames + issue lag); it biases the plan slightly
+-- early, which the predict-aim absorbs by centering the AoE on the
+-- predicted point. Tune from w_defensive_fire d_det: with the v0.5.114.1
+-- earliest-castable intercept, healthy d_det for a CHARGE is ~550-650
+-- (stunned near max W range); for Tusk's arrival window ~200-330.
+-- v0.5.114.3/.4 (user recheck + Liquipedia rule): the W plan total is the
+-- LIQUIPEDIA cast-animation figure 1.12 (cast point 0.45 + backswing 0.67
+-- per liquipedia.net/dota2game/Lina) -- the number the user validated
+-- empirically across v0.5.49-v0.5.50 and re-confirmed from the page.
+-- state.w_lead() returns the 0.95 EFFECT lead (0.45 cast point + 0.5
+-- effect delay); this margin covers the rest.
+-- v0.5.114.7 (user: "Still hitting lina, but this is the effect of lina
+-- not facing the charge. Add the max turn to the constant"): the margin
+-- is now the SUM of two Liquipedia-grounded worst cases:
+--   0.170  animation/issue envelope (Liquipedia 1.12 - the 0.95 effect lead)
+-- + 0.175  MAX TURN: Lina turn rate 0.6, 180-degree turn = 0.175s per
+--          liquipedia.net/dota2game/Turn_Rate (fetched 2026-06-12)
+-- = 0.345  -> plan = 0.95 + 0.345 = ~1.30 = the user formula
+--          "1.12 + turning time" at its worst case.
+-- A CONSTANT max-turn (not the per-fire computed term) cannot poison the
+-- aim clamp: facing-Bara fires bias the aim ~0.175 x speed (~120u) toward
+-- Lina, well inside the 250 AoE; back-turned fires land dead center. The
+-- per-fire deg(FindRotationAngle)/400 term stays BANNED (v0.5.114.6: the
+-- v0.5.50.7 demo + the v0.5.114.4 self-cast bug). Do NOT shrink either
+-- component, and do NOT re-add a per-fire turn term, without a demo
+-- proving it.
+K.W_INTERCEPT_MARGIN_S = 0.345
+-- v0.5.111.1 lethality horizon in HITS (user demo note: "ww fired when
+-- lethal but too close to lethal ... it was about the calculation based on
+-- hits"). The old inline 4.25 made lethal flip only when ~4 sustained
+-- autos would kill = saves fired nearly dead. 7 hits (~8s at 1.7 BAT with
+-- mid-game IAS) flips lethal while Lina still has room to survive the
+-- save's cast + travel. Weak harassers stay non-lethal (their hits_to_kill
+-- is far above 7), so the v0.5.110.1 W-only conservation is intact. Tune
+-- from the committed_attacker_armed hits= field.
+K.LINA_LETHAL_HITS = 7
 
--- v0.5.101 Note 2 (user rule): the cyclone-type saves (WW/Eul) answer a
--- committed attacker ONLY when it is (a) RANGED, (b) CANNOT kill Lina
--- (non-lethal) and (c) AUTO-ATTACKING (this whole system is auto-attack
--- driven; SKILL threats keep going through the normal save dispatcher,
--- untouched). Intent: a ranged non-lethal harasser's autos lock Lina out
--- of her kill; the cyclone breaks the lock so she can reset / re-engage.
--- The v0.5.99.3 demo showed WW fired repeatedly vs a committed Lion
--- (dist 643->347) -- too eager / wrong target type. Split chains: melee
--- OR lethal attackers get displacement + W only (NO WW/Eul); ranged
--- non-lethal harassers get the cyclones FIRST (Eul before WW -- WW is
--- the top save) with displacement as fallback. scan_and_arm picks the
--- synthetic threat_mod per attacker classification (state.attacker_is_
--- ranged / state.attacker_can_kill_self below).
-CH.COMMITTED_ATTACKER_SAVES = {
-    "item_force_staff", "item_hurricane_pike", "item_glimmer_cape",
+-- v0.5.110.1 LETHAL-ONLY ITEM RULE (user demo feedback on v0.5.110: "all
+-- attacks are using items, this way it is impossible for me to commit
+-- attack to an enemy"). The v0.5.110 full-backbone composition is
+-- REVERTED here: inheriting the whole close_gap backbone meant something
+-- was ALWAYS ready, so every enemy auto-attack commit drained an item
+-- (demo: 23 of 25 saves were committed burns -- Pike x7, Ghost x6, WW x5,
+-- W x5), and the inherited Ghost (4s ethereal = Lina DISARMED) + WW
+-- self-cyclones actively blocked the user's own attacks mid-fight.
+-- NEW RULE (supersedes both the spec sec 5 widening AND the v0.5.101
+-- ranged-harasser cyclone design): a NON-LETHAL committed attacker, melee
+-- or ranged, draws W ONLY -- no items, no self-incapacitation; W's
+-- predicted-catch gate (v0.5.105) already no-ops it when the attacker
+-- would not be in the AoE (so ranged harass usually draws NOTHING, which
+-- is the point). Items are reserved for LETHAL attackers via the proven
+-- v0.5.105 displacement-first base literal. Hand-curated literals are
+-- DELIBERATE: committed chains must not silently inherit future backbone
+-- items (that inheritance is exactly what regressed). Composition remains
+-- the tier-3 path for real SPELL threats, where Ghost et al. stay
+-- reachable. scan_and_arm routes lethal -> base, non-lethal -> W-only
+-- (see the v0.5.110.1 routing comment there).
+-- v0.5.110.2 (T3 demo fail: Mars lethal=y walked Force/Pike/Glimmer/W all
+-- not_ready -> no_effective_save_for_threat -> Lina DIED with Eul in the
+-- inventory): the self-save cyclones are RESTORED for LETHAL committed
+-- attackers (they were in this chain v0.5.45-v0.5.100; v0.5.101 removed
+-- them for melee/lethal, which the user overrules for the LETHAL case --
+-- "we did implement a rule to save self for this"). Eul-self = 2.5s
+-- INVULNERABLE full disable, WW-self = 2.5s movable airborne; vs an
+-- attacker that can kill Lina the lockout beats staying active. Eul
+-- before WW (v0.5.104 convention: cheaper CD, WW = heavier backstop).
+-- Non-lethal chains stay W-only (the v0.5.110.1 lethal-only item rule
+-- is unchanged).
+-- v0.5.111.1 (demo: "Ghost scepter did not fire vs ... lethal AA"): Ghost
+-- HEADS the lethal chain. Committed attackers are auto-attackers, i.e.
+-- PHYSICAL: Ghost-self = 4s full attack immunity on the cheapest CD in the
+-- kit (22s), and ethereal only disarms ATTACKS, so Lina keeps casting
+-- W/Q/R while immune (a counter-window, not a lockout). The v0.5.110.1
+-- worry about Ghost disarming Lina mid-fight applies to NON-lethal harass,
+-- which stays W-only; at lethal, survival outranks attack uptime.
+CH.COMMITTED_ATTACKER_SAVES = {  -- LETHAL committed (melee or ranged)
+    -- v0.5.113.1: item_ethereal_blade_self after Ghost, same rationale as
+    -- CH.JUGG_OMNI (the Ghost -> E-blade upgrade path left E-blade-only
+    -- builds without the ethereal save; shared "ethereal" CD group).
+    "item_ghost", "item_ethereal_blade_self", "item_force_staff",
+    "item_hurricane_pike", "item_cyclone", "item_wind_waker",
+    "item_glimmer_cape", "lina_w_anti_gap",
+}
+CH.COMMITTED_ATTACKER_RANGED_SAVES = {  -- non-lethal ranged: W only
     "lina_w_anti_gap",
 }
-CH.COMMITTED_ATTACKER_RANGED_SAVES = {
-    "item_cyclone", "item_wind_waker", "item_force_staff",
-    "item_hurricane_pike", "item_glimmer_cape", "lina_w_anti_gap",
-}
--- v0.5.105 (user-gated layer-2 W smart-chain review; scenario matrix in
--- changelog v0.5.105): a NON-LETHAL MELEE attacker glued to Lina is W's
--- BEST defensive case -- the attacker is locked in place attacking, so the
--- self-aimed AoE catches it at detonation; the 1.6-2.2s stun stops the
--- damage, banks a Fiery Soul stack and opens a free reposition/counter.
--- W costs mana + 8s CD vs 20s+ on the displacement items, so it heads
--- this chain. LETHAL melee keeps the displacement-first base chain
--- (instant relief beats W's 0.95s lead when each hit matters); ranged
--- attackers never route here. W stays SELF-cast per the user rule; the
--- predicted-catch gate inside lina_w_anti_gap.fire (v0.5.105) guarantees
--- the W slot no-ops whenever the attacker would not be in the AoE.
-CH.COMMITTED_ATTACKER_MELEE_SAVES = {
-    "lina_w_anti_gap", "item_force_staff", "item_hurricane_pike",
-    "item_glimmer_cape",
+-- v0.5.105 (retained rationale): a NON-LETHAL MELEE attacker glued to
+-- Lina is W's BEST defensive case -- the attacker is locked in place
+-- attacking, so the self-aimed AoE catches it at detonation; the 1.6-2.2s
+-- stun stops the damage, banks a Fiery Soul stack and opens a free
+-- reposition/counter. W costs mana + 8s CD vs 20s+ on the items, which is
+-- why the W-only rule is affordable.
+CH.COMMITTED_ATTACKER_MELEE_SAVES = {  -- non-lethal melee: W only
+    "lina_w_anti_gap",
 }
 LINA_SAVE_OVERRIDES["lina_committed_attacker"] = CH.COMMITTED_ATTACKER_SAVES
 LINA_SAVE_OVERRIDES["lina_committed_attacker_ranged"] = CH.COMMITTED_ATTACKER_RANGED_SAVES
@@ -1037,6 +1214,7 @@ LINA_SAVE_OVERRIDES["lina_committed_attacker_melee"] = CH.COMMITTED_ATTACKER_MEL
 -- could be hoisted to the L175-230 state.* block if maintenance prefers.
 state.attacking_seen_t              = state.attacking_seen_t or {}
 state.committed_attacker_armed_t    = state.committed_attacker_armed_t or {}
+state.lethal_committed_until        = state.lethal_committed_until or 0  -- v0.5.110.2 offensive cyclone reserve window
 -- v0.5.46 Problem A diag throttle (~5Hz) + last-scan stamp counter.
 state.commit_attacker_diag_t        = state.commit_attacker_diag_t or 0
 state.attacker_latch_last_stamped   = state.attacker_latch_last_stamped or 0
@@ -1063,6 +1241,83 @@ state.W_aim_at_caster_mods          = state.W_aim_at_caster_mods or {
     -- modifier_shadow_shaman_shackles,
     -- modifier_enigma_black_hole_pull.
 }
+
+-- v0.5.112 (#1 W-lead unification): ONE source of truth for the defensive
+-- W timing geometry. Returns (lead_s, aoe_r): lead = live W cast point
+-- (Ability.GetCastPoint, fallback 0.45) + KV light_strike_array_delay_time
+-- (fallback 0.5) -- the same formula state.cyclone_combo_timing derived in
+-- v0.5.100.
+-- v0.5.114.4 LIQUIPEDIA-GROUNDED (user rule: always check Liquipedia
+-- before committing any mechanic; liquipedia.net/dota2game/Lina,
+-- 2026-06-12): Light Strike Array cast ANIMATION = 0.45 + 0.67 (point +
+-- backswing, total 1.12; alternate backswing 0.43), effect delay = 0.5,
+-- effect radius = 250, stun 1.2/1.6/2/2.4. This helper returns the
+-- EFFECT lead (0.45 + 0.5 = 0.95, when the stun lands relative to cast
+-- start); the PLANS add K.W_INTERCEPT_MARGIN_S (0.17) on top, which
+-- lands every plan exactly on the Liquipedia animation total 1.12 (+
+-- per-fire turn) -- the figure the user validated empirically across
+-- v0.5.49-v0.5.50 and re-confirmed from the page. AoE fallback = 250
+-- per Liquipedia (the old 225 literal undersold the true radius).
+state.w_lead = function()
+    local w = ability("lina_light_strike_array")
+    local cp = 0.45
+    if w and Ability.GetCastPoint then
+        local ok, v = pcall(Ability.GetCastPoint, w, true)
+        if ok and type(v) == "number" and v > 0 then cp = v end
+    end
+    local delay = 0.5
+    local aoe   = 250
+    if w and state.item_kv then
+        delay = state.item_kv(w, "light_strike_array_delay_time", 0.5)
+        aoe   = state.item_kv(w, "light_strike_array_aoe", 250)
+    end
+    return cp + delay, aoe
+end
+
+-- v0.5.115.1 (user: "lina is starting the casting too late"): the ONE
+-- segment-coverage intercept criterion, shared by BOTH the armed-peek
+-- dispatch gate and the lina_w_anti_gap.fire gate, so the dispatcher can
+-- never again hold the cast back while the .fire math wants to fire (the
+-- v0.5.55.2 peek gate was a stale twin with 1.12/225 literals enforcing
+-- the OLD arrival window = dispatch only at ~840u). Returns
+-- (castable, aim_d, near, far, range, d_now) or nil when the catalog /
+-- positions / kinematics are unavailable (callers fall through to their
+-- legacy behavior). The placement math is the v0.5.115 user geometry:
+-- the skill is placeable anywhere in [0, max range] and covers 500u of
+-- diameter, so bound Bara's detonation-time position (far at T_MIN =
+-- facing, near at T_MAX = back-turned worst case) and cover the band:
+-- far <= 2*aoe -> aim = far/2 (covers Lina herself through the far
+-- extreme: any timing caught); else aim = (near+far)/2 (max-range
+-- intercept). castable = aim within live cast range - 50u no-walk inset.
+state.w_charge_intercept = function(caster, threat_mod)
+    local me = state.self_npc
+    if not (me and caster) then return nil end
+    local entry = TD.THREAT_ARRIVAL_TIMING and TD.THREAT_ARRIVAL_TIMING[threat_mod]
+    if not entry then return nil end
+    local cpos = Entity.GetAbsOrigin(caster)
+    local lpos = Entity.GetAbsOrigin(me)
+    if not (cpos and lpos) then return nil end
+    local ddx = (cpos.x or 0) - (lpos.x or 0)
+    local ddy = (cpos.y or 0) - (lpos.y or 0)
+    local d_now = math.sqrt(ddx * ddx + ddy * ddy)
+    local lead, aoe = state.w_lead()
+    local kl, ka, kr = TD.ChargeRampKinematics(entry, caster, state.item_kv,
+        state.bara_charge_elapsed and state.bara_charge_elapsed(caster))
+    if not (kl and (kl > 0 or (ka or 0) > 0)) then return nil end
+    local far  = math.max(0, d_now - TD.RampTravel(kl, ka, kr, lead))
+    local near = math.max(0, d_now - TD.RampTravel(kl, ka, kr, lead + K.W_INTERCEPT_MARGIN_S))
+    local aim
+    if far <= 2 * aoe then aim = far / 2
+    else aim = (near + far) / 2 end
+    local range = FALLBACK_RANGES.W
+    local wab = ability("lina_light_strike_array")
+    if wab and Ability.GetCastRange then
+        local okr, rr = pcall(Ability.GetCastRange, wab)
+        if okr and type(rr) == "number" and rr > 0 then range = rr end
+    end
+    range = range - 50  -- no-walk inset
+    return (aim <= range), aim, near, far, range, d_now
+end
 
 -- Per-tick: stamp attacking_seen_t for any visible enemy hero NPC.IsAttacking
 -- right now. Cheap O(N) scan over heroes in 3200u. API-guarded (NPC.IsAttacking
@@ -1152,9 +1407,14 @@ state.attacker_is_ranged = function(h)
     local ok, r = pcall(NPC.GetAttackRange, h)
     return (ok and type(r) == "number" and r > 250) or false
 end
+-- v0.5.111.1: the lethality horizon is now an explicit HITS threshold
+-- (K.LINA_LETHAL_HITS; was an inline 4.25 multiplier) and the function
+-- returns (lethal, hits_to_kill) so the committed_attacker_armed tlog can
+-- report the live number for demo tuning. Unreadable APIs keep the
+-- conservative default: lethal=true (hits 0 = treat as killing now).
 state.attacker_can_kill_self = function(h)
     local me = state.self_npc
-    if not (me and h) then return true end
+    if not (me and h) then return true, 0 end
     local avg
     if NPC.GetTrueDamage and NPC.GetTrueMaximumDamage then
         local ok1, dmin = pcall(NPC.GetTrueDamage, h)
@@ -1163,7 +1423,7 @@ state.attacker_can_kill_self = function(h)
             avg = (dmin + dmax) / 2
         end
     end
-    if not avg then return true end
+    if not avg or avg <= 0 then return true, 0 end
     local eff
     if Target.EffectiveHpVs and Enum.DamageTypes and Enum.DamageTypes.DAMAGE_TYPE_PHYSICAL then
         local ok, v = pcall(Target.EffectiveHpVs, me, h, Enum.DamageTypes.DAMAGE_TYPE_PHYSICAL)
@@ -1172,7 +1432,8 @@ state.attacker_can_kill_self = function(h)
     if not eff or eff == math.huge then
         eff = (Entity.GetHealth and Entity.GetHealth(me)) or 0
     end
-    return (avg * 4.25) >= eff
+    local hits = eff / avg
+    return hits <= K.LINA_LETHAL_HITS, hits
 end
 
 -- v0.5.103 (demo notes 3+4): shared ready-threat scan, extracted from
@@ -1365,7 +1626,7 @@ state.scan_and_arm_committed_attackers = function()
                         -- non-lethal -> the cyclone-headed chain (lock-break);
                         -- melee OR lethal -> displacement-only (NO WW/Eul).
                         local ranged = state.attacker_is_ranged(h)
-                        local lethal = state.attacker_can_kill_self(h)
+                        local lethal, lethal_hits = state.attacker_can_kill_self(h)
                         -- v0.5.103 (demo notes 3+4): cyclone RESERVE gate.
                         -- The v0.5.102 demo spent WW (452.6s) + Eul x6 on
                         -- auto-attack defense; when Assassinate came the
@@ -1380,18 +1641,32 @@ state.scan_and_arm_committed_attackers = function()
                             reserved = (next(state.armed_threats) ~= nil)
                                        or state.enemy_ready_threat_nearby()
                         end
-                        -- v0.5.105 three-way routing (scenario matrix in
-                        -- changelog v0.5.105): ranged non-lethal unreserved
-                        -- -> cyclone lock-break; melee non-lethal -> W-first
-                        -- stun-in-place counter; lethal (either) or reserved
-                        -- ranged -> displacement-first base chain.
+                        -- v0.5.110.1 lethal-gated routing (replaces the
+                        -- v0.5.105 three-way; user demo note: "all attacks
+                        -- are using items, impossible to commit an attack").
+                        -- LETHAL (melee or ranged) -> the displacement-first
+                        -- item base chain; NON-LETHAL -> the W-only chains,
+                        -- so harass never draws an item and never
+                        -- self-incapacitates (the v0.5.110 demo burned Ghost
+                        -- x6 / WW x5 on commits, disarming Lina mid-fight).
+                        -- `reserved` no longer affects routing: it existed
+                        -- (v0.5.103) to keep cyclones in hand, and the
+                        -- non-lethal chains now carry no cyclones at all; it
+                        -- stays in the tlog as a diagnostic. NOTE the old
+                        -- reserved-ranged path routed non-lethal harassers
+                        -- into the BASE chain -- that was the sniper Pike/
+                        -- Ghost drain in the v0.5.110 demo.
                         local ca_mod
-                        if ranged and not lethal and not reserved then
-                            ca_mod = "lina_committed_attacker_ranged"
-                        elseif (not ranged) and (not lethal) then
-                            ca_mod = "lina_committed_attacker_melee"
-                        else
+                        if lethal then
                             ca_mod = "lina_committed_attacker"
+                            -- v0.5.110.2: stamp the lethal-committed window so
+                            -- the OFFENSIVE ladder reserves the cyclones for
+                            -- the save chain (grep cyclones_reserved).
+                            state.lethal_committed_until = t + 2.5
+                        elseif ranged then
+                            ca_mod = "lina_committed_attacker_ranged"
+                        else
+                            ca_mod = "lina_committed_attacker_melee"
                         end
                         state.committed_attacker_armed_t[idx] = t
                         tlog(1, "committed_attacker_armed", {
@@ -1400,6 +1675,7 @@ state.scan_and_arm_committed_attackers = function()
                             mvspeed  = string.format("%.0f", speed),
                             ranged   = ranged and "y" or "n",
                             lethal   = lethal and "y" or "n",
+                            hits     = string.format("%.1f", lethal_hits or -1),  -- v0.5.111.1 hits-to-kill (tune K.LINA_LETHAL_HITS from this)
                             reserved = reserved and "y" or "n",
                         })
                         local intent = "committed_attacker_" .. tostring(idx)
@@ -1474,6 +1750,24 @@ local LINA_EXTRA_THREATS = {
     -- ally branch drop the threat (no ally chain for reactive). The ally branch
     -- now reads LINA_EXTRA_THREATS[mod].category first, then TD.CategoryOf.
     modifier_sniper_assassinate = { role = "burst", save = "save", category = "targeted_burst" },
+    -- v0.5.124 (demo S4 fix): Mars Arena of Blood applies its trapped-state to the
+    -- VICTIM under the suffixed names modifier_mars_arena_of_blood_leash / _marker
+    -- (runtime-confirmed via modseen; the base modifier_mars_arena_of_blood never
+    -- lands on Lina). Both were logging threat_unrecognized -> no save fired (the
+    -- "Pike still fired" in the demo was actually Mars SPEAR, which is correct).
+    -- Recognize both so the reactive path dispatches; LINA_SAVE_OVERRIDES routes
+    -- them to CH.MARS_ARENA (WW/Eul/Blink). category=trap (Kinetic Field class).
+    modifier_mars_arena_of_blood_leash  = { role = "trapped", save = "save", category = "trap" },
+    modifier_mars_arena_of_blood_marker = { role = "trapped", save = "save", category = "trap" },
+    -- v0.5.126 (queued Riki fix): Blink Strike teleports Riki BEHIND Lina from
+    -- invisibility, so there is no anim to detect (the activity-code path cannot
+    -- work) and no armed entry. The only on-Lina signal is the 0.4s slow debuff
+    -- modifier_riki_blinkstrike_slow (VPK + modseen confirmed; previously logged
+    -- threat_unrecognized -> no save). Recognize it here so the reactive path
+    -- (handle_threat_on_self) dispatches; LINA_SAVE_OVERRIDES routes it to
+    -- CH.GAP_CLOSE_SAVES (the same escape chain as PA/Bara/Slark/Tusk/QoP).
+    -- LATE save (fires after the strike lands) -- accepted per the design.
+    modifier_riki_blinkstrike_slow = { role = "close_gap", save = "save", category = "close_gap" },
 }
 
 -- v0.5.24 PERF-11: hoisted from OnModifierCreate is_self branch. These two
@@ -1576,7 +1870,7 @@ local LINA_CATEGORY_PATCHES = {
         append  = { "item_cyclone" },
     },
     channel_on_self = {
-        prepend = { "item_wind_waker", "item_black_king_bar", "item_aeon_disk" },
+        prepend = { "item_wind_waker", "item_black_king_bar" },
     },
     targeted_burst = {
         prepend = { "lina_flame_cloak", "item_black_king_bar",
@@ -1588,6 +1882,38 @@ local LINA_CATEGORY_PATCHES = {
     physical_chase = {
         prepend = { "item_ethereal_blade_self", "item_black_king_bar", "item_glimmer_cape" },
     },
+}
+
+-- v0.5.110 chain composition (CHAIN_COMPOSITION_DESIGN.md): the generic
+-- tier-3 declaration. ResolveSaveOrder composes the RAW lib
+-- TD.CATEGORY_CHAINS backbone for a categorized threat with these
+-- injections/exclusions and marks the result authoritative, ahead of the
+-- LINA_CATEGORY_PATCHES-patched chains above (which stay as the tier-4/5
+-- fallback for categories without a lib backbone, and for any hero not
+-- registering composition). This is what finally routes the v0.5.109 item
+-- builders: a category-routed threat now walks the full lib item backbone
+-- (Ghost in close_gap, Pipe in targeted_burst) plus Lina's abilities at
+-- their declared anchors. Bundled into CH per the 200-locals rule
+-- (v0.5.45.1). MUST stay static after load: the lib memoizes composed
+-- chains per category.
+CH.ABILITY_INJECTIONS = {
+    -- W anti-gap heads the gap-close response: vs a homing gap-closer the
+    -- self-aimed AoE stun is the cheapest counter (8s CD, ~130 mana vs
+    -- 20s+ item CDs); the v0.5.105 predicted-catch gate inside its .fire
+    -- no-ops the slot whenever the attacker would not be in the AoE.
+    { save = "lina_w_anti_gap",  categories = { "close_gap" },
+      anchor = "head" },
+    -- FC = 35 magic resist + spell amp: a deep MR tail vs magic burst and
+    -- lockdown, never ahead of the real saves (mirrors its tail slot in
+    -- the hand-curated Assassinate chain).
+    { save = "lina_flame_cloak", categories = { "targeted_burst", "lockdown" },
+      anchor = "tail" },
+}
+CH.EXCLUSIONS = {
+    -- Ether-self AMPLIFIES magic damage taken: never vs magic burst.
+    -- (No-op while the burst backbone lacks the item; declared so the
+    -- backbone-enrichment follow-up can never regress this.)
+    targeted_burst = { item_ethereal_blade_self = true },
 }
 
 local function _apply_category_patch(base, patch)
@@ -1689,20 +2015,18 @@ local SAVE_CFG = {
         return 0
     end,
     lotus_gate            = function(threat_mod)
-        -- Port of the v0.5.107 item_lotus_orb gate: fire when expected damage
-        -- >= 30% current HP OR the threat is LOTUS_WORTHY_INCOMING; else skip.
-        -- Threats absent from LINA_EXPECTED_DAMAGE fall back to the 0.85 HP gate.
-        local me = state.self_npc
-        local hp    = (me and Entity.GetHealth    and Entity.GetHealth(me))    or 0
-        local hpmax = (me and Entity.GetMaxHealth and Entity.GetMaxHealth(me)) or 1
-        local hp_frac = (hpmax > 0) and (hp / hpmax) or 1
-        local is_worthy = LOTUS_WORTHY_INCOMING and threat_mod and LOTUS_WORTHY_INCOMING[threat_mod] or false
-        local exp_dmg = threat_mod and LINA_EXPECTED_DAMAGE[threat_mod] or nil
-        if exp_dmg ~= nil then
-            if exp_dmg < hp * 0.30 and not is_worthy then return false end
-            return true
-        end
-        return is_worthy or (hp_frac <= 0.85)
+        -- v0.5.116.2: the per-threat damage-throttle (v0.5.107 / IMP-A8: only fire
+        -- Lotus at >=30% HP damage or for LOTUS_WORTHY_INCOMING) is DROPPED. It was
+        -- a pre-axis heuristic to compensate for not knowing which threats Lotus
+        -- actually counters. The threat-counter axis now decides that: the
+        -- dispatcher only resolves item_lotus_orb into the chain when reflect_target
+        -- genuinely counters the threat (axis SaveCounters filter) or a hand-override
+        -- placed it there deliberately. So when this gate is reached, Lotus IS the
+        -- resolved counter -> FIRE it. Reflecting a dangerous threat (Rupture, Lasso,
+        -- Finger, Doom) back at the caster beats conserving the 14s CD. The BKB
+        -- threat_fully_blocked veto + item-ready checks still apply upstream.
+        -- (Supersedes the v0.5.116.1 reflectable-disable patch; this covers it.)
+        return true
     end,
 }
 
@@ -1772,7 +2096,7 @@ local SAVE_FIRE = {
     },
     -- HERO-SPECIFIC: W (light_strike_array) anti-gap arrival stun.
     -- v0.5.44 (DEFENSE_PLAN.md sec 2.1): W has 1.1s prep (0.6 cast point +
-    -- 0.5 delay) + 225 AoE + 1.6s stun. Workflow audit D1 surfaced 4 high-
+    -- 0.5 delay) + 225 AoE + 1.6s stun. Design audit D1 surfaced 4 high-
     -- viability targets (Bara Charge, Bara Nether Strike, Tusk Snowball,
     -- MK Primal Spring) and 2 medium (Storm BL landing, Ember Remnant
     -- arrival). All 4 high-viability cases land AT Lina position, so aim
@@ -1858,6 +2182,34 @@ local SAVE_FIRE = {
                 })
                 return false
             end
+            -- v0.5.113 (#4): skip when the threat caster is ALREADY hard-
+            -- disabled past W's detonation -- the stun would overlap the
+            -- live disable and waste most of its duration. Later dispatch
+            -- attempts re-evaluate, so W fires as the disable runs out,
+            -- exactly when the threat resumes. Self-resolving for armed
+            -- homing threats too: a charge broken BY the disable clears its
+            -- armed row via OnModifierDestroy (no wasted W), one that
+            -- persists re-evaluates post-stun. Enum/API-guarded: anything
+            -- unreadable keeps the legacy fire path.
+            local _dis = threat_caster or state.cur_armed_caster
+            if _dis and NPC.GetStatesDuration and MS
+               and MS.MODIFIER_STATE_STUNNED and MS.MODIFIER_STATE_HEXED then
+                local okd, durs = pcall(NPC.GetStatesDuration, _dis, {
+                    [MS.MODIFIER_STATE_STUNNED] = true,
+                    [MS.MODIFIER_STATE_HEXED]   = true,
+                })
+                if okd and type(durs) == "table" then
+                    local rem = math.max(durs[MS.MODIFIER_STATE_STUNNED] or 0,
+                                         durs[MS.MODIFIER_STATE_HEXED] or 0)
+                    if rem > (state.w_lead()) then
+                        tlog(3, "w_defensive_skip_already_disabled", {
+                            intent = intent_s,
+                            rem    = string.format("%.2f", rem),
+                        })
+                        return false
+                    end
+                end
+            end
             local w_cost     = (Ability.GetManaCost and Ability.GetManaCost(w)) or 130
             -- v0.5.50.1: r_reserve only if R is leveled. At Lina lvl 1-5
             -- (pre-R) the 450 reserve has nothing to preserve and blocks
@@ -1890,18 +2242,61 @@ local SAVE_FIRE = {
             -- mods: no timing gate (window [0, inf] matches v0.5.51
             -- behavior). For non-catalog threats (Bara Nether Strike,
             -- etc.): no timing gate, legacy fire path.
+            -- v0.5.115: segment-coverage aim handoff from the charge gate
+            -- to the predict-aim below (one placement, computed once).
+            local charge_aim_d, charge_seg
             local _w_caster_for_gate = threat_caster or state.cur_armed_caster
             if state.compute_arrival_time and threat_mod and _w_caster_for_gate then
                 local _g_impact_t, _, _g_cat_entry, _g_speed =
                     state.compute_arrival_time(threat_mod, _w_caster_for_gate, me)
                 if _g_impact_t and _g_cat_entry then
                     local _g_kind = _g_cat_entry.kind or ""
-                    if _g_kind == "homing_charge" or _g_kind == "homing_carry" then
-                        local W_LEAD = 1.12
-                        local W_AOE_RADIUS = 225
+                    if _g_kind == "homing_charge" then
+                        -- v0.5.115 SEGMENT-COVERAGE INTERCEPT (user
+                        -- geometry: placeable 0..max range, 250 radius =
+                        -- 500u diameter; history: v0.5.114.1 far
+                        -- intercept, v0.5.114.5 no too_late, v0.5.114.6
+                        -- no per-fire turn). v0.5.115.1: the math moved
+                        -- into state.w_charge_intercept so this gate and
+                        -- the armed-peek DISPATCH gate share the ONE
+                        -- criterion (the peek's stale 1.12/225 twin was
+                        -- holding the cast back until ~840u = "starting
+                        -- the casting too late").
+                        local castable, _g_aim, _g_near, _g_far, _g_range =
+                            state.w_charge_intercept(_w_caster_for_gate, threat_mod)
+                        if castable ~= nil then
+                            if not castable then
+                                -- only too_early exists (the far-intercept
+                                -- wait); near charges always produce a
+                                -- castable covering aim (no too_late,
+                                -- v0.5.114.5).
+                                tlog(3, "w_defensive_skip_window", {
+                                    near   = string.format("%.0f", _g_near or -1),
+                                    far    = string.format("%.0f", _g_far or -1),
+                                    aim    = string.format("%.0f", _g_aim or -1),
+                                    range  = string.format("%.0f", _g_range or -1),
+                                    reason = "too_early",
+                                    kind   = _g_kind,
+                                    mod    = tostring(threat_mod),
+                                })
+                                return false
+                            end
+                            charge_aim_d = _g_aim
+                            charge_seg   = string.format("%.0f-%.0f",
+                                                         _g_near or 0, _g_far or 0)
+                        end
+                        -- helper nil: legacy fall-through (fire; the aim
+                        -- block below has its own fallback computation).
+                    elseif _g_kind == "homing_carry" then
+                        -- carry-Lina (Tusk): the snowball must be met AT
+                        -- Lina (it picks her up; there is no far-point
+                        -- intercept), so the v0.5.112/113.1 arrival
+                        -- window stays: live geometry + latency pad.
+                        local W_LEAD, W_AOE_RADIUS = state.w_lead()
+                        local W_PLAN = W_LEAD + K.W_INTERCEPT_MARGIN_S
                         local _g_upper = (_g_speed and _g_speed > 0)
-                            and (W_LEAD + W_AOE_RADIUS / _g_speed)
-                            or (W_LEAD + 0.20)
+                            and (W_PLAN + W_AOE_RADIUS / _g_speed)
+                            or (W_PLAN + 0.20)
                         if _g_impact_t < W_LEAD or _g_impact_t > _g_upper then
                             tlog(3, "w_defensive_skip_window", {
                                 impact_t = string.format("%.2f", _g_impact_t),
@@ -1937,27 +2332,102 @@ local SAVE_FIRE = {
             -- mods are untouched (the catalog/armed paths above own their
             -- own timing); the committed mods have no catalog entry so they
             -- reach here un-gated otherwise.
+            local committed_catch_pos, committed_cluster_n  -- v0.5.112 (#2) / v0.5.113 (#3)
             if threat_mod == "lina_committed_attacker"
                or threat_mod == "lina_committed_attacker_ranged"
                or threat_mod == "lina_committed_attacker_melee" then
                 local att = threat_caster or state.cur_armed_caster
                 local lina_pos = Entity.GetAbsOrigin(me)
                 local att_pos
+                local w_lead_s, w_aoe = state.w_lead()  -- v0.5.112 (#1): was 0.95 / 225 literals
+                -- v0.5.114.3: predict at the full issue-to-effect horizon
+                -- (KV lead + the measured ~0.17 overhead = the user's
+                -- validated 1.12), not the bare KV lead. Stationary
+                -- attackers (the common committed case) are unaffected;
+                -- moving ones predict slightly further along their path.
+                local w_plan_s = w_lead_s + K.W_INTERCEPT_MARGIN_S
+                local w_range = FALLBACK_RANGES.W  -- v0.5.113: hoisted (catch + cluster both read it)
+                if Ability.GetCastRange then
+                    local okr, r = pcall(Ability.GetCastRange, w)
+                    if okr and type(r) == "number" and r > 0 then w_range = r end
+                end
                 if att and Entity.IsEntity(att) then
-                    att_pos = (state.predict_target_pos and state.predict_target_pos(att, 0.95))
+                    att_pos = (state.predict_target_pos and state.predict_target_pos(att, w_plan_s))
                               or Entity.GetAbsOrigin(att)
                 end
                 if not (att_pos and lina_pos) then return false end
                 local dx = (att_pos.x or 0) - (lina_pos.x or 0)
                 local dy = (att_pos.y or 0) - (lina_pos.y or 0)
                 local d2 = dx * dx + dy * dy
-                if d2 > 225 * 225 then
-                    tlog(2, "w_defensive_skip_no_catch", {
-                        intent = intent_s,
-                        mod    = tostring(threat_mod),
-                        d_pred = string.format("%.0f", math.sqrt(d2)),
-                    })
-                    return false
+                if d2 > w_aoe * w_aoe then
+                    -- v0.5.112 (#2, user-approved aim-rule extension): the
+                    -- self-centered AoE cannot catch, but an attacker whose
+                    -- PREDICTED position sits inside W's cast range can
+                    -- still be caught by aiming AT that position. This
+                    -- finally gives the v0.5.110.1 ranged W-only chain
+                    -- teeth: a Sniper standing at 600u autoing eats a
+                    -- 130-mana / 8s-CD stun instead of nothing. Committed
+                    -- attackers are mid-attack-chain and mostly stationary,
+                    -- so the predicted point is reliable and the AoE
+                    -- absorbs the residual drift. Out of cast range ->
+                    -- skip exactly as before (re-evaluated next dispatch).
+                    if d2 <= w_range * w_range then
+                        committed_catch_pos = att_pos
+                    else
+                        tlog(2, "w_defensive_skip_no_catch", {
+                            intent = intent_s,
+                            mod    = tostring(threat_mod),
+                            d_pred = string.format("%.0f", math.sqrt(d2)),
+                            range  = string.format("%.0f", w_range),
+                        })
+                        return false
+                    end
+                end
+                -- v0.5.113 (#3, the v0.5.34 max-stun doctrine applied to
+                -- defense): with 2+ committed attackers whose PREDICTED
+                -- positions fit ONE AoE, aim the centroid instead of the
+                -- single dispatch caster -- one W, multiple stuns. Runs
+                -- only on committed W dispatches (rare); enumeration is
+                -- capped at the ranged engage radius. The centroid must
+                -- cover EVERY clustered prediction with a 40u rim margin
+                -- AND sit inside W's cast range, else the single-target
+                -- aim above stands unchanged.
+                local okh, near = pcall(Entity.GetHeroesInRadius, me,
+                                        K.LINA_ATTACK_ENGAGE_RADIUS_RANGED,
+                                        Enum.TeamType.TEAM_ENEMY)
+                if okh and near and #near > 1 then
+                    local pts, n = { att_pos }, 1
+                    for i = 1, #near do
+                        local h = near[i]
+                        if h and h ~= att and state.is_committed_attacker_on_self(h) then
+                            local p = (state.predict_target_pos and state.predict_target_pos(h, w_plan_s))
+                                      or (Entity.GetAbsOrigin and Entity.GetAbsOrigin(h))
+                            if p then n = n + 1; pts[n] = p end
+                        end
+                    end
+                    if n >= 2 then
+                        local cx, cy = 0, 0
+                        for i = 1, n do
+                            cx = cx + (pts[i].x or 0)
+                            cy = cy + (pts[i].y or 0)
+                        end
+                        cx, cy = cx / n, cy / n
+                        local fit, rim = true, w_aoe - 40
+                        for i = 1, n do
+                            local ddx = (pts[i].x or 0) - cx
+                            local ddy = (pts[i].y or 0) - cy
+                            if (ddx * ddx + ddy * ddy) > rim * rim then
+                                fit = false
+                                break
+                            end
+                        end
+                        local cdx = cx - (lina_pos.x or 0)
+                        local cdy = cy - (lina_pos.y or 0)
+                        if fit and (cdx * cdx + cdy * cdy) <= w_range * w_range then
+                            committed_catch_pos = { x = cx, y = cy, z = lina_pos.z or 0 }
+                            committed_cluster_n = n
+                        end
+                    end
                 end
             end
 
@@ -1985,6 +2455,19 @@ local SAVE_FIRE = {
             local pos
             local caster = threat_caster or state.cur_armed_caster
             local aim_via
+            -- v0.5.112 (#2): the committed catch block above resolved an
+            -- at-attacker aim (predicted position inside cast range but
+            -- outside the self-centered AoE). Committed mods have no
+            -- catalog entry, so the catalog block below leaves this pos
+            -- untouched. Re-wrapped in Vector() so issue_cast_position
+            -- always gets userdata (the v0.5.50.5 lesson).
+            if committed_catch_pos then
+                pos     = Vector(committed_catch_pos.x or 0,
+                                 committed_catch_pos.y or 0,
+                                 committed_catch_pos.z or 0)
+                aim_via = committed_cluster_n and "committed_cluster"
+                          or "committed_catch"  -- v0.5.113 (#3) / v0.5.112 (#2)
+            end
             -- v0.5.50.8: predict-aim block RESTORED from v0.5.50.6 to
             -- pair with the wide geometric upper. With aim-at-self
             -- (plain catalog_self), upper-bound fires put the caster
@@ -2025,9 +2508,37 @@ local SAVE_FIRE = {
                             local dy = (cur_pos.y or 0) - (lina_pos.y or 0)
                             local d_now = math.sqrt(dx * dx + dy * dy)
                             if d_now > 0 then
-                                local W_LEAD = 1.12
-                                local bara_travel = eff_speed * W_LEAD
-                                local d_at_det = math.max(0, d_now - bara_travel)
+                                -- v0.5.114 precise ramp intercept (user:
+                                -- "instead of a fixed value ... check the
+                                -- real values for bara"): travel during
+                                -- the W lead is the EXACT time-integrated
+                                -- ramp (TD.RampTravel over the remaining
+                                -- wind-up from the armed_t stamp, accel
+                                -- from per-level KV) instead of avg-speed
+                                -- x lead. K.W_INTERCEPT_MARGIN_S survives
+                                -- only as the small order-latency pad
+                                -- (0.10); the model error it used to
+                                -- blanket is now integrated away.
+                                local W_LEAD = state.w_lead() + K.W_INTERCEPT_MARGIN_S
+                                local d_at_det
+                                if charge_aim_d then
+                                    -- v0.5.115: the gate computed the
+                                    -- segment-coverage placement; gate and
+                                    -- aim MUST share the one placement.
+                                    d_at_det = charge_aim_d
+                                else
+                                    -- fallback (gate did not run: no
+                                    -- catalog/kinematics): the v0.5.114.6
+                                    -- no-turn predict-aim.
+                                    local _ck_l, _ck_a, _ck_r = TD.ChargeRampKinematics(
+                                        cat_entry, caster, state.item_kv,
+                                        state.bara_charge_elapsed and state.bara_charge_elapsed(caster))
+                                    local bara_travel = TD.RampTravel(_ck_l, _ck_a, _ck_r, W_LEAD)
+                                    if not (bara_travel and bara_travel > 0) then
+                                        bara_travel = eff_speed * W_LEAD
+                                    end
+                                    d_at_det = math.max(0, d_now - bara_travel)
+                                end
                                 local unit_x = dx / d_now
                                 local unit_y = dy / d_now
                                 pos = Vector(
@@ -2071,6 +2582,8 @@ local SAVE_FIRE = {
                 --   d_now  = caster's current distance from Lina
                 --   d_det  = predicted caster distance at W detonation
                 --   speed  = avg-during-prep speed (ramp model)
+                cluster = committed_cluster_n and tostring(committed_cluster_n) or nil,  -- v0.5.113 (#3)
+                seg    = charge_seg,  -- v0.5.115: covered detonation band (near-far)
                 d_now  = d_now_dbg    and string.format("%.0f", d_now_dbg)    or nil,
                 d_det  = d_at_det_dbg and string.format("%.0f", d_at_det_dbg) or nil,
                 speed  = eff_speed_dbg and string.format("%.0f", eff_speed_dbg) or nil,
@@ -2189,7 +2702,17 @@ state.escape_cfg = {
 
 -- v0.5.75 alias over Escape.ComputeSafeDest (lifted from Lina v0.5.60).
 state.compute_safe_dest = function(threat_caster, push_dist)
-    return Escape.ComputeSafeDest(state.self_npc, threat_caster, push_dist)
+    -- v0.5.130: push away from where the threat is HEADING, not where it IS.
+    -- For a charging threat, away-from-current = toward its landing (the v0.5.129
+    -- WW lesson). predict_target_pos (smoothed velocity) -> the lib pushes away
+    -- from the predicted point; a stationary threat predicts ~current = no-op.
+    -- ~0.5s lead is enough to predict a fast charge PAST Lina (flipping the
+    -- escape to the far side); tunable. Reaches Blink (1200u) here + Force/Pike
+    -- via state.try_self_push below. (predict_target_pos is a state.* field
+    -- resolved at call time, so the later definition is fine.)
+    local tp = threat_caster and state.predict_target_pos
+               and state.predict_target_pos(threat_caster, 0.5) or nil
+    return Escape.ComputeSafeDest(state.self_npc, threat_caster, push_dist, tp)
 end
 
 -- v0.5.75 alias over Escape.TrySelfPush (lifted from Lina v0.5.58).
@@ -2198,9 +2721,14 @@ end
 -- means either immediate cast OR no safe dest; caller's `ok` decides
 -- whether the chain falls through to the next save.
 state.try_self_push = function(intent, item, item_name, push_dist, threat_caster)
+    -- v0.5.130: same predict-aware push as state.compute_safe_dest (Force/Pike).
+    -- The turn-then-fire harness aims Lina at the safe dir before pushing, so a
+    -- corrected (away-from-where-the-threat-is-heading) dir is what she pushes to.
+    local tp = threat_caster and state.predict_target_pos
+               and state.predict_target_pos(threat_caster, 0.5) or nil
     local pending, ok = Escape.TrySelfPush(state.self_npc, intent, item,
                                             item_name, push_dist,
-                                            threat_caster, state.escape_cfg)
+                                            threat_caster, state.escape_cfg, tp)
     if pending then state.pending_self_push = pending end
     return ok
 end
@@ -2666,7 +3194,7 @@ local LINA_ETA_RESOLVERS = {
     modifier_naga_siren_ensnare       = EtaR.Remaining("modifier_naga_siren_ensnare",       K.PERSISTENT_LOCK_CAP_S),
     modifier_bane_nightmare           = EtaR.Remaining("modifier_bane_nightmare",           K.PERSISTENT_LOCK_CAP_S),
     modifier_doom_bringer_doom_debuff = EtaR.Remaining("modifier_doom_bringer_doom_debuff", K.PERSISTENT_LOCK_CAP_S),
-    modifier_disruptor_kinetic_field_remnant = function(_c, target, _armed, _ab, _now_t)
+    modifier_disruptor_kinetic_field = function(_c, target, _armed, _ab, _now_t)  -- v0.5.118: real name (was stale _remnant)
         -- Custom: uses 2.6s fallback when GetModifierRemaining returns 0
         -- (the Kinetic Field thinker often outlives the modifier read window
         -- by a tick; 2.6s matches the v6 lifetime). Kept inline because the
@@ -2674,7 +3202,7 @@ local LINA_ETA_RESOLVERS = {
         -- a default.
         local rem = 0
         if target and Entity.IsEntity and Entity.IsEntity(target) and NPC.GetModifierRemaining then
-            local ok, v = pcall(NPC.GetModifierRemaining, target, "modifier_disruptor_kinetic_field_remnant")
+            local ok, v = pcall(NPC.GetModifierRemaining, target, "modifier_disruptor_kinetic_field")
             if ok and type(v) == "number" then rem = v end
         end
         if rem <= 0 then rem = 2.6 end
@@ -2698,6 +3226,11 @@ defense_dispatcher = Defense.New {
     hero_save_overrides     = LINA_SAVE_OVERRIDES,
     patched_recommended     = PATCHED_RECOMMENDED_SAVES,
     category_chains         = CATEGORY_CHAINS,
+    -- v0.5.110 chain composition: generic tier-3 declaration (see
+    -- CH.ABILITY_INJECTIONS / CH.EXCLUSIONS near LINA_CATEGORY_PATCHES).
+    -- Static after load; the lib memoizes composed chains per category.
+    ability_injections      = CH.ABILITY_INJECTIONS,
+    exclusions              = CH.EXCLUSIONS,
     default_chain           = CH.DEFAULT_SAVE_CHAIN,
     save_fire               = SAVE_FIRE,
     ability_saves           = ABILITY_SAVES,
@@ -2740,6 +3273,37 @@ defense_dispatcher = Defense.New {
     eta_resolver_default    = Defense.MakeGenericEtaResolver(TD),
     lock_buffer_s           = 0.3,
     fallback_lock_ttl_s     = 2.0,
+    -- v0.5.127 CD-aware lock release (general re-engage structure; user spec
+    -- "not tied to such a long time"). Reports whether a fired save's
+    -- item/ability is on COOLDOWN (= it actually spent). The lib releases a
+    -- held in-flight lock on a re-engage once the chosen save is confirmed
+    -- spent, so the chain advances to the NEXT ready save (e.g. Pike spent ->
+    -- WW on a Primal re-grab) instead of staying locked for the whole TTL.
+    -- Benefits EVERY re-engaging threat, not just Primal. Name map mirrors
+    -- save_is_ready; uses GetCooldown>0 (NOT IsReady, which also reads false on
+    -- mana / ownership). Unowned/unleveled -> handle nil / cd 0 -> false, so the
+    -- lib falls through to its give-up backstop. lock_cd_coalesce_s /
+    -- lock_cd_giveup_s left at lib defaults (0.30 / 0.60).
+    item_on_cd              = function(save_short)
+        if not save_short or save_short == "thunk" then return false end
+        local me = state.self_npc
+        if not me then return false end
+        local handle
+        if save_short == "lina_flame_cloak" then
+            handle = ability("lina_flame_cloak")
+        elseif save_short == "lina_w_anti_gap" then
+            handle = ability("lina_light_strike_array")
+        elseif save_short == "item_ethereal_blade_self" then
+            handle = NPCLib.item(me, "item_ethereal_blade")
+        elseif save_short:sub(1, 5) == "item_" then
+            handle = NPCLib.item(me, save_short)
+        else
+            handle = ability(save_short)
+        end
+        if not handle then return false end
+        local ok, cd = pcall(Ability.GetCooldown, handle)
+        return (ok and type(cd) == "number" and cd > 0) and true or false
+    end,
     -- v0.5.40.1 HOTFIX: self_npc closure was missing from v0.5.40 cfg, so
     -- lib's TrySaveSelf compat wrapper resolved target_unit=nil -> lock_key
     -- returned nil -> lock_key_unresolvable tlog -> unlocked v0.5.39 path.
@@ -2811,7 +3375,7 @@ defense_dispatcher = Defense.New {
         item_lotus_orb       = true,  -- 14s CD, reflect
         item_black_king_bar  = true,  -- 60s CD (depleting), magic-immune
         item_aeon_disk       = true,  -- 90+s CD, time-stop on lethal
-        item_pipe_of_insight = true,  -- 30s CD, magic-shield + ally aura
+        item_pipe            = true,  -- 60s CD, magic-shield + ally aura (v0.5.110: real items.json key; the old item_pipe_of_insight name matched nothing)
         item_glimmer_cape    = true,  -- 25s CD, invis + magic-resist
         item_wind_waker      = true,  -- 30s CD, self-cyclone movable
         item_cyclone         = true,  -- 23s CD, self-cyclone immunity
@@ -3215,13 +3779,55 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
                     state.compute_arrival_time(entry.threat_mod, entry.caster, state.self_npc)
                 if _w_impact_t and _w_cat_entry then
                     local _w_kind = _w_cat_entry.kind or ""
-                    if _w_kind == "homing_charge" or _w_kind == "homing_carry" then
-                        local W_LEAD = 1.12
-                        local W_AOE_RADIUS = 225
+                    if _w_kind == "homing_charge" then
+                        -- v0.5.115.1 (user: "lina is starting the casting
+                        -- too late"): this peek gate was a STALE TWIN of
+                        -- the .fire timing -- it still enforced the OLD
+                        -- arrival window with 1.12/225 literals, so the
+                        -- chain was not even DISPATCHED until Bara was
+                        -- ~840u out (the v0.5.115 demo log: every fire at
+                        -- via=w_catalog_eta dist~841-849), capping every
+                        -- cast start regardless of what the segment gate
+                        -- inside .fire wanted. It now shares the ONE
+                        -- criterion with the .fire body
+                        -- (state.w_charge_intercept): dispatch the moment
+                        -- the covering aim becomes castable, which starts
+                        -- the cast from ~1300u+ on far charges (the
+                        -- max-range intercept finally reachable) and
+                        -- immediately on near ones.
+                        local castable, _w_aim, _w_near, _w_far, _w_range =
+                            state.w_charge_intercept(entry.caster, entry.threat_mod)
+                        if castable ~= nil then
+                            tlog(3, "w_catalog_eta_gate", {
+                                d        = string.format("%.0f", d),
+                                aim      = string.format("%.0f", _w_aim or -1),
+                                near     = string.format("%.0f", _w_near or -1),
+                                far      = string.format("%.0f", _w_far or -1),
+                                range    = string.format("%.0f", _w_range or -1),
+                                castable = castable and "y" or "n",
+                                kind     = _w_kind,
+                            })
+                            if castable then
+                                entry._fire_save_eff = sn
+                                return true, "w_catalog_eta", eta_trigger_eff
+                            end
+                            -- Not yet castable (too_early): block the
+                            -- legacy gates from firing W via the -1
+                            -- sentinel; re-evaluated next tick.
+                            return false, nil, -1
+                        end
+                        -- helper nil (positions/kinematics unavailable):
+                        -- fall through to the legacy gates.
+                    elseif _w_kind == "homing_carry" then
+                        -- Tusk arrival window (the snowball must be met
+                        -- AT Lina). v0.5.115.1: live geometry via
+                        -- state.w_lead() + the intercept margin (was the
+                        -- same stale 1.12/225 literals).
+                        local W_LEAD, W_AOE_RADIUS = state.w_lead()
                         local _w_lower = W_LEAD
                         local _w_upper = (_w_speed and _w_speed > 0)
-                            and (W_LEAD + W_AOE_RADIUS / _w_speed)
-                            or (W_LEAD + 0.20)
+                            and (W_LEAD + K.W_INTERCEPT_MARGIN_S + W_AOE_RADIUS / _w_speed)
+                            or (W_LEAD + K.W_INTERCEPT_MARGIN_S + 0.20)
                         local _w_in_window = _w_impact_t >= _w_lower and _w_impact_t <= _w_upper
                         tlog(3, "w_catalog_eta_gate", {
                             d         = string.format("%.0f", d),
@@ -3236,9 +3842,6 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
                             entry._fire_save_eff = sn
                             return true, "w_catalog_eta", eta_trigger_eff
                         end
-                        -- Out of window: block legacy gates from
-                        -- firing W. Return -1 sentinel so eta <= -1
-                        -- in armed_threats_tick is always false.
                         return false, nil, -1
                     end
                 end
@@ -3500,7 +4103,7 @@ local function armed_threats_tick()
                     end
                     if should_fire then
                         entry._cp_t = cp_remaining
-                        -- eta arg is 0 for cp entries -- the cp_t field in
+                        -- eta arg is 0 for cp entries - the cp_t field in
                         -- the armed_threat_fire tlog carries the meaningful
                         -- timing signal. via=cp_save_dist / cp_eta_trigger
                         -- distinguishes the path from homing eta_trigger.
@@ -4021,7 +4624,7 @@ end
 local function on_hard_disable(ev)
     if not ev.target_self then return end
     if not is_threat_caster(ev) then return end
-    -- v0.5.39 BUG-3: cast-point arming via the anim path. PRIMARY entry --
+    -- v0.5.39 BUG-3: cast-point arming via the anim path. PRIMARY entry -
     -- anim fires at cast-start (true pre-cast window), whereas
     -- OnModifierCreate fires after the modifier lands (catch-up only).
     -- If ev.ability_name maps to a CAST_POINT_THREATS entry, ARM and bail;
@@ -4438,8 +5041,26 @@ end
 -- sites (W .fire body, armed_chain_peek W gate, W gate's hp/speed read).
 -- state.item_kv passed as the kv_lookup callback so the kv_or_fallback
 -- speed_source (Tusk Snowball only today) keeps working.
+-- v0.5.114: seconds since the Bara charge began (the bara_charge armed
+-- entry is created on modifier create = charge start and carries armed_t).
+-- nil when no live charge from this caster -- the lib then assumes the
+-- full wind-up remains (the safe, fires-earlier direction).
+state.bara_charge_elapsed = function(caster)
+    local e = state.armed_threats and state.armed_threats.bara_charge
+    if e and e.armed_t and (not caster or e.caster == caster) then
+        return now() - e.armed_t
+    end
+    return nil
+end
+
 state.compute_arrival_time = function(threat_mod, caster, target, modifier_handle)
-    return TD.ComputeArrivalTime(threat_mod, caster, target, modifier_handle, state.item_kv)
+    -- v0.5.114: thread the ramp clock for the precise charge model.
+    local opts
+    if threat_mod == "modifier_spirit_breaker_charge_of_darkness" then
+        local el = state.bara_charge_elapsed(caster)
+        if el then opts = { elapsed_s = el } end
+    end
+    return TD.ComputeArrivalTime(threat_mod, caster, target, modifier_handle, state.item_kv, opts)
 end
 
 -- v0.5.55: state.compute_save_fire_window + state.compute_w_fire_window
@@ -5447,8 +6068,27 @@ state.lina_starter_tick = function(force)
     -- ABOVE ether_wqr - ether has no lock, so a fleeing target walks out of
     -- the un-locked W/Q while the amp goes to waste. Non-fleeing ladder
     -- order is unchanged.
-    local eul_ok   = (ctx.eul_ready and ctx.in_eul_range and cyclone_safe and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_eul) or false
-    local ww_ok    = (ww_ready and in_ww_range and not ww_threatened and ww_healthy and cyclone_safe and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_ww) or false
+    -- v0.5.110.2 offensive cyclone reserve (demo death: the eul_wrq combo
+    -- burned Eul on the lethal Mars at t=250.2; when the lethal arm needed
+    -- a save the chain found nothing and Lina died). Cyclones are
+    -- DODGE/SAVE items first (the v0.5.103 rule, now enforced on the
+    -- OFFENSIVE ladder too): while a LETHAL committed attacker window is
+    -- live (state.lethal_committed_until, stamped in scan_and_arm) or any
+    -- armed threat row exists, eul_wrq/ww_wrq are off the table and the
+    -- ladder falls through to ether_wqr/wqr with the cyclone kept in hand
+    -- for the defensive chain.
+    local cyclones_reserved = (next(state.armed_threats) ~= nil)
+        or ((state.frame_t or 0) < (state.lethal_committed_until or 0))
+    if cyclones_reserved and (ctx.eul_ready or ww_ready)
+       and (state.frame_t or 0) - (state.cyclone_reserve_diag_t or 0) > 1.0 then
+        state.cyclone_reserve_diag_t = state.frame_t or 0
+        tlog(2, "cyclone_offense_reserved", {
+            armed  = next(state.armed_threats) and "y" or "n",
+            lethal = ((state.frame_t or 0) < (state.lethal_committed_until or 0)) and "y" or "n",
+        })
+    end
+    local eul_ok   = (ctx.eul_ready and ctx.in_eul_range and cyclone_safe and not cyclones_reserved and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_eul) or false
+    local ww_ok    = (ww_ready and in_ww_range and not ww_threatened and ww_healthy and cyclone_safe and not cyclones_reserved and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_ww) or false
     local ether_ok = (ctx.ether_ready and ctx.in_ether_range and ctx.in_w_range and ctx.ready_r and ctx.ready_w and ctx.mana >= cost_ether and ether_needed and ether_kill_ok) or false
     local target_is_fleeing = ctx.kiting_us or false
     -- v0.5.15 IMP-A2: pick_offense_target prefers attackers/nearest, but the
@@ -6698,6 +7338,34 @@ state.farm_gather_creeps = function(radius)
     return out
 end
 
+-- v0.5.111 wave-clear hero-clip: enemy HEROES in radius as a bonus-unit
+-- list for Farm.BestLineAim (same unit-list contract as farm_gather_creeps
+-- above; guard style mirrors it; degrades to {} on any API miss).
+state.farm_gather_enemy_heroes = function(radius)
+    local me = state.self_npc
+    if not me then return {} end
+    local out = {}
+    local okh, heroes = pcall(Entity.GetHeroesInRadius, me, radius or 1075,
+                              Enum.TeamType.TEAM_ENEMY)
+    if okh and heroes then
+        for i = 1, #heroes do
+            local h = heroes[i]
+            if h and Target.IsAlive(h) and Target.NotIllusion(h)
+               and not (NPC.IsInvulnerable and NPC.IsInvulnerable(h)) then
+                local p = Entity.GetAbsOrigin(h)
+                if p then
+                    out[#out + 1] = {
+                        pos = p,
+                        hp = (Entity.GetHealth and Entity.GetHealth(h)) or 0,
+                        entity = h,
+                    }
+                end
+            end
+        end
+    end
+    return out
+end
+
 -- v0.5.78 wave-clear HOLD handler. While the wave-clear key is held:
 --   1. gather creeps within Q range,
 --   2. Q (Dragon Slave) at the line aim hitting the most creeps, when
@@ -6726,9 +7394,33 @@ state.wave_clear_tick = function()
     -- gank_imminent_self() (2 arrivable in 4s, fog-aware) gates the whole tick
     -- -- the first live consumer of the v0.5.77 fog suite. Throttled (5Hz, only
     -- while the key is held), so the FogSnapshot cost is bounded.
-    if state.gank_imminent_self and state.gank_imminent_self() then
-        if TLOG3_ENABLED then tlog(3, "wave_clear_gank_pause", {}) end
-        return
+    -- v0.5.113.1 (demo: 59x wave_clear_gank_pause = the wave key was DEAD in
+    -- any contested lane): the v0.5.84 gate counted VISIBLE enemies toward
+    -- the 2-arrivable signal, so a plain lane standoff suppressed the user's
+    -- explicit HOLD every tick. The signal the gate was built for ("a FOG
+    -- gank") requires an UNSEEN arriver: pause only when the imminent set
+    -- contains at least one visibility=fog ganker. Fully-visible pressure is
+    -- the user's own information and their call -- the key is a deliberate
+    -- HOLD.
+    if state.gank_imminent_self then
+        local imminent, gankers = state.gank_imminent_self()
+        if imminent and type(gankers) == "table" then
+            local fog = 0
+            for i = 1, #gankers do
+                if gankers[i] and gankers[i].visibility == "fog" then
+                    fog = fog + 1
+                end
+            end
+            if fog >= 1 then
+                if TLOG3_ENABLED then
+                    tlog(3, "wave_clear_gank_pause", {
+                        fog   = tostring(fog),
+                        total = tostring(#gankers),
+                    })
+                end
+                return
+            end
+        end
     end
 
     local me = state.self_npc
@@ -6757,13 +7449,27 @@ state.wave_clear_tick = function()
     if q_ready then
         local q_cost = ability_mana("lina_dragon_slave")
         if mana >= q_cost and (mana - q_cost) >= r_cost then
-            local aim, hit_n = Farm.BestLineAim(me_pos, creeps, Q_LENGTH, Q_HALF_WIDTH)
+            -- v0.5.111 hero-clip (player report: "clear-wave Q is not aimed
+            -- to hit creeps AND the player behind"): enemy heroes in Q range
+            -- join the aim as weighted bonus targets, so among wave-clearing
+            -- lines the one that also clips a hero wins (a hero outbids up
+            -- to 3 creeps). min_hits keeps the pick inside the cast gate: a
+            -- hero-heavy line below the creep threshold never displaces a
+            -- qualifying line. CAST CONDITIONS UNCHANGED (still needs
+            -- min_creeps creeps on the chosen line; the hero never
+            -- substitutes for creeps).
+            local bonus_heroes = state.farm_gather_enemy_heroes(Q_LENGTH)
+            local aim, hit_n, _, hero_n = Farm.BestLineAim(
+                me_pos, creeps, Q_LENGTH, Q_HALF_WIDTH,
+                { bonus_units = bonus_heroes, bonus_weight = 3,
+                  min_hits = min_creeps })
             if aim and Farm.WorthCasting(hit_n, min_creeps) then
                 local q = ability("lina_dragon_slave")
                 if q and issue_cast_position("wave_clear_q", q, aim, "agg") then
                     fired = true
                     tlog(1, "wave_clear_q", {
                         hits = tostring(hit_n),
+                        heroes = tostring(hero_n or 0),
                         x = string.format("%.0f", aim.x),
                         y = string.format("%.0f", aim.y),
                         mana = string.format("%.0f", mana),
@@ -7042,7 +7748,7 @@ state.tests["A9_pudge_chain_order"] = {
 -- v0.5.82 quality: contract / no-throw smoke test for the v0.5.76-78 lib-alias
 -- surface (fog + escape + farm). Drives each alias with state.self_npc = nil
 -- and asserts the documented return shape WITHOUT erroring -- exactly the class
--- of nil-deref / shape-divergence the optimization workflow flagged. Mock-driven:
+-- of nil-deref / shape-divergence the optimization pass flagged. Mock-driven:
 -- nils self_npc via the cleanup stack, restores after. Complements the offline
 -- tools/run_tests.lua pure-lib tests by covering the Lina-side glue (aliases +
 -- _fog_opts + arg passing).
@@ -7344,6 +8050,27 @@ end
 
 local function dodger_chain_disable()
     if state.dodger_disabled then return end
+    -- v0.5.125: DEFER-RETRY. The Dodger "Защитные предметы" list lives under the
+    -- "Дополнительные функции 2.0" addon sub-panel, which is LAZY-LOADED: the path
+    -- exists in saved gui.json but the live Menu tree has not instantiated it at
+    -- GAME_IN_PROGRESS (probe: depth 1-3 resolve, depth 4 = nil). The pre-v0.5.125
+    -- code latched dodger_disabled=true even on set_ok=0 -> one dead shot, never
+    -- retried, so a later lazy-load (or the user opening the panel) was never
+    -- caught. Now: latch ONLY on success; otherwise retry every 5s up to a cap so
+    -- the override catches the node once it appears. If it never appears, give up
+    -- quietly (it is a framework menu limitation -> manual uncheck is the fallback).
+    local now_t = now()
+    if state.dodger_retry_t and (now_t - state.dodger_retry_t) < 5.0 then return end
+    state.dodger_retry_t = now_t
+    state.dodger_retry_n = (state.dodger_retry_n or 0) + 1
+    if state.dodger_retry_n > 24 then          -- ~2 min of retries
+        if not state.dodger_gaveup then
+            state.dodger_gaveup = true
+            tlog(1, "dodger_chain_giveup", { attempts = tostring(state.dodger_retry_n - 1),
+                note = "lazy submenu never resolved; manual uncheck is the fallback" })
+        end
+        return
+    end
     local saved, read_shape = {}, nil
     for _, item in ipairs(DODGER_CHAIN_ITEMS) do
         local v, shape = _dodger_read(item)
@@ -7356,19 +8083,22 @@ local function dodger_chain_disable()
         if ok then n_set = n_set + 1 else failed[#failed + 1] = item end
         write_shape = write_shape or shape
     end
-    state.dodger_saved = saved
-    state.dodger_disabled = true
     tlog(1, "dodger_chain_disabled", {
         items      = tostring(#DODGER_CHAIN_ITEMS),
         set_ok     = tostring(n_set),
+        attempt    = tostring(state.dodger_retry_n),
         failed     = (#failed > 0) and table.concat(failed, ",") or "-",
         read_shape = tostring(read_shape or "nil"),
         write_shape = tostring(write_shape or "nil"),
     })
-    -- v0.5.99.2: when no item write took (set_ok=0 -> Menu.Find did not resolve the
-    -- Dodger container), probe per-level to find WHERE the 6-component path breaks.
-    -- One-shot (latched by state.dodger_disabled above).
-    if n_set == 0 then dodger_path_probe() end
+    if n_set > 0 then
+        state.dodger_saved = saved
+        state.dodger_disabled = true           -- SUCCESS: latch, stop retrying
+    elseif not state.dodger_probed then
+        -- first failure only: probe per-level to log WHERE the path breaks.
+        state.dodger_probed = true
+        dodger_path_probe()
+    end
 end
 
 local function dodger_chain_restore()
@@ -8157,11 +8887,17 @@ local AB = {
 
 local function register_anim_maps()
     -- v6.15.206 (D18-followup initiative): the full register_anim_maps body
-    -- is now GENERATED by tools/gen_anim_maps.py from npc_heroes.json +
-    -- npc_abilities.json. Cast-activity slots are derived (D18 algorithm);
-    -- roles are seeded from the prior hand-tuned maps + threat_data.lua, with
-    -- a CHANNELLED-behaviour draft for the tail. Re-run the generator after a
-    -- patch; do NOT hand-edit these blocks. 68 heroes, 105 threat abilities.
+    -- was GENERATED by tools/gen_anim_maps.py from npc_heroes.json +
+    -- npc_abilities.json. Roles seeded from prior hand-tuned maps + threat_data.
+    -- v0.5.119 (2026-06-13): the cast-activity SLOTS are now KV-correct -- the
+    -- old D18 slot-POSITION derivation was wrong for ~22% of entries (e.g.
+    -- Bloodseeker Rupture: position AB[4] but KV AbilityCastAnimation is
+    -- ACT_DOTA_CAST_ABILITY_6, demo-confirmed dead). All 34 mismatches were
+    -- hand-corrected to KV; the generator was also fixed to prefer
+    -- AbilityCastAnimation. **REGEN WARNING:** the generator does NOT emit the
+    -- 57 instant_target + 22 range flags hand-maintained here -- a blind regen
+    -- WIPES them (detection regression). MERGE, do not wholesale-replace; verify
+    -- with tools/check_anim_activity_codes.py (expect 0 mismatches).
     -- abaddon (v6.15.270 zero-coverage final mop-up)
     -- v0.5.36: Aphotic Shield cast on ally explodes for AoE damage; anim catches
     -- the cast, Lina repositions if Abaddon's ally is near.
@@ -8205,7 +8941,7 @@ local function register_anim_maps()
     })
     -- bloodseeker
     Anim.RegisterMap("npc_dota_hero_bloodseeker", {
-        [AB[4]] = { ability = "bloodseeker_rupture", role = "ult_burst" },
+        [AB[6]] = { ability = "bloodseeker_rupture", role = "ult_burst", instant_target = true },  -- v0.5.118: KV AbilityCastAnimation=ACT_DOTA_CAST_ABILITY_6 (NOT slot-4 -- the generator's slot-derivation was wrong, so the anim never matched and v0.5.117 silently degraded to reactive). AB[6] + instant_target -> on_hard_disable fires Lotus at cast-START (Lotus reflects Rupture upon cast only, the 0.4s window)
     })
     -- bounty_hunter (v6.15.269 zero-coverage fill)
     -- Shuriken Toss is UNIT_TARGET 0.3 cast (bounces between visible
@@ -8216,20 +8952,20 @@ local function register_anim_maps()
     -- brewmaster (v6.15.269 zero-coverage fill)
     -- Cinder Brew is POINT-AOE 0.2 cast slow+dot. Anim catches placement.
     Anim.RegisterMap("npc_dota_hero_brewmaster", {
-        [AB[1]] = { ability = "brewmaster_cinder_brew", role = "hard_disable" },
+        [AB[2]] = { ability = "brewmaster_cinder_brew", role = "hard_disable" },
     })
     -- broodmother (v6.15.268 zero-coverage fill)
     -- v0.5.36: Sticky Snare is POINT VECTOR_TARGETING CHANNELLED -- Brood places a
     -- web-snare that roots Lina if she walks through. anim catches the
     -- cast.
     Anim.RegisterMap("npc_dota_hero_broodmother", {
-        [AB[2]] = { ability = "broodmother_sticky_snare", role = "hard_disable" },
+        [AB[4]] = { ability = "broodmother_sticky_snare", role = "hard_disable" },
     })
     -- bristleback (v6.15.266 zero-coverage fill)
     -- Hairball is a hidden POINT-AOE that fires a line of viscous goo (same
     -- mechanic as Viscous Nasal Goo Q, but auto-cast multi-target).
     Anim.RegisterMap("npc_dota_hero_bristleback", {
-        [AB[2]] = { ability = "bristleback_hairball", role = "hard_disable" },
+        [AB[4]] = { ability = "bristleback_hairball", role = "hard_disable" },
     })
     -- centaur (v6.15.270 zero-coverage final mop-up)
     -- v0.5.36: Double Edge is UNIT_TARGET AOE instant burst; no target-side modifier.
@@ -8249,7 +8985,7 @@ local function register_anim_maps()
     })
     -- clinkz
     Anim.RegisterMap("npc_dota_hero_clinkz", {
-        [AB[5]] = { ability = "clinkz_burning_barrage", role = "channel_start" },  -- (draft)
+        [AB[1]] = { ability = "clinkz_burning_barrage", role = "channel_start" },  -- (draft)
     })
     -- crystal_maiden
     Anim.RegisterMap("npc_dota_hero_crystal_maiden", {
@@ -8265,7 +9001,7 @@ local function register_anim_maps()
     Anim.RegisterMap("npc_dota_hero_dark_willow", {
         [AB[1]] = { ability = "dark_willow_bramble_maze", role = "hard_disable" },
         [AB[3]] = { ability = "dark_willow_cursed_crown", role = "hard_disable" },
-        [AB[4]] = { ability = "dark_willow_terrorize", role = "hard_disable" },
+        [AB[5]] = { ability = "dark_willow_terrorize", role = "hard_disable" },
     })
     -- dawnbreaker
     Anim.RegisterMap("npc_dota_hero_dawnbreaker", {
@@ -8284,7 +9020,7 @@ local function register_anim_maps()
     -- Infernal Blade is autocast UNIT_TARGET on Doom's attack target -- no
     -- aim, instant trigger; instant_target bypasses the facing gate.
     Anim.RegisterMap("npc_dota_hero_doom_bringer", {
-        [AB[2]] = { ability = "doom_bringer_infernal_blade", role = "hard_disable", instant_target = true },
+        [AB[3]] = { ability = "doom_bringer_infernal_blade", role = "hard_disable", instant_target = true },
     })
     -- dragon_knight (v6.15.258 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_dragon_knight", {
@@ -8311,7 +9047,7 @@ local function register_anim_maps()
     -- becomes untargetable while flickering through enemies). Anim
     -- catches the cast; chain dispatches BKB / displacement.
     Anim.RegisterMap("npc_dota_hero_ember_spirit", {
-        [AB[3]] = { ability = "ember_spirit_sleight_of_fist", role = "hard_disable" },
+        [AB[2]] = { ability = "ember_spirit_sleight_of_fist", role = "hard_disable" },
     })
     -- enchantress (v6.15.270 zero-coverage final mop-up)
     -- Impetus is autocast attack-replacement (UNIT_TARGET AUTOCAST
@@ -8340,7 +9076,7 @@ local function register_anim_maps()
     })
     -- gyrocopter (v6.15.263 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_gyrocopter", {
-        [AB[1]] = { ability = "gyrocopter_homing_missile", role = "hard_disable", instant_target = true },  -- 0 cast, IGNORE_BACKSWING
+        [AB[2]] = { ability = "gyrocopter_homing_missile", role = "hard_disable", instant_target = true },  -- 0 cast, IGNORE_BACKSWING
         [AB[4]] = { ability = "gyrocopter_call_down", role = "hard_disable" },  -- POINT-AOE, 0.3 cast
     })
     -- hoodwink
@@ -8360,7 +9096,7 @@ local function register_anim_maps()
     -- damage. Swift Slash is new 0.3s UNIT_TARGET gap-close (mini Omni).
     -- Both no-aim (caster selects target by reference) -> instant_target.
     Anim.RegisterMap("npc_dota_hero_juggernaut", {
-        [AB[1]] = { ability = "juggernaut_swift_slash", role = "gap_close", instant_target = true },
+        [AB[4]] = { ability = "juggernaut_swift_slash", role = "gap_close", instant_target = true },
         [AB[4]] = { ability = "juggernaut_omni_slash", role = "channel_start", instant_target = true },
     })
     -- keeper_of_the_light
@@ -8370,7 +9106,7 @@ local function register_anim_maps()
     -- kunkka (v6.15.263 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_kunkka", {
         [AB[1]] = { ability = "kunkka_torrent", role = "hard_disable" },  -- POINT-AOE, 0.4 cast, 1.5s warning
-        [AB[2]] = { ability = "kunkka_x_marks_the_spot", role = "hard_disable", instant_target = true },  -- unit-target, IGNORE_BACKSWING
+        [AB[3]] = { ability = "kunkka_x_marks_the_spot", role = "hard_disable", instant_target = true },  -- unit-target, IGNORE_BACKSWING
     })
     -- kez
     -- v6.15.256: Grappling Claw is unit-target (Kez selects target by
@@ -8391,11 +9127,11 @@ local function register_anim_maps()
     -- lich
     Anim.RegisterMap("npc_dota_hero_lich", {
         [AB[3]] = { ability = "lich_sinister_gaze", role = "channel_start", instant_target = true },
-        [AB[4]] = { ability = "lich_chain_frost", role = "ult_burst" },
+        [AB[6]] = { ability = "lich_chain_frost", role = "ult_burst" },
     })
     -- life_stealer
     Anim.RegisterMap("npc_dota_hero_life_stealer", {
-        [AB[2]] = { ability = "life_stealer_open_wounds", role = "hard_disable" },
+        [AB[3]] = { ability = "life_stealer_open_wounds", role = "hard_disable" },
     })
     -- lina
     Anim.RegisterMap("npc_dota_hero_lina", {
@@ -8441,20 +9177,20 @@ local function register_anim_maps()
     -- the facing gate would refuse the anim path because Marci doesn't
     -- face Sniper when grappling. instant_target=true bypasses the gate.
     Anim.RegisterMap("npc_dota_hero_marci", {
-        [AB[1]] = { ability = "marci_grapple", role = "gap_close", instant_target = true },
+        [AB[5]] = { ability = "marci_grapple", role = "gap_close", instant_target = true },
     })
     -- medusa (v6.15.268 zero-coverage fill)
     -- Mystic Snake is UNIT_TARGET (bounces between enemies). Gorgon Grasp
     -- is POINT-AOE stun. Both aim-required; default facing gate.
     Anim.RegisterMap("npc_dota_hero_medusa", {
-        [AB[1]] = { ability = "medusa_mystic_snake", role = "hard_disable" },
+        [AB[2]] = { ability = "medusa_mystic_snake", role = "hard_disable" },
         [AB[3]] = { ability = "medusa_gorgon_grasp", role = "hard_disable" },
     })
     -- mars
     Anim.RegisterMap("npc_dota_hero_mars", {
-        [AB[1]] = { ability = "mars_spear", role = "hard_disable" },
-        [AB[2]] = { ability = "mars_gods_rebuke", role = "hard_disable" },
-        [AB[4]] = { ability = "mars_arena_of_blood", role = "hard_disable" },
+        [AB[5]] = { ability = "mars_spear", role = "hard_disable" },
+        [AB[4]] = { ability = "mars_gods_rebuke", role = "hard_disable" },
+        [AB[1]] = { ability = "mars_arena_of_blood", role = "hard_disable" },
     })
     -- meepo (v6.15.266 zero-coverage fill)
     -- Earthbind = POINT-AOE delayed root projectile. Poof = UNIT_TARGET
@@ -8503,7 +9239,7 @@ local function register_anim_maps()
     -- nyx_assassin
     Anim.RegisterMap("npc_dota_hero_nyx_assassin", {
         [AB[1]] = { ability = "nyx_assassin_impale", role = "hard_disable" },
-        [AB[4]] = { ability = "nyx_assassin_vendetta", role = "gap_close" },
+        [AB[6]] = { ability = "nyx_assassin_vendetta", role = "gap_close" },
     })
     -- obsidian_destroyer
     -- v6.15.250: Astral Imprisonment is unit-target (selects target by
@@ -8523,7 +9259,7 @@ local function register_anim_maps()
     -- Hammer of Purity is autocast UNIT_TARGET single-target nuke.
     -- instant_target since Omniknight selects target by reference.
     Anim.RegisterMap("npc_dota_hero_omniknight", {
-        [AB[4]] = { ability = "omniknight_hammer_of_purity", role = "hard_disable", instant_target = true },
+        [AB[1]] = { ability = "omniknight_hammer_of_purity", role = "hard_disable", instant_target = true },
     })
     -- oracle
     Anim.RegisterMap("npc_dota_hero_oracle", {
@@ -8566,14 +9302,14 @@ local function register_anim_maps()
     -- channel-start save. Onslaught is a line dash -- PB DOES aim it -- so
     -- the facing gate stays for that one.
     Anim.RegisterMap("npc_dota_hero_primal_beast", {
-        [AB[1]] = { ability = "primal_beast_onslaught", role = "gap_close" },
-        [AB[4]] = { ability = "primal_beast_pulverize", role = "channel_start", instant_target = true },
+        [AB[2]] = { ability = "primal_beast_onslaught", role = "gap_close" },
+        [AB[5]] = { ability = "primal_beast_pulverize", role = "channel_start", instant_target = true },
     })
     -- puck
     Anim.RegisterMap("npc_dota_hero_puck", {
         [AB[2]] = { ability = "puck_waning_rift", role = "hard_disable" },
         [AB[3]] = { ability = "puck_phase_shift", role = "channel_start" },  -- (draft)
-        [AB[4]] = { ability = "puck_dream_coil", role = "hard_disable" },
+        [AB[5]] = { ability = "puck_dream_coil", role = "hard_disable" },
     })
     -- pudge
     -- v6.15.250: Dismember is unit-target (Pudge selects Sniper by
@@ -8597,15 +9333,15 @@ local function register_anim_maps()
     -- to target and attacks; no aim. Smoke Screen is POINT-AOE silence +
     -- miss chance (anim catches the placement).
     Anim.RegisterMap("npc_dota_hero_riki", {
-        [AB[1]] = { ability = "riki_blink_strike", role = "gap_close", instant_target = true },
-        [AB[2]] = { ability = "riki_smoke_screen", role = "hard_disable" },
-        [AB[3]] = { ability = "riki_tricks_of_the_trade", role = "channel_start" },  -- (draft)
+        [AB[2]] = { ability = "riki_blink_strike", role = "gap_close", instant_target = true },
+        [AB[1]] = { ability = "riki_smoke_screen", role = "hard_disable" },
+        [AB[4]] = { ability = "riki_tricks_of_the_trade", role = "channel_start" },  -- (draft)
     })
     -- ringmaster
     Anim.RegisterMap("npc_dota_hero_ringmaster", {
         [AB[1]] = { ability = "ringmaster_tame_the_beasts", role = "channel_start" },  -- (draft)
-        [AB[3]] = { ability = "ringmaster_impalement", role = "hard_disable" },
-        [AB[4]] = { ability = "ringmaster_wheel", role = "hard_disable" },
+        [AB[6]] = { ability = "ringmaster_impalement", role = "hard_disable" },
+        [AB[5]] = { ability = "ringmaster_wheel", role = "hard_disable" },
     })
     -- rubick (v6.15.258 zero-coverage fill)
     Anim.RegisterMap("npc_dota_hero_rubick", {
@@ -8619,7 +9355,7 @@ local function register_anim_maps()
     -- shadow_demon
     Anim.RegisterMap("npc_dota_hero_shadow_demon", {
         [AB[1]] = { ability = "shadow_demon_disruption", role = "hard_disable" },
-        [AB[4]] = { ability = "shadow_demon_demonic_purge", role = "hard_disable" },
+        [AB[5]] = { ability = "shadow_demon_demonic_purge", role = "hard_disable" },
     })
     -- shadow_shaman
     Anim.RegisterMap("npc_dota_hero_shadow_shaman", {
@@ -8645,8 +9381,8 @@ local function register_anim_maps()
     -- Slithereen Crush is NO_TARGET AoE stun around Slardar. Amplify
     -- Damage is UNIT_TARGET armor-debuff setup, instant cast.
     Anim.RegisterMap("npc_dota_hero_slardar", {
-        [AB[1]] = { ability = "slardar_slithereen_crush", role = "hard_disable" },
-        [AB[3]] = { ability = "slardar_amplify_damage", role = "hard_disable", instant_target = true },
+        [AB[2]] = { ability = "slardar_slithereen_crush", role = "hard_disable" },
+        [AB[4]] = { ability = "slardar_amplify_damage", role = "hard_disable", instant_target = true },
     })
     -- slark
     Anim.RegisterMap("npc_dota_hero_slark", {
@@ -8700,7 +9436,7 @@ local function register_anim_maps()
     })
     -- treant
     Anim.RegisterMap("npc_dota_hero_treant", {
-        [AB[4]] = { ability = "treant_overgrowth", role = "hard_disable" },
+        [AB[5]] = { ability = "treant_overgrowth", role = "hard_disable" },
     })
     -- troll_warlord (v6.15.268 zero-coverage fill)
     -- Whirling Axes Ranged is UNIT_TARGET POINT IGNORE_BACKSWING -- Troll
@@ -8726,7 +9462,7 @@ local function register_anim_maps()
     -- Soul Assumption is UNIT_TARGET burst (high damage if Visage has
     -- charged souls). Both bypass facing gate via instant_target.
     Anim.RegisterMap("npc_dota_hero_visage", {
-        [AB[1]] = { ability = "visage_grave_chill", role = "hard_disable", instant_target = true },
+        [AB[3]] = { ability = "visage_grave_chill", role = "hard_disable", instant_target = true },
         [AB[2]] = { ability = "visage_soul_assumption", role = "ult_burst", instant_target = true },
     })
     -- vengefulspirit (existing)
@@ -8736,7 +9472,7 @@ local function register_anim_maps()
     -- void_spirit
     Anim.RegisterMap("npc_dota_hero_void_spirit", {
         [AB[1]] = { ability = "void_spirit_aether_remnant", role = "hard_disable" },
-        [AB[4]] = { ability = "void_spirit_astral_step", role = "gap_close" },
+        [AB[2]] = { ability = "void_spirit_astral_step", role = "gap_close" },
     })
     -- warlock
     Anim.RegisterMap("npc_dota_hero_warlock", {
@@ -8758,7 +9494,7 @@ local function register_anim_maps()
     -- zuus
     Anim.RegisterMap("npc_dota_hero_zuus", {
         [AB[2]] = { ability = "zuus_lightning_bolt", role = "ult_burst" },
-        [AB[4]] = { ability = "zuus_thundergods_wrath", role = "ult_burst" },
+        [AB[5]] = { ability = "zuus_thundergods_wrath", role = "ult_burst" },
     })
 
     -- Subscribe to role events
@@ -8808,8 +9544,8 @@ local callbacks = {}
 
 -- v0.5.12: PE-01 (Kinetic Field walk-into poll) REMOVED per user direction.
 -- Lina has no grenade-equivalent push-out counter; KF entry is covered by
--- PE-04's LINA_SAVE_OVERRIDES entry for modifier_disruptor_kinetic_field_remnant
--- (chain: WW > Eul > Force > Pike) via the OnModifierCreate path. The
+-- PE-04's LINA_SAVE_OVERRIDES entry for modifier_disruptor_kinetic_field
+-- (v0.5.118 chain: WW > BKB > Pike) via the OnModifierCreate path. The
 -- per-tick walk-into poll was a Sniper-specific optimisation (grenade pushes
 -- Sniper OUT of the field) and is not the right defensive idiom for Lina's
 -- displacement saves. If Lina ever needs the walk-into case (existing field
@@ -9414,7 +10150,7 @@ local function handle_lotus_first(npc, modifier, mod_name, is_self)
     -- targeted_burst chain leads with item_lotus_orb); the arming branch
     -- just gates WHEN the save fires. lina_laguna_blade self-mirror skip:
     -- if the caster is OUR Lina (Rubick spell-steal mirror, Morphling
-    -- adaptive-strike echo), no save makes sense -- our own cast resolved
+    -- adaptive-strike echo), no save makes sense - our own cast resolved
     -- already. Fall through to the legacy lotus_first path in that case.
     local cp_entry_lw = CAST_POINT_THREATS[mod_name]
     local laguna_self_mirror = (mod_name == "modifier_lina_laguna_blade"
@@ -9455,7 +10191,7 @@ local function handle_lotus_first(npc, modifier, mod_name, is_self)
     -- to stop; the armed_threats_tick lotus_pending branch will fire Lotus the
     -- moment it readies and stamp dedup then. Note: BUG-3's CAST_POINT_THREATS
     -- arming runs BEFORE the dedup check above; for LOTUS_WORTHY ∩ CAST_POINT
-    -- intersection (Laguna, Finger) BUG-3 wins and this branch is unreachable --
+    -- intersection (Laguna, Finger) BUG-3 wins and this branch is unreachable -
     -- intentional, castpt arming gives a more precise fire moment.
     if lotus_defer_if_close(mod_name, caster_lw) then
         return true
@@ -9545,7 +10281,7 @@ local function handle_threat_on_self(npc, modifier, mod_name, is_self)
     -- armed_threats_tick can fire the save within the residual window.
     -- lina_laguna_blade self-mirror skip mirrors handle_lotus_first's
     -- guard: if OUR Lina is the caster (Rubick mirror, etc.), no save
-    -- makes sense -- fall through so the legacy try_save_self path runs
+    -- makes sense - fall through so the legacy try_save_self path runs
     -- (which will no-op for self-cast via the dispatcher's own guards).
     local cp_entry_ts = CAST_POINT_THREATS[mod_name]
     local cp_caster = cp_entry_ts and Modifier.GetCaster(modifier) or nil
@@ -9647,6 +10383,11 @@ function callbacks.OnModifierCreate(npc, modifier)
             state.armed_threats["bara_charge"] = { caster = npc,
                 ability = "spirit_breaker_charge_of_darkness",
                 threat_mod = "modifier_spirit_breaker_charge_of_darkness",
+                -- v0.5.114: armed_t anchors the ramp clock. The modifier
+                -- appears at charge START, so (now - armed_t) = wind-up
+                -- elapsed, which the precise ramp model needs (remaining
+                -- ramp = windup_time - elapsed; see state.bara_charge_elapsed).
+                armed_t = now(),
                 eta_speed = 600, eta_trigger = 0.8, fired = false }
         end
     elseif mod_name == "modifier_tusk_snowball_movement"
@@ -9660,6 +10401,30 @@ function callbacks.OnModifierCreate(npc, modifier)
                 ability = "tusk_snowball",
                 threat_mod = "modifier_tusk_snowball_movement",
                 eta_speed = 1200, eta_trigger = 0.5, fired = false }
+        end
+    elseif mod_name == "modifier_primal_beast_onslaught_movement_adjustable"
+       and Target.IsEnemyHero and Target.IsEnemyHero(npc, state.self_npc) then
+        -- v0.5.128.1: Primal Beast Onslaught. Onslaught STUNS on impact (KV stun
+        -- 0.7/1/1.3/1.6) so a reactive save is impossible (the knockback +
+        -- modifier_stunned land together -> Lina stunned before any chain casts;
+        -- both logged threat_unrecognized). User: "WW is instant so it should be
+        -- used by proximity like bara charge." So ARM on the DASH modifier (this
+        -- one spans the charge, the bara-analog -- the windup modifier ends
+        -- before the dash) and fire WW by PROXIMITY via armed_threats_tick. WW is
+        -- an instant cast, so firing as the charging Primal closes in lifts Lina
+        -- airborne in time; the eta gate also gates aim for free (if the dash
+        -- brings him close the eta drops and fires; if he charges away it never
+        -- does). eta_speed = KV charge_speed 1200; eta_trigger 0.4 -> fire ~480u
+        -- out (same effective proximity as bara's 0.8 @ 600). Resolves via
+        -- ANIM_SAVE_OVERRIDES["primal_beast_onslaught"] -> CH.PRIMAL_ONSLAUGHT.
+        local existing = state.armed_threats["primal_onslaught"]
+        if not existing or existing.caster ~= npc then
+            tlog(1, "primal_onslaught_armed", { caster = uname(npc) })
+            state.modcreate_counter = state.modcreate_counter + 1
+            state.armed_threats["primal_onslaught"] = { caster = npc,
+                ability = "primal_beast_onslaught",
+                threat_mod = "modifier_primal_beast_onslaught_movement_adjustable",
+                eta_speed = 1200, eta_trigger = 0.4, fired = false }
         end
     end
 end
@@ -10033,6 +10798,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.108.2 (committed-attacker double-save guard; PA blink fired W + Pike). The v0.5.108.1 demo showed a PA Phantom Strike drawing TWO saves on one blink-in: W via the committed-attacker melee chain (committed_attacker_melee @30.9s) AND Pike via the instant_blink armed entry (instant_blink:phantom_strike @31.1s). Two separate systems with DIFFERENT threat_mods (lina_committed_attacker_melee vs modifier_phantom_assassin_phantom_strike_target), so the dispatcher per-(target, mod, caster) lock never deduped them. PRE-EXISTING (both paths existed in v0.5.107; Pike crashing in v0.5.108 briefly hid it, v0.5.108.1 re-enabled Pike so it resurfaced) -- NOT a lift bug. Fix (Lina.lua scan_and_arm_committed_attackers): skip the committed-attacker dispatch when the caster ALREADY has an active armed spell-threat entry (instant-blink / charge / channel / cast-point) -- the committed-attacker is the FALLBACK for plain auto-attackers with no spell (v0.5.45 intent), so when the armed path already tracks this caster it owns the save. The instant_blink arms BEFORE the committed scan (anim_gap_close @1201 -> instant_blink_armed @1202 -> committed_attacker_armed @1216), so the guard catches it; the reverse order self-resolves because a gap-closer's displacement save pushes the caster out of the 700u melee gate. New tlog committed_skip_armed (lvl 3). The item-saves LIFT is now parity-clean (v0.5.108.1 demo confirmed 11/12 items + the Pike fix; this guard fixes a pre-existing dispatch overlap). lib/item_saves.lua unchanged from v0.5.108.1. Verify on next demo: PA blink -> ONE save (the blink-path Pike), NO committed-attacker W on the same blink; a plain auto-attacker with no spell still gets the committed W.")
+LOG:info("Lina brain v0.5.131 (WW post-move STOPS when the cyclone ends -- fix the move order lingering long after WW): the v0.5.129/130 demo found the WW post-move MOVE order still active long after the airborne ended -- Lina dragged across the ground under brain control. Root cause (lib/escape): Escape.PostAirborneMoveTick re-issued MOVE every ~0.1s until arrival-within-100u OR the 7s deadline; the v0.5.129 recompute makes the dest DRIFT (it tracks the moving threat) so Lina rarely lands within 100u and the loop ran to the 7s deadline (log: ww_post_move_expired x2, 226 re-issues across the match). Fix: for a moves_during_airborne save (WW), STOP the instant the airborne modifier (modifier_wind_waker) ends -- the reposition belongs to the cyclone window; after it, hand control back so the normal escape/combo logic resumes. New ww_post_move_landed tlog. Bounds the brain-forced move to WW's ~2.5s instead of 7s. Eul (moves_during_airborne=false) is unchanged (it cannot move while airborne, so its single post-airborne reposition still fires). lib/escape only; Sniper unaffected (no post-move loop); Force/Pike (turn-then-push, 0.7s-bounded) and Blink (one-shot) never had this. luac clean; offline 370/370. DEMO-PENDING.")
 
 return callbacks

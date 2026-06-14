@@ -688,7 +688,7 @@ LINA_SAVE_OVERRIDES["modifier_sniper_assassinate"] = {
 -- runtime-add to LOTUS_WORTHY_INCOMING is deleted: the new arming branch in
 -- handle_threat_on_self fires the save AT END of cast point via the chain head's
 -- SAVE_ETA_TRIGGER, which is strictly better than the previous lotus-first
--- snap-fire at modifier-create. LINA_SAVE_OVERRIDES entry retained - consulted
+-- snap-fire at modifier-create. LINA_SAVE_OVERRIDES entry retained -- consulted
 -- by ResolveSaveOrder when the armed entry's category=targeted_burst routes
 -- through the dispatcher.
 
@@ -805,13 +805,17 @@ CH.BANE_GRIP        = {
     "item_black_king_bar",
 }
 CH.PUGNA_DRAIN      = {
-    -- Force > Pike-self > Manta > WW (user spec). Pugna Life Drain tether
-    -- 1100u (lib/threat_data line 335; Sniper noted 1300u, take the lib value).
-    -- Force/Pike push 600/425u -- alone insufficient vs 1100u, but Pugna typically
-    -- channels from inside that range. SaveCounters knows displacement_far /
-    -- displacement_blink work; authoritative bypass skips that gate anyway so
-    -- Lina commits to displacement-first per user directive. Manta as status
-    -- dispel pops the channel link; WW as the heavy backstop.
+    -- v0.5.132: W (lina_w_anti_gap) HEAD added per the W-interrupt design
+    -- (Phase 1c). Pugna Life Drain is a magical CHANNEL (Liquipedia 2026-06-14:
+    -- up to 10s, 0.25s ticks; does NOT disable Lina; cast range 700u, link
+    -- breaks at 900u). Stunning Pugna interrupts the channel AND sets up a
+    -- Laguna kill, so W is the best head (aim = catalog impact_pos=caster ->
+    -- stuns Pugna). When W is on CD: Force > Pike-self break the tether by
+    -- distance (700u cast + 600/425u self-push exceeds the 900u link-break),
+    -- Manta status-dispel pops the link, WW as the heavy backstop. SaveCounters
+    -- knows displacement_far / displacement_blink work; authoritative bypass
+    -- skips that gate anyway so Lina commits to W-then-displacement.
+    "lina_w_anti_gap",
     "item_force_staff",
     "item_hurricane_pike",
     "item_manta",
@@ -847,6 +851,61 @@ CH.DISRUPTOR_KFR    = {
     "item_hurricane_pike",
 }
 
+-- v0.5.132 W-interrupt defense (Phase 1): two NEW W-head chains for
+-- interruptible AoE casts where (a) stunning/cancelling the caster stops the
+-- threat AND (b) Lina is NOT self-disabled, so she is free to cast W.
+-- Mechanics Liquipedia-verified 2026-06-14. W = point-AoE stun; it hits the
+-- caster regardless of vision (predict_target_pos last-known pos) and the aim
+-- resolves to the caster via the lib catalog (THREAT_ARRIVAL_TIMING
+-- impact_pos="caster") -- the W_aim_at_caster_mods entries are the belt-and-
+-- suspenders fallback, matching the WD Death Ward precedent (CH.WD_DEATH_WARD).
+--
+-- CM Freezing Field (Phase 1a): magical CHANNEL, up to 10s, 810u field radius
+-- (explosions 195-785u). Stun/silence on CM ends the channel; does NOT disable
+-- Lina. W HEAD interrupts (saves the whole team -- W still lands on CM's
+-- last-known position when she channels from fog). When W is on CD: Blink
+-- (1200u) leaves the 810u field, BKB magic-immunes the explosions, Force/Pike
+-- push toward the edge, WW/Eul airborne-dodge a 2.5s slice of the ticks.
+CH.CM_FREEZING_FIELD = {
+    "lina_w_anti_gap",
+    "item_blink",
+    "item_black_king_bar",
+    "item_force_staff",
+    "item_hurricane_pike",
+    "item_wind_waker",
+    "item_cyclone",
+}
+-- SK Epicenter (Phase 1b): NOT a channel -- a 2.0s CAST POINT (wind-up) before
+-- 12-20 magical pulses over 6s (radius 450 -> ~710). Liquipedia: a stun/silence
+-- DURING the 2s cast point prevents it executing; once pulses begin nothing
+-- stops them. SK is already cast-point-armed (CAST_POINT_THREATS cp_default
+-- 2.0) so the armed tick fires the chain head when eta <= SAVE_ETA_TRIGGER(W)
+-- 1.20 -> W lands ~1.9s, inside the 2.0s wind-up = cancels Epicenter before any
+-- pulse (TIGHT; the demo is the gate for whether W lands in time). W HEAD; else
+-- WW/Eul ride a 2.5s slice of the ~6s pulses, Blink leaves the growing radius,
+-- Force/Pike partial, BKB magic-immunes the pulses.
+CH.SK_EPICENTER = {
+    "lina_w_anti_gap",
+    "item_blink",
+    "item_wind_waker",
+    "item_cyclone",
+    "item_force_staff",
+    "item_hurricane_pike",
+    "item_black_king_bar",
+}
+-- v0.5.133.1 (Phase 2 fix): a W-ONLY chain for the ally/team channel interrupt.
+-- The single-target ally channels (Bane Grip etc.) already have item self-save
+-- chains keyed on their real modifier (CH.BANE_GRIP = WW/Manta/...), and those
+-- items are self-casts that CANNOT save an ally -- so dispatching the real mod
+-- resolved to the wrong (item) chain and fell to no_effective. The ally
+-- interrupt's only useful action is W on the caster, so it dispatches a
+-- SYNTHETIC mod ("lina_ally_w_interrupt") that maps here; aim still targets the
+-- passed caster via W_aim_at_caster_mods. NOT shared with the self-save chains
+-- (those keep their items; W as a self head would no-op while Lina is disabled).
+CH.ALLY_W_INTERRUPT = {
+    "lina_w_anti_gap",
+}
+
 -- v0.5.17 Track 1: expose chain tables for the in-Brain test harness
 -- (state.tests.*). The chain locals (CH.PUDGE_DISMEMBER, etc.) are
 -- module-locals by design; this is the test-only read handle, NOT a
@@ -867,6 +926,8 @@ state.lina_chains = {
     beastmaster_pr  = CH.BEASTMASTER_PR,
     tide_ravage     = CH.TIDE_RAVAGE,
     primal_onslaught = CH.PRIMAL_ONSLAUGHT,  -- v0.5.128
+    cm_freezing_field = CH.CM_FREEZING_FIELD, -- v0.5.132
+    sk_epicenter      = CH.SK_EPICENTER,      -- v0.5.132
 }
 
 -- v0.5.47 Phase 1: WD Death Ward + Underlord Pit of Malice chains. Both
@@ -1021,6 +1082,14 @@ LINA_SAVE_OVERRIDES["modifier_legion_commander_duel"]           = CH.LEGION_DUEL
 LINA_SAVE_OVERRIDES["modifier_disruptor_kinetic_field"]         = CH.DISRUPTOR_KFR  -- v0.5.118: REAL modifier name. v0.5.116.1 renamed the lib (_remnant -> _kinetic_field) but missed this override key (+ the eta resolver below + the anim override), so the override never matched and KF fell through to the axis (composed -> Pike, which the user flagged as the wrong counter). Now matches -> fires WW/BKB/Pike.
 LINA_SAVE_OVERRIDES["modifier_witch_doctor_death_ward"]         = CH.WD_DEATH_WARD  -- v0.5.47
 LINA_SAVE_OVERRIDES["modifier_abyssal_underlord_pit_of_malice_ensare"] = CH.UNDERLORD_PIT  -- v0.5.47
+-- v0.5.132 W-interrupt defense (Phase 1): W-head chains for two interruptible
+-- AoE casts (CM Freezing Field channel; SK Epicenter 2s cast point). Pugna Life
+-- Drain reuses the existing CH.PUGNA_DRAIN (W prepended above, L807).
+LINA_SAVE_OVERRIDES["modifier_crystal_maiden_freezing_field"]   = CH.CM_FREEZING_FIELD
+LINA_SAVE_OVERRIDES["modifier_sand_king_epicenter"]             = CH.SK_EPICENTER
+-- v0.5.133.1 (Phase 2 fix): synthetic mod for the ally/team W-interrupt -> the
+-- W-only chain. Real channel mods keep their own (self-save item) chains.
+LINA_SAVE_OVERRIDES["lina_ally_w_interrupt"]                    = CH.ALLY_W_INTERRUPT
 -- v0.5.71 Phase 4 slice 6 high-impact ult overrides:
 LINA_SAVE_OVERRIDES["modifier_doom_bringer_doom"]                = CH.DOOM
 LINA_SAVE_OVERRIDES["modifier_magnataur_reverse_polarity_stun"]  = CH.MAGNUS_RP
@@ -1101,6 +1170,7 @@ K.LINA_ATTACK_ENGAGE_RADIUS      = 700  -- MELEE commit radius (Sniper parity; c
 -- by the per-attacker gate).
 K.LINA_ATTACK_ENGAGE_RADIUS_RANGED = 1100
 K.LINA_COMMITTED_ATTACKER_RETREAT_BUFFER = 200  -- attacker further than 700+200=900 = released
+K.LINA_ENIGMA_BH_RADIUS = 420  -- v0.5.133: Liquipedia 2026-06-14, Black Hole inner effect (pull+disable) radius; Phase 2 team-save counts allies inside this
 -- v0.5.113.1 introduced this as a 0.17s blanket against charge-acceleration
 -- model error. v0.5.114 (user: "instead of using a fixed value look for
 -- bara acceleration ramp on liquipedia ... with this we can do a precise
@@ -1236,10 +1306,62 @@ state.W_skip_too_late_mods          = state.W_skip_too_late_mods or {}
 -- except interruptible channels.
 state.W_aim_at_caster_mods          = state.W_aim_at_caster_mods or {
     modifier_witch_doctor_death_ward = true,
-    -- Future interruptible channels to consider:
-    -- modifier_pugna_life_drain        (already has WW-first chain),
-    -- modifier_shadow_shaman_shackles,
-    -- modifier_enigma_black_hole_pull.
+    -- v0.5.132 W-interrupt defense (Phase 1): aim W at the caster for these
+    -- interruptible casts. NOTE: the lib catalog (THREAT_ARRIVAL_TIMING
+    -- impact_pos="caster") already resolves the caster aim for all three, so
+    -- these are the belt-and-suspenders fallback (matching the WD precedent).
+    modifier_pugna_life_drain              = true,
+    modifier_crystal_maiden_freezing_field = true,
+    modifier_sand_king_epicenter           = true,
+    -- v0.5.133 (Phase 2): aim W at the caster for the ally/team channel
+    -- interrupts. Bane/Enigma are in the impact_pos="caster" catalog already;
+    -- pudge_dismember_pull / shackles / sinister_gaze are NOT, so the allowlist
+    -- guarantees aim=caster_origin for them.
+    modifier_bane_fiends_grip              = true,
+    modifier_pudge_dismember_pull          = true,
+    modifier_shadow_shaman_shackles        = true,
+    modifier_lich_sinister_gaze            = true,
+    modifier_enigma_black_hole             = true,
+    -- v0.5.133.1: the synthetic ally-interrupt mod carries the caster aim (the
+    -- dispatch passes threat_caster; this makes aim_via=caster_origin).
+    lina_ally_w_interrupt                  = true,
+}
+
+-- v0.5.132.1: curated caster-side channel modifiers that the modifier-create
+-- path (handle_caster_channel_interrupt) routes to the W interrupt when they
+-- land on an enemy hero. This is the demo fix for CM Freezing Field: the anim
+-- channel_start path bails on its target_self facing gate for a self-PBAoE
+-- channel, so the modifier-create (which fires regardless of facing/anim, and
+-- lands on the CM hero per modseen) is the reliable trigger. v0.5.132.2: WD
+-- Death Ward is ALSO caught here -- its modifier lands on the WARD unit (a
+-- visible summon), and handle_caster_channel_interrupt resolves the channeler
+-- via Modifier.GetCaster, so W interrupts WD even when he channels from
+-- invisibility (the visible ward's create event reaches us). The chain +
+-- caster aim come from LINA_SAVE_OVERRIDES + the THREAT_ARRIVAL_TIMING
+-- impact_pos="caster" catalog, exactly as on_channel_start consumes them. The
+-- defense_dispatcher lock + Dedup coalesce this with the anim path (single-spend).
+state.LINA_CASTER_CHANNEL_W_INTERRUPT = state.LINA_CASTER_CHANNEL_W_INTERRUPT or {
+    modifier_crystal_maiden_freezing_field = true,
+    modifier_witch_doctor_death_ward       = true,
+}
+
+-- v0.5.133 (Phase 2): curated victim-side modifiers for single-target ally
+-- channels. When one lands on an ALLY hero, handle_ally_channel_interrupt
+-- resolves the enemy caster (Modifier.GetCaster) and W-interrupts to free the
+-- ally. All four are lib-catalogued (THREATS_ON_SELF / ABILITY_TO_THREAT) and
+-- land on the VICTIM (for Pudge the victim modifier is _pull, not the base).
+state.LINA_ALLY_CHANNEL_INTERRUPT = state.LINA_ALLY_CHANNEL_INTERRUPT or {
+    modifier_bane_fiends_grip       = true,
+    modifier_pudge_dismember_pull   = true,
+    modifier_shadow_shaman_shackles = true,
+    modifier_lich_sinister_gaze     = true,
+    -- v0.5.133.2 (user request): Storm Spirit Electric Vortex. NOTE: NOT a
+    -- channel -- Liquipedia 2026-06-14 confirms stunning SS does NOT cancel the
+    -- pull (the debuff persists independently), so W does NOT free the ally.
+    -- Added on a PEEL/PUNISH rationale: SS dives the ally (Ball Lightning ->
+    -- vortex), so W-stunning SS interrupts his follow-up burst + sets up a kill
+    -- on the diving SS. Same dispatch path (W aimed at SS via the synthetic mod).
+    modifier_storm_spirit_electric_vortex_pull = true,
 }
 
 -- v0.5.112 (#1 W-lead unification): ONE source of truth for the defensive
@@ -1735,6 +1857,12 @@ state.ANIM_SAVE_OVERRIDES["bane_fiends_grip"]        = CH.BANE_GRIP
 state.ANIM_SAVE_OVERRIDES["pugna_life_drain"]        = CH.PUGNA_DRAIN
 state.ANIM_SAVE_OVERRIDES["legion_commander_duel"]   = CH.LEGION_DUEL
 state.ANIM_SAVE_OVERRIDES["disruptor_kinetic_field"] = CH.DISRUPTOR_KFR
+-- v0.5.132 W-interrupt (Phase 1): ability-name keys (KV-stable) for the
+-- anim/cast-start route. SK Epicenter's cast-point arming already routes via
+-- LINA_SAVE_OVERRIDES; these are the belt-and-suspenders anim keys. (Pugna's
+-- pugna_life_drain anim key already exists above -> CH.PUGNA_DRAIN, now W-head.)
+state.ANIM_SAVE_OVERRIDES["crystal_maiden_freezing_field"] = CH.CM_FREEZING_FIELD
+state.ANIM_SAVE_OVERRIDES["sandking_epicenter"]            = CH.SK_EPICENTER
 
 -- v0.5.2: Hero-side threat entries the lib does not cover. The self path
 -- (OnModifierCreate is_self branch, ~line 2860) gates on THREATS_ON_SELF; if a
@@ -2096,7 +2224,7 @@ local SAVE_FIRE = {
     },
     -- HERO-SPECIFIC: W (light_strike_array) anti-gap arrival stun.
     -- v0.5.44 (DEFENSE_PLAN.md sec 2.1): W has 1.1s prep (0.6 cast point +
-    -- 0.5 delay) + 225 AoE + 1.6s stun. Design audit D1 surfaced 4 high-
+    -- 0.5 delay) + 225 AoE + 1.6s stun. Workflow audit D1 surfaced 4 high-
     -- viability targets (Bara Charge, Bara Nether Strike, Tusk Snowball,
     -- MK Primal Spring) and 2 medium (Storm BL landing, Ember Remnant
     -- arrival). All 4 high-viability cases land AT Lina position, so aim
@@ -4103,7 +4231,7 @@ local function armed_threats_tick()
                     end
                     if should_fire then
                         entry._cp_t = cp_remaining
-                        -- eta arg is 0 for cp entries - the cp_t field in
+                        -- eta arg is 0 for cp entries -- the cp_t field in
                         -- the armed_threat_fire tlog carries the meaningful
                         -- timing signal. via=cp_save_dist / cp_eta_trigger
                         -- distinguishes the path from homing eta_trigger.
@@ -4624,7 +4752,7 @@ end
 local function on_hard_disable(ev)
     if not ev.target_self then return end
     if not is_threat_caster(ev) then return end
-    -- v0.5.39 BUG-3: cast-point arming via the anim path. PRIMARY entry -
+    -- v0.5.39 BUG-3: cast-point arming via the anim path. PRIMARY entry --
     -- anim fires at cast-start (true pre-cast window), whereas
     -- OnModifierCreate fires after the modifier lands (catch-up only).
     -- If ev.ability_name maps to a CAST_POINT_THREATS entry, ARM and bail;
@@ -7748,7 +7876,7 @@ state.tests["A9_pudge_chain_order"] = {
 -- v0.5.82 quality: contract / no-throw smoke test for the v0.5.76-78 lib-alias
 -- surface (fog + escape + farm). Drives each alias with state.self_npc = nil
 -- and asserts the documented return shape WITHOUT erroring -- exactly the class
--- of nil-deref / shape-divergence the optimization pass flagged. Mock-driven:
+-- of nil-deref / shape-divergence the optimization workflow flagged. Mock-driven:
 -- nils self_npc via the cleanup stack, restores after. Complements the offline
 -- tools/run_tests.lua pure-lib tests by covering the Lina-side glue (aliases +
 -- _fog_opts + arg passing).
@@ -8989,7 +9117,7 @@ local function register_anim_maps()
     })
     -- crystal_maiden
     Anim.RegisterMap("npc_dota_hero_crystal_maiden", {
-        [AB[4]] = { ability = "crystal_maiden_freezing_field", role = "channel_start" },
+        [AB[4]] = { ability = "crystal_maiden_freezing_field", role = "channel_start", instant_target = true },  -- v0.5.132.1: instant_target bypasses on_channel_start's target_self facing gate (a self-PBAoE channel never "aims" at Lina; the v0.5.132 demo showed CM FF logged modseen only and never dispatched). Belt-and-suspenders alongside the modifier-create path (handle_caster_channel_interrupt).
     })
     -- dark_seer (v6.15.268 zero-coverage fill)
     -- Vacuum is POINT-AOE pull. Anim catches the cast; chain dispatches
@@ -9350,7 +9478,7 @@ local function register_anim_maps()
     -- sand_king
     Anim.RegisterMap("npc_dota_hero_sand_king", {
         [AB[1]] = { ability = "sandking_burrowstrike", role = "hard_disable" },
-        [AB[4]] = { ability = "sandking_epicenter", role = "hard_disable" },
+        [AB[4]] = { ability = "sandking_epicenter", role = "hard_disable", instant_target = true },  -- v0.5.132.3: Epicenter is a no-target self-cast (the AoE expands from SK), so on_hard_disable's target_self facing gate was false and the cast-point arming never ran -- the v0.5.132 demo showed modseen modifier_sand_king_epicenter but NO dispatch. instant_target bypasses the gate so on_hard_disable arms the cast-point entry (cp 2.0) and the armed tick fires W (eta<=1.20 -> lands ~1.9s, inside the 2s wind-up). Burrowstrike (above) stays gated -- it IS aimed.
     })
     -- shadow_demon
     Anim.RegisterMap("npc_dota_hero_shadow_demon", {
@@ -9489,7 +9617,7 @@ local function register_anim_maps()
     })
     -- witch_doctor
     Anim.RegisterMap("npc_dota_hero_witch_doctor", {
-        [AB[4]] = { ability = "witch_doctor_death_ward", role = "channel_start" },
+        [AB[4]] = { ability = "witch_doctor_death_ward", role = "channel_start", instant_target = true },  -- v0.5.132.1: facing-independent (the v0.5.132 demo showed WD fired only when facing Lina). v0.5.132.2: the invisible-channel case is now ALSO covered by the modifier-create path -- modifier_witch_doctor_death_ward lands on the visible ward unit, and handle_caster_channel_interrupt resolves the WD hero via Modifier.GetCaster (demo-gated: assumes the ward's create event reaches the brain).
     })
     -- zuus
     Anim.RegisterMap("npc_dota_hero_zuus", {
@@ -9996,6 +10124,142 @@ local function handle_enemy_buff_threat(npc, modifier, mod_name)
     end
 end
 
+-- v0.5.132.1: caster-side channel-interrupt dispatch (the v0.5.132 demo fix for
+-- CM Freezing Field). on_channel_start (the anim path) only fires when the
+-- channel's cast animation is seen AND ev.target_self passes; a self-centered
+-- PBAoE channel (CM Freezing Field) fails the facing-based target_self gate, so
+-- the demo logged modseen only and never dispatched. The channel modifier DOES
+-- land on the caster (modseen-confirmed), so dispatch the W interrupt directly
+-- off the modifier-create when a curated caster-side channel modifier appears on
+-- an enemy hero -- facing- and anim-independent. The defense_dispatcher lock +
+-- Dedup coalesce this with the anim path (single-spend) for channels that ALSO
+-- fire on_channel_start (e.g. WD). LIMIT: a channeler invisible/fogged at cast
+-- emits no modifier-create to the brain, so it cannot be caught here either.
+local function handle_caster_channel_interrupt(npc, modifier, mod_name)
+    if not (state.LINA_CASTER_CHANNEL_W_INTERRUPT
+            and state.LINA_CASTER_CHANNEL_W_INTERRUPT[mod_name]) then return end
+    -- v0.5.132.2: resolve the CHANNELER hero. A self-applied channel (CM
+    -- Freezing Field) puts the modifier on the caster hero -> npc IS the
+    -- channeler. A summon-applied channel (WD Death Ward) puts the modifier on
+    -- the WARD unit -> the hero comes from Modifier.GetCaster. Resolving the
+    -- caster lets W interrupt WD even when he channels from INVISIBILITY: the
+    -- ward is visible (it attacks Lina) so its modifier-create reaches us, and
+    -- WD is rooted while channeling so his last-known position is accurate.
+    local caster = npc
+    if not (Target.IsEnemyHero and Target.IsEnemyHero(caster, state.self_npc)) then
+        caster = Modifier.GetCaster and Modifier.GetCaster(modifier)
+    end
+    if not (caster and Entity.IsEntity and Entity.IsEntity(caster)
+            and Target.IsEnemyHero and Target.IsEnemyHero(caster, state.self_npc)) then
+        return
+    end
+    if not (defense_enabled() and layer2_can_fire()) then return end
+    -- Dedup + dispatch keyed on the CASTER hero (not npc, which may be the
+    -- ward) so a re-applied ward modifier does not double-dispatch.
+    if Dedup.threat_already_responded(state.responded_threats, caster, mod_name) then return end
+    -- Mirror on_channel_start's Dispatch: caster-side channel, category_hint
+    -- channel_on_self, no anim-save key (arg7 nil) so ResolveSaveOrder matches
+    -- LINA_SAVE_OVERRIDES[mod_name] (hero_override); aim resolves to the caster
+    -- via the catalog impact_pos="caster" inside lina_w_anti_gap.fire.
+    defense_dispatcher:Dispatch("channel_" .. mod_name,
+                                mod_name, caster,
+                                state.self_npc, nil,
+                                "channel_on_self", nil, nil,
+                                record_save,
+                                { fs_shard_window = fs_shard_window_active() })
+end
+
+-- v0.5.133 (Phase 2): interrupt a channel locking a TEAMMATE / the team by
+-- W-stunning the caster. Sibling of handle_caster_channel_interrupt (Phase 1,
+-- self/AoE). PRIORITY (W_INTERRUPT_PHASE2_DESIGN.md sec 1): self-save > this >
+-- combo -- gated on "no self-threat armed" (self-first) but NOT on mid-combo
+-- (the interrupt PREEMPTS the combo, per user: these channels are a priority to
+-- stop, even more so in a teamfight). Aim resolves to the caster via the
+-- catalog impact_pos="caster" / W_aim_at_caster_mods.
+local function ally_interrupt_w_ready(caster)
+    -- Shared opportunistic gate. Self-first: any armed self-threat blocks the
+    -- ally interrupt so Lina handles her own situation first.
+    if not (defense_enabled() and layer2_can_fire()) then return false end
+    if not ability_ready("lina_light_strike_array") then return false end
+    if next(state.armed_threats) ~= nil then return false end
+    if not (caster and Entity.IsEntity and Entity.IsEntity(caster)
+            and Target.IsEnemyHero and Target.IsEnemyHero(caster, state.self_npc)) then
+        return false
+    end
+    -- Caster within W live cast range (issue_cast_position has no range gate, so
+    -- gate here to avoid walking Lina into the fight).
+    local wr = cast_range_of(ability("lina_light_strike_array"), FALLBACK_RANGES.W)
+    local d  = dist_to(caster)
+    if not (d and d <= wr) then return false end
+    return true
+end
+
+-- Count allied heroes within the Black Hole radius of Enigma. Returns
+-- (n_allies_excluding_lina, lina_caught). Positional (no dependency on the
+-- per-unit lift modifier name).
+local function count_allies_in_bh(enigma)
+    local me = state.self_npc
+    if not (me and enigma and Entity.GetAbsOrigin and Heroes and Heroes.InRadius
+            and Entity.GetTeamNum and Enum and Enum.TeamType) then return 0, false end
+    local epos = Entity.GetAbsOrigin(enigma)
+    if not epos then return 0, false end
+    local ok, list = pcall(Heroes.InRadius, epos, K.LINA_ENIGMA_BH_RADIUS,
+                           Entity.GetTeamNum(me), Enum.TeamType.TEAM_FRIEND)
+    if not ok or type(list) ~= "table" then return 0, false end
+    local n, lina_caught = 0, false
+    for _, h in ipairs(list) do
+        if h == me then
+            lina_caught = true
+        elseif Target.NotIllusion and Target.NotIllusion(h) then
+            n = n + 1
+        end
+    end
+    return n, lina_caught
+end
+
+local function handle_ally_channel_interrupt(npc, modifier, mod_name)
+    -- Sub-case A: single-target ally channel (victim-side modifier on an ally).
+    -- v0.5.133.1: dispatch the SYNTHETIC mod "lina_ally_w_interrupt" so the chain
+    -- is W-only (CH.ALLY_W_INTERRUPT); the real mod's own chain is the item
+    -- self-save (WW/Manta/...) which cannot save an ally. Aim still targets the
+    -- caster (threat_caster passed + the synthetic mod is in W_aim_at_caster_mods
+    -- -> aim_via=caster_origin).
+    if state.LINA_ALLY_CHANNEL_INTERRUPT[mod_name] then
+        if not (Target.IsAllyHero and Target.IsAllyHero(npc, state.self_npc)
+                and Target.NotIllusion and Target.NotIllusion(npc)) then return end
+        local caster = Modifier.GetCaster and Modifier.GetCaster(modifier)
+        if not ally_interrupt_w_ready(caster) then return end
+        if Dedup.threat_already_responded(state.responded_threats, caster, "lina_ally_w_interrupt") then return end
+        tlog(1, "ally_channel_interrupt", { case = "single_target", mod = mod_name,
+            ally = uname(npc), caster = uname(caster) })
+        defense_dispatcher:Dispatch("ally_channel_" .. mod_name, "lina_ally_w_interrupt", caster,
+                                    state.self_npc, nil, "channel_on_self", nil, nil,
+                                    record_save, { fs_shard_window = fs_shard_window_active() })
+        return
+    end
+    -- Sub-case B: Enigma Black Hole (positional team save). v0.5.133.1: the
+    -- channel modifier modifier_enigma_black_hole lands on a THINKER, not the
+    -- Enigma hero (the v0.5.133 demo saw no modseen for it), so trigger on the
+    -- victim-side modifier_enigma_black_hole_pull (lands on each caught unit) and
+    -- resolve Enigma via Modifier.GetCaster (the WD-ward pattern). W only if Lina
+    -- is FREE and 2+ allies caught; Lina caught -> her CH.ENIGMA_BH self-escape
+    -- owns it. The dispatcher lock collapses the per-victim re-triggers to one W.
+    if mod_name == "modifier_enigma_black_hole_pull" then
+        local enigma = Modifier.GetCaster and Modifier.GetCaster(modifier)
+        if not ally_interrupt_w_ready(enigma) then return end
+        local n_caught, lina_caught = count_allies_in_bh(enigma)
+        if lina_caught then return end
+        if n_caught < 2 then return end
+        if Dedup.threat_already_responded(state.responded_threats, enigma, "lina_ally_w_interrupt") then return end
+        tlog(1, "ally_channel_interrupt", { case = "enigma_bh", mod = mod_name,
+            caught = tostring(n_caught), caster = uname(enigma) })
+        defense_dispatcher:Dispatch("ally_channel_" .. mod_name, "lina_ally_w_interrupt", enigma,
+                                    state.self_npc, nil, "channel_on_self", nil, nil,
+                                    record_save, { fs_shard_window = fs_shard_window_active() })
+        return
+    end
+end
+
 local function handle_modseen_accumulator(npc, modifier, mod_name, is_self)
     -- v0.5.11 PE-06: incoming-threat catalog accumulator (port of Sniper S38
     -- state.seen_modifiers, Sniper.lua line ~9395 OnModifierCreate accumulator
@@ -10150,7 +10414,7 @@ local function handle_lotus_first(npc, modifier, mod_name, is_self)
     -- targeted_burst chain leads with item_lotus_orb); the arming branch
     -- just gates WHEN the save fires. lina_laguna_blade self-mirror skip:
     -- if the caster is OUR Lina (Rubick spell-steal mirror, Morphling
-    -- adaptive-strike echo), no save makes sense - our own cast resolved
+    -- adaptive-strike echo), no save makes sense -- our own cast resolved
     -- already. Fall through to the legacy lotus_first path in that case.
     local cp_entry_lw = CAST_POINT_THREATS[mod_name]
     local laguna_self_mirror = (mod_name == "modifier_lina_laguna_blade"
@@ -10191,7 +10455,7 @@ local function handle_lotus_first(npc, modifier, mod_name, is_self)
     -- to stop; the armed_threats_tick lotus_pending branch will fire Lotus the
     -- moment it readies and stamp dedup then. Note: BUG-3's CAST_POINT_THREATS
     -- arming runs BEFORE the dedup check above; for LOTUS_WORTHY ∩ CAST_POINT
-    -- intersection (Laguna, Finger) BUG-3 wins and this branch is unreachable -
+    -- intersection (Laguna, Finger) BUG-3 wins and this branch is unreachable --
     -- intentional, castpt arming gives a more precise fire moment.
     if lotus_defer_if_close(mod_name, caster_lw) then
         return true
@@ -10281,7 +10545,7 @@ local function handle_threat_on_self(npc, modifier, mod_name, is_self)
     -- armed_threats_tick can fire the save within the residual window.
     -- lina_laguna_blade self-mirror skip mirrors handle_lotus_first's
     -- guard: if OUR Lina is the caster (Rubick mirror, etc.), no save
-    -- makes sense - fall through so the legacy try_save_self path runs
+    -- makes sense -- fall through so the legacy try_save_self path runs
     -- (which will no-op for self-cast via the dispatcher's own guards).
     local cp_entry_ts = CAST_POINT_THREATS[mod_name]
     local cp_caster = cp_entry_ts and Modifier.GetCaster(modifier) or nil
@@ -10365,6 +10629,8 @@ function callbacks.OnModifierCreate(npc, modifier)
     local is_self = (npc == state.self_npc)
 
     handle_enemy_buff_threat(npc, modifier, mod_name)
+    handle_caster_channel_interrupt(npc, modifier, mod_name)  -- v0.5.132.1
+    handle_ally_channel_interrupt(npc, modifier, mod_name)    -- v0.5.133 Phase 2
     handle_modseen_accumulator(npc, modifier, mod_name, is_self)
     handle_ally_save(npc, modifier, mod_name, is_self)
     if handle_lotus_first(npc, modifier, mod_name, is_self) then return end
@@ -10798,6 +11064,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.131 (WW post-move STOPS when the cyclone ends -- fix the move order lingering long after WW): the v0.5.129/130 demo found the WW post-move MOVE order still active long after the airborne ended -- Lina dragged across the ground under brain control. Root cause (lib/escape): Escape.PostAirborneMoveTick re-issued MOVE every ~0.1s until arrival-within-100u OR the 7s deadline; the v0.5.129 recompute makes the dest DRIFT (it tracks the moving threat) so Lina rarely lands within 100u and the loop ran to the 7s deadline (log: ww_post_move_expired x2, 226 re-issues across the match). Fix: for a moves_during_airborne save (WW), STOP the instant the airborne modifier (modifier_wind_waker) ends -- the reposition belongs to the cyclone window; after it, hand control back so the normal escape/combo logic resumes. New ww_post_move_landed tlog. Bounds the brain-forced move to WW's ~2.5s instead of 7s. Eul (moves_during_airborne=false) is unchanged (it cannot move while airborne, so its single post-airborne reposition still fires). lib/escape only; Sniper unaffected (no post-move loop); Force/Pike (turn-then-push, 0.7s-bounded) and Blink (one-shot) never had this. luac clean; offline 370/370. DEMO-PENDING.")
+LOG:info("Lina brain v0.5.133.2 (Phase 2: add Storm Spirit Electric Vortex as a peel/punish): the v0.5.133.1 demo confirmed all the W-interrupts fire (Bane/Pudge/Lich single-target + Enigma BH caught=2, all aim=caster_origin). User: the only remaining case is SS Vortex (modifier_storm_spirit_electric_vortex_pull). Liquipedia 2026-06-14: Electric Vortex is NOT a channel -- stunning SS does NOT cancel the pull (the debuff persists), so W does NOT free the ally. Added anyway on a PEEL/PUNISH rationale (user-approved): SS dives the ally (Ball Lightning -> vortex), so W-stunning SS interrupts his follow-up burst + sets up a kill on the diving SS. One-line add to state.LINA_ALLY_CHANNEL_INTERRUPT; same dispatch path (W aimed at SS via the synthetic mod lina_ally_w_interrupt). Lina.lua only; libs untouched. luac clean; offline 370/370. DEMO-PENDING.")
 
 return callbacks

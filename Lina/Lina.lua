@@ -612,12 +612,41 @@ CH.GAP_CLOSE_SAVES = {
     "item_cyclone", "item_blink", "item_force_staff", "item_hurricane_pike",
     "lina_w_anti_gap",  -- v0.5.44 (DEFENSE_PLAN.md sec 2.1 + Q1): tail position; W fires only when all items above are on CD. High-viability targets: Bara Charge, Bara Nether Strike, Tusk Snowball, MK Primal Spring.
 }
+-- v0.5.147.x per-skill cast-poll save chains. SEPARATED per skill (user: a fast hook, a
+-- slow hook, and a cog-trap want genuinely different saves; keeping them distinct leaves
+-- room to tune each + benefits other heroes / future items). The lib owns the per-skill
+-- THREAT DATA (category / severity / counter facts); the hero owns the per-skill save
+-- ORDERING below. NO Glimmer (invis does not dodge a line) / NO BKB (does not stop a pull).
+--
+-- Pudge Meat Hook (line_projectile): INSTANT-FIRST. The demo put Pike/Force in a DEAD ZONE for
+-- the hook -- when it is far enough that the 600u push would help, you can just WALK out (you
+-- have time); when it is close enough that you cannot walk, the push is too short AND the
+-- turn-then-push is too slow (Lina stunned mid-cast). So drop them: Blink (instant, no turn,
+-- 1200u) breaks the line in the close case + fully dodges the pull; WW/Eul are the harm-negation
+-- fallback (they only negate dmg+stun, the pull still lands). NO W (stun, not an escape).
+CH.HOOK_INTERCEPT = {
+    "item_blink", "item_wind_waker", "item_cyclone",
+}
+-- Clockwerk Hookshot (fast 4000-6000): AIRBORNE / INSTANT only. The demo proved Pike/Force
+-- turn-then-push is too slow for the fast hook (the ~137deg turn-to-aim eats the lead and
+-- Lina is stunned mid-cast); WW (instant, no turn) reliably negates the stun. Pike/Force are
+-- DROPPED here -- they live under Power Cogs below.
+CH.CLOCKWERK_HOOKSHOT = {
+    "item_wind_waker", "item_cyclone", "item_blink",
+}
+-- Clockwerk Power Cogs (NO_TARGET trap, cogs_radius 215): WW/Eul EAT TIME safely (airborne
+-- invuln waits out the cog zap + knockback; Eul does not move in air but buys the window),
+-- Force/Pike PUSH OUT of the cog box. WW first (instant safe), then the displacement escape.
+CH.CLOCKWERK_COGS = {
+    "item_wind_waker", "item_force_staff", "item_hurricane_pike", "item_cyclone",
+}
 local LINA_SAVE_OVERRIDES = {}
 for _, m in ipairs({
     "modifier_phantom_assassin_phantom_strike",
     "modifier_phantom_assassin_phantom_strike_target",  -- v0.2.2: the ACTUAL modifier that lands (log-confirmed)
     "modifier_spirit_breaker_charge_of_darkness",
-    "modifier_slark_pounce",
+    -- v0.5.136.1: modifier_slark_pounce removed -> resolves the COMPOSED close_gap
+    -- chain (lib catalog drives selection; hero only injects W via CH.ABILITY_INJECTIONS).
     "modifier_tusk_snowball_movement",
     "modifier_queenofpain_blink",
     -- v0.5.126: Riki Blink Strike. Riki blinks behind Lina FROM INVISIBILITY,
@@ -641,7 +670,7 @@ end
 for _, ab in ipairs({
     "phantom_assassin_phantom_strike",
     "spirit_breaker_charge_of_darkness",
-    "slark_pounce",
+    -- v0.5.136.1: slark_pounce removed (composed close_gap; see above)
     "tusk_snowball",
     "queenofpain_blink",
 }) do
@@ -688,7 +717,7 @@ LINA_SAVE_OVERRIDES["modifier_sniper_assassinate"] = {
 -- runtime-add to LOTUS_WORTHY_INCOMING is deleted: the new arming branch in
 -- handle_threat_on_self fires the save AT END of cast point via the chain head's
 -- SAVE_ETA_TRIGGER, which is strictly better than the previous lotus-first
--- snap-fire at modifier-create. LINA_SAVE_OVERRIDES entry retained -- consulted
+-- snap-fire at modifier-create. LINA_SAVE_OVERRIDES entry retained - consulted
 -- by ResolveSaveOrder when the armed entry's category=targeted_burst routes
 -- through the dispatcher.
 
@@ -928,6 +957,10 @@ state.lina_chains = {
     primal_onslaught = CH.PRIMAL_ONSLAUGHT,  -- v0.5.128
     cm_freezing_field = CH.CM_FREEZING_FIELD, -- v0.5.132
     sk_epicenter      = CH.SK_EPICENTER,      -- v0.5.132
+    -- v0.5.147.x per-skill cast-poll chains (hooks + Power Cogs)
+    pudge_hook         = CH.HOOK_INTERCEPT,
+    clockwerk_hookshot = CH.CLOCKWERK_HOOKSHOT,
+    clockwerk_cogs     = CH.CLOCKWERK_COGS,
 }
 
 -- v0.5.47 Phase 1: WD Death Ward + Underlord Pit of Malice chains. Both
@@ -1081,6 +1114,15 @@ LINA_SAVE_OVERRIDES["modifier_pugna_life_drain"]                = CH.PUGNA_DRAIN
 LINA_SAVE_OVERRIDES["modifier_legion_commander_duel"]           = CH.LEGION_DUEL
 LINA_SAVE_OVERRIDES["modifier_disruptor_kinetic_field"]         = CH.DISRUPTOR_KFR  -- v0.5.118: REAL modifier name. v0.5.116.1 renamed the lib (_remnant -> _kinetic_field) but missed this override key (+ the eta resolver below + the anim override), so the override never matched and KF fell through to the axis (composed -> Pike, which the user flagged as the wrong counter). Now matches -> fires WW/BKB/Pike.
 LINA_SAVE_OVERRIDES["modifier_witch_doctor_death_ward"]         = CH.WD_DEATH_WARD  -- v0.5.47
+-- v0.5.147.x per-skill cast-poll routing (authoritative tier-2). The cast-poll tick dispatches
+-- these threat_mods; the v0.5.40 lock dedups vs any later reactive landing. SEPARATED per skill
+-- so each gets its proper save sequence (the lib data agrees: Pudge = line_projectile
+-- displacement, Hookshot = close_gap airborne, Cogs = trap). The cog mod is cataloged in the
+-- lib THREATS_ON_SELF so its reactive landing is recognized (no threat_unrecognized).
+LINA_SAVE_OVERRIDES["modifier_pudge_meat_hook"]                 = CH.HOOK_INTERCEPT       -- hook -> instant-first (Blink/WW/Eul; Pike/Force dropped, dead zone)
+LINA_SAVE_OVERRIDES["modifier_rattletrap_hookshot"]            = CH.CLOCKWERK_HOOKSHOT    -- fast hook -> WW/Eul/Blink (Pike too slow)
+LINA_SAVE_OVERRIDES["modifier_rattletrap_cog_marker"]          = CH.CLOCKWERK_COGS        -- cog trap (primary landing) -> WW/Force/Pike/Eul
+LINA_SAVE_OVERRIDES["modifier_rattletrap_cog_push"]            = CH.CLOCKWERK_COGS        -- cog contact knockback (sibling) -> same chain
 LINA_SAVE_OVERRIDES["modifier_abyssal_underlord_pit_of_malice_ensare"] = CH.UNDERLORD_PIT  -- v0.5.47
 -- v0.5.132 W-interrupt defense (Phase 1): W-head chains for two interruptible
 -- AoE casts (CM Freezing Field channel; SK Epicenter 2s cast point). Pugna Life
@@ -1896,6 +1938,11 @@ local LINA_EXTRA_THREATS = {
     -- CH.GAP_CLOSE_SAVES (the same escape chain as PA/Bara/Slark/Tusk/QoP).
     -- LATE save (fires after the strike lands) -- accepted per the design.
     modifier_riki_blinkstrike_slow = { role = "close_gap", save = "save", category = "close_gap" },
+    -- v0.5.147.x: Pudge Meat Hook lands on the victim as modifier_pudge_meat_hook but was
+    -- logging threat_unrecognized (no self chain). Recognize it -> reactive backup save
+    -- (the cast-poll tick is the PRE-impact primary; this + the v0.5.40 lock = single-spend).
+    -- LINA_SAVE_OVERRIDES routes it to the DISPLACEMENT-FIRST CH.HOOK_INTERCEPT.
+    modifier_pudge_meat_hook = { role = "close_gap", save = "save", category = "close_gap" },
 }
 
 -- v0.5.24 PERF-11: hoisted from OnModifierCreate is_self branch. These two
@@ -2224,7 +2271,7 @@ local SAVE_FIRE = {
     },
     -- HERO-SPECIFIC: W (light_strike_array) anti-gap arrival stun.
     -- v0.5.44 (DEFENSE_PLAN.md sec 2.1): W has 1.1s prep (0.6 cast point +
-    -- 0.5 delay) + 225 AoE + 1.6s stun. Workflow audit D1 surfaced 4 high-
+    -- 0.5 delay) + 225 AoE + 1.6s stun. Audit D1 surfaced 4 high-
     -- viability targets (Bara Charge, Bara Nether Strike, Tusk Snowball,
     -- MK Primal Spring) and 2 medium (Storm BL landing, Ember Remnant
     -- arrival). All 4 high-viability cases land AT Lina position, so aim
@@ -2272,6 +2319,19 @@ local SAVE_FIRE = {
                 return false
             end
             if NPC.IsChannellingAbility and NPC.IsChannellingAbility(me) then
+                -- Don't auto-W while Lina is channelling her OWN cast (TP scroll /
+                -- channeled item): the W would cancel it. v0.5.137.4: this now LOGS
+                -- (was silent). The v0.5.137.2 caster-interrupt BYPASS was reverted
+                -- -- the confirming demo proved NPC.IsChannellingAbility(me) is FALSE
+                -- for a Life-Drain VICTIM (chan=n), so this gate never blocks an
+                -- interrupt; the real Pugna bail was the menu toggle being off, not
+                -- this gate, and the bypass was speculative. Keep it LOGGED so a
+                -- future silent-bail hunt is a one-line grep, not three demos
+                -- ([[feedback_check_config_before_debugging]]).
+                tlog(2, "w_defensive_skip_channelling", {
+                    intent = tostring(intent or ""),
+                    mod    = tostring(threat_mod or "-"),
+                })
                 return false
             end
             local intent_s = tostring(intent or "")
@@ -2435,6 +2495,50 @@ local SAVE_FIRE = {
                                 mod      = tostring(threat_mod),
                             })
                             return false
+                        end
+                    elseif _g_kind == "leap" then
+                        -- v0.5.142: a fast leap (Huskar Life Break ~0.46s max at
+                        -- range 550 / speed 1200, Kez grapple, Slark pounce) often
+                        -- arrives in LESS than W's ~0.95s cast-to-detonation lead,
+                        -- so W lands AFTER the leap connects -- it stuns the caster
+                        -- post-landing but can't prevent the hit/slow (v0.5.140
+                        -- demo: Huskar _slow landed 3x, W stunned him late). When W
+                        -- cannot intercept in time (impact_t < W_LEAD), the caster
+                        -- is NOT combo-killable, AND an airborne self-save (WW/Eul)
+                        -- is ready to take over, STEP ASIDE so the chain falls to
+                        -- that airborne save (next in the airborne-first close_gap
+                        -- backbone), which fires instantly by proximity. The guards
+                        -- keep this never-worse: a killable caster KEEPS W (late
+                        -- stun still feeds the v0.5.137 capitalize kill), and with
+                        -- no airborne save ready W also stays (late stun beats no
+                        -- save). Doubles as the WW-dodge TEST vehicle -- the brain
+                        -- times the airborne save where a manual cast cannot
+                        -- (v0.5.141 demo: manual WW too tight for the leap window).
+                        -- If the demo shows the airborne save does NOT dodge Life
+                        -- Break, revert this + go displacement-first for leaps
+                        -- (Force/Pike/Blink = the Liquipedia-documented nullifiers:
+                        -- disable / force-move / distance-cancel Huskar).
+                        local W_LEAD = state.w_lead()
+                        if _g_impact_t < W_LEAD then
+                            local killable = state.combo_can_kill
+                                and _w_caster_for_gate
+                                and state.combo_can_kill(_w_caster_for_gate)
+                            local _ww  = NPCLib.item and NPCLib.item(me, "item_wind_waker")
+                            local _eul = NPCLib.item and NPCLib.item(me, "item_cyclone")
+                            local airborne_ready =
+                                (_ww  and Ability.IsReady and Ability.IsReady(_ww))
+                                or (_eul and Ability.IsReady and Ability.IsReady(_eul))
+                                or false
+                            if (not killable) and airborne_ready then
+                                tlog(2, "w_defensive_skip_window", {
+                                    impact_t = string.format("%.2f", _g_impact_t),
+                                    lower    = string.format("%.2f", W_LEAD),
+                                    kind     = _g_kind,
+                                    reason   = "leap_defer_airborne",
+                                    mod      = tostring(threat_mod),
+                                })
+                                return false
+                            end
                         end
                     end
                     -- channel_at_caster / cast_point_targeted: fall
@@ -2716,6 +2820,23 @@ local SAVE_FIRE = {
                 d_det  = d_at_det_dbg and string.format("%.0f", d_at_det_dbg) or nil,
                 speed  = eff_speed_dbg and string.format("%.0f", eff_speed_dbg) or nil,
             })
+            -- v0.5.137 W-capitalize: if this defensive W stuns a GAP-CLOSER
+            -- (close_gap category) or a COMMITTED attacker, stamp the window so
+            -- state.w_capitalize_tick can commit the combo on the stunned caster
+            -- IF it is killable. NOT for zones/channels/ally-interrupts (those
+            -- aim W at a caster we are not setting up to dive-kill). `caster` is
+            -- the stunned threat caster (the aim target); state.frame_t is live
+            -- (dispatch runs inside OnUpdateEx).
+            do
+                local is_gap = threat_mod and TD.CategoryOf
+                               and TD.CategoryOf(threat_mod) == "close_gap"
+                local is_committed = type(intent) == "string"
+                               and intent:find("committed_attacker", 1, true) ~= nil
+                if (is_gap or is_committed) and caster and Entity.IsEntity(caster) then
+                    state.w_capitalize_t      = state.frame_t
+                    state.w_capitalize_target = caster
+                end
+            end
             return issue_cast_position(intent, w, pos, "def")
         end,
     },
@@ -3807,8 +3928,8 @@ local SAVE_ETA_TRIGGER = {
 -- Keyed by save_name (matches SAVE_FIRE / SAVE_ETA_TRIGGER). Values in DOTA
 -- units; see per-entry rationale in v0.5.9 release notes.
 local SAVE_FIRE_DISTANCE = {
-    item_wind_waker         = 300,  -- v0.5.15 PT-01: bumped 150 -> 300. 150u was unreachable for Tusk-class closures (522 ms hits the radius in ~0.3s, well past the dispatch window), so eta_critical became the de facto gate. 300u lets the distance check actually contribute on fast approaches without firing pre-emptively from across the lane.
-    item_cyclone            = 300,  -- v0.5.15 PT-01: matched item_wind_waker (same fire semantics, same role in the chain).
+    item_wind_waker         = 500,  -- v0.5.135.1: 300 -> 500. WW is INSTANT (fire by proximity, no lead math -- [[feedback_instant_save_proximity]]). 300u was the binding gate ONLY for Bara: eta_speed 600 puts the SAVE_ETA_TRIGGER(0.45) eta-gate at 270u < 300u, so WW fired at ~296u = too close vs the real ~690 ramped charge speed (3 late fires). Tusk/Primal (eta_speed 1200) fire via the eta-gate at ~540u and are UNCHANGED (540 > 500). 500u gives Bara ~0.7s real lead (parity with Pike/Force's 500u). (was v0.5.15 PT-01 150 -> 300.)
+    item_cyclone            = 500,  -- v0.5.135.1: matched item_wind_waker (same instant-airborne fire-by-proximity; Eul's). (was v0.5.15 PT-01 300.)
     item_hurricane_pike     = 500,   -- v0.5.21 PT-02: 360 -> 500. self-cast Pike pushes 425u; 360u gave too tight a margin between threat-impact and displacement-resolution. 500u lets the save fire while the threat is still ~half the push distance away.
     item_force_staff        = 500,   -- v0.5.21 PT-02: 360 -> 500. Same rationale (600u push; 500u trigger leaves clean headroom).
     item_glimmer_cape       = 270,
@@ -4011,6 +4132,103 @@ local function armed_chain_peek(entry, d, eta_trigger_eff)
         end
     end
     return false, nil, eta_trigger_eff
+end
+
+-- v0.5.135 close-gap redesign (Slice 2A): catalog-driven gap-closer armer.
+-- Unifies the 3 hardcoded modifier-create arms (Bara / Tusk / Primal) into one
+-- helper. The validated trio keeps EXACT values via LINA_ARM_TUNED (byte-
+-- equivalent: same key, ability, threat_mod, eta_speed/eta_trigger, Bara's
+-- armed_t ramp anchor, tlog name, modcreate_counter bump, same-caster overwrite
+-- guard, and the candidacy-before-IsEnemyHero ordering that keeps the per-event
+-- cost off non-gap-closer modifiers). Additional travel gap-closers (Slice 2B)
+-- arm off the lib TD.THREAT_ARRIVAL_TIMING catalog with per-kind defaults. The
+-- fixed trio keys are preserved so OnModifierDestroy's fixed-key clears
+-- (bara_charge / tusk_snowball) + its generic threat_mod sweep keep working.
+local LINA_ARM_TUNED = {
+    modifier_spirit_breaker_charge_of_darkness = {
+        key = "bara_charge", ability = "spirit_breaker_charge_of_darkness",
+        eta_speed = 600, eta_trigger = 0.8, ramp = true,  -- ramp -> stamp armed_t (v0.5.114 ramp clock)
+        tlog = "bara_charge_armed",
+    },
+    modifier_tusk_snowball_movement = {
+        key = "tusk_snowball", ability = "tusk_snowball",
+        eta_speed = 1200, eta_trigger = 0.5,
+        tlog = "tusk_snowball_armed",
+    },
+    -- v0.5.128.1: Primal Onslaught is a line DASH that STUNS on impact (reactive
+    -- save impossible) -> ARM on the dash modifier + fire WW by PROXIMITY (instant
+    -- cast lifts Lina airborne in time). NOT in TD.THREAT_ARRIVAL_TIMING, so the
+    -- tuned entry supplies its params directly. Resolves via
+    -- ANIM_SAVE_OVERRIDES["primal_beast_onslaught"] -> CH.PRIMAL_ONSLAUGHT.
+    modifier_primal_beast_onslaught_movement_adjustable = {
+        key = "primal_onslaught", ability = "primal_beast_onslaught",
+        eta_speed = 1200, eta_trigger = 0.4,
+        tlog = "primal_onslaught_armed",
+    },
+    -- v0.5.136.1 realignment: Slark moved OUT of here into the lib
+    -- TD.THREAT_ARRIVAL_TIMING catalog (kind=leap). It now arms via the helper's
+    -- catalog path (LINA_ARM_KIND_DEFAULT[leap] supplies eta_trigger 0.4 + timeout
+    -- 1.5) and resolves the composed close_gap chain (its hero override dropped).
+    -- LINA_ARM_TUNED keeps ONLY the genuine hand-tuned exceptions (Bara ramp/0.8,
+    -- Tusk 0.5, Primal 0.4); generic gap-closers are one lib-catalog line.
+}
+-- Per-KIND defaults for catalogued travel gap-closers WITHOUT a tuned entry
+-- (Slice 2B additions). eta_speed falls back to the catalog speed_fallback.
+-- instant_blink is deliberately ABSENT: those arm via the on_gap_close anim
+-- path (state.armed_threats["instant_blink:<ability>"]), not modifier-create.
+local LINA_ARM_KIND_DEFAULT = {
+    homing_charge = { eta_trigger = 0.5 },
+    homing_carry  = { eta_trigger = 0.5 },
+    leap          = { eta_trigger = 0.4, timeout = 1.5 },  -- v0.5.136: anim-armed leaps self-clear (no OnModifierDestroy)
+}
+
+-- ARM a tuned/catalogued travel gap-closer at modifier-create. Returns true if
+-- it armed (or a same-caster entry already exists), false if the modifier is not
+-- an arm trigger (or the caster is not an enemy hero). Candidacy (tuned/catalog
+-- travel-kind) is resolved BEFORE the IsEnemyHero call so non-gap-closer
+-- modifiers exit on two cheap table lookups -- matching the pre-refactor cost.
+-- The fire happens later by proximity/eta in armed_threats_tick.
+state.try_arm_catalog_gap_closer = function(npc, mod_name)
+    local key, ability, eta_speed, eta_trigger, ramp, tlog_name, kind, timeout
+    local tuned = LINA_ARM_TUNED[mod_name]
+    if tuned then
+        key, ability    = tuned.key, tuned.ability
+        eta_speed       = tuned.eta_speed
+        eta_trigger     = tuned.eta_trigger
+        ramp, tlog_name = tuned.ramp, tuned.tlog
+        timeout         = tuned.timeout
+    else
+        local cat = TD.THREAT_ARRIVAL_TIMING and TD.THREAT_ARRIVAL_TIMING[mod_name]
+        kind = cat and cat.kind
+        local kd = kind and LINA_ARM_KIND_DEFAULT[kind]
+        if not kd then return false end  -- not a travel gap-closer we pre-arm
+        key         = "gapclose:" .. mod_name
+        ability     = nil  -- catalog-armed: no anim override -> dispatch via close_gap
+        eta_speed   = cat.speed_fallback or 600
+        eta_trigger = kd.eta_trigger
+        ramp        = false
+        timeout     = kd.timeout
+    end
+    if not (Target.IsEnemyHero and Target.IsEnemyHero(npc, state.self_npc)) then
+        return false
+    end
+    local existing = state.armed_threats[key]
+    if existing and existing.caster == npc then return true end  -- same-caster: keep
+    if tlog_name then
+        tlog(1, tlog_name, { caster = uname(npc) })
+    else
+        tlog(1, "gap_closer_armed", { key = key, kind = kind or "?", caster = uname(npc) })
+    end
+    state.modcreate_counter = state.modcreate_counter + 1
+    state.armed_threats[key] = {
+        caster = npc, ability = ability, threat_mod = mod_name,
+        armed_t = ramp and now() or nil,
+        -- v0.5.136 Slice 2B: leaps (anim-armed, no OnModifierDestroy clear) carry
+        -- a timeout so a pounce-elsewhere entry self-clears (armed_threats_tick).
+        t = timeout and now() or nil, timeout = timeout,
+        eta_speed = eta_speed, eta_trigger = eta_trigger, fired = false,
+    }
+    return true
 end
 
 -- v0.5.38 MAINT-11.2: post-fire effect helper extracted from
@@ -4231,13 +4449,19 @@ local function armed_threats_tick()
                     end
                     if should_fire then
                         entry._cp_t = cp_remaining
-                        -- eta arg is 0 for cp entries -- the cp_t field in
+                        -- eta arg is 0 for cp entries - the cp_t field in
                         -- the armed_threat_fire tlog carries the meaningful
                         -- timing signal. via=cp_save_dist / cp_eta_trigger
                         -- distinguishes the path from homing eta_trigger.
                         armed_post_fire(key, entry, 0, d, fire_reason)
                     end
                 end
+            elseif entry.timeout and entry.t and (now() - entry.t) > entry.timeout then
+                -- v0.5.136 Slice 2B: anim-armed leaps (Slark Pounce) have no
+                -- OnModifierDestroy signal, so they self-clear on a timeout if the
+                -- pounce went elsewhere (stale-entry wrong-fire guard, v0.5.42).
+                tlog(2, "armed_threat_leap_expired", { key = key })
+                state.armed_threats[key] = nil
             elseif entry.instant_blink and entry.t and (now() - entry.t) > K.BLINK_ARRIVE_TIMEOUT_S then
                 tlog(2, "armed_threat_blink_expired", { key = key })
                 state.armed_threats[key] = nil
@@ -4327,7 +4551,18 @@ K.PERSISTENT_THREAT_TICK_INTERVAL = 2.1
 local PERSISTENT_THREATS = {
     modifier_legion_commander_duel          = true,
     modifier_disruptor_static_storm_thinker = true,
+    -- v0.5.137.1: Pugna Life Drain. The drain modifier lands on the VICTIM
+    -- (Lina), so the tick's HasModifier(me) gate matches. Re-walks CH.PUGNA_DRAIN
+    -- (W-head interrupt) every 2.1s while draining, so the W interrupt fires the
+    -- instant W comes off CD mid-channel (the v0.5.137 demo found the drain
+    -- un-interrupted when W was on CD at channel-start + never re-dispatched). Its
+    -- lock-TTL resolver was ALREADY capped at PERSISTENT_LOCK_CAP_S -- the re-walk
+    -- was wired on the resolver side, only the membership here was missing.
+    modifier_pugna_life_drain               = true,
 }
+-- v0.5.137.1: expose for the in-brain regression test (state.tests.W02_*),
+-- mirroring state.lina_chains. Read-only in the test.
+state.lina_persistent_threats = PERSISTENT_THREATS
 local function persistent_threats_tick()
     local me = state.self_npc
     if not me or not Entity.IsAlive(me) then return end
@@ -4344,10 +4579,32 @@ local function persistent_threats_tick()
     -- below (state.last_persistent_tick_t[mod_name] = now_t) feeds the same
     -- tick-local interval gate next frame, so frame_t vs now() is equivalent.
     local now_t = state.frame_t
+    -- v0.5.141: W-ready RISING EDGE off-grid re-fire. The 2.1s grid
+    -- (K.PERSISTENT_THREAT_TICK_INTERVAL) was the ONLY gate on the W-interrupt
+    -- re-fire, so when W came off CD mid-channel it could sit ready up to ~2.1s
+    -- before the next grid re-walk fired it (v0.5.140 demo, Pugna: ticks at
+    -- 28700/28791/28884 all w_stun not_ready, fired only on tick #4 -- "took more
+    -- time than usual to use W again, not as soon it came out from CD"). Detect W
+    -- transitioning not-ready -> ready and dispatch THAT frame, off-grid. Only the
+    -- rising edge triggers (then W is on its ~6.7s CD so w_ready is false again)
+    -- -> fires at most once per W CD cycle, no spam, no redundant tail-save burn (W
+    -- heads the persistent W-interrupt chain, e.g. CH.PUGNA_DRAIN). The grid still
+    -- paces the rest of the chain. Edge is CONSUMED after one dispatch so two
+    -- simultaneous persistent threats cannot double-dispatch on the same frame.
+    -- The lock cap (PERSISTENT_LOCK_CAP_S 1.7s < 2.1s grid) is unchanged: an
+    -- edge-fired W goes on CD, so the next grid re-walk (lock long expired) finds
+    -- it not_ready -- no double-fire.
+    local _wab = ability("lina_light_strike_array")
+    local w_ready = (_wab and Ability.GetLevel(_wab) > 0 and Ability.IsReady(_wab)) and true or false
+    local w_edge = w_ready and not state.persistent_w_was_ready
+    state.persistent_w_was_ready = w_ready
     for mod_name in pairs(PERSISTENT_THREATS) do
         if NPC.HasModifier(me, mod_name) then
             local last_t = state.last_persistent_tick_t[mod_name] or 0
-            if (now_t - last_t) >= K.PERSISTENT_THREAT_TICK_INTERVAL then
+            local do_grid = (now_t - last_t) >= K.PERSISTENT_THREAT_TICK_INTERVAL
+            if do_grid or w_edge then
+                local via = do_grid and "grid" or "edge"
+                if not do_grid then w_edge = false end  -- consume the W-ready edge
                 state.last_persistent_tick_t[mod_name] = now_t
                 local mod = NPC.GetModifier(me, mod_name)
                 local caster = mod and Modifier.GetCaster(mod)
@@ -4359,7 +4616,7 @@ local function persistent_threats_tick()
                     -- =2.1s -- the lock has expired by the time we re-enter
                     -- this branch, so no ForceNextDispatch needed).
                     state.responded_threats[tostring(Entity.GetIndex(caster)) .. ":" .. mod_name] = nil
-                    tlog(1, "persistent_threat_tick", { mod = mod_name, caster = uname(caster) })
+                    tlog(1, "persistent_threat_tick", { mod = mod_name, caster = uname(caster), via = via })
                     defense_dispatcher:Dispatch("persistent_" .. mod_name,
                                                 mod_name, caster,
                                                 state.self_npc, nil,
@@ -4674,6 +4931,109 @@ local function pre_face_tick()
     end
 end
 
+-- v0.5.147.x hooks the cast-poll save watches (Pudge Meat Hook + Clockwerk Hookshot).
+-- mod = canonical victim modifier (the v0.5.40 lock key + LINA_SAVE_OVERRIDES key);
+-- range = cast reach; cone (deg) = facing gate; prox = close-range proximity fallback.
+-- First-pass values, tunable from demo.
+local HOOK_CAST_POLL = {
+    pudge_meat_hook     = { mod = "modifier_pudge_meat_hook",     range = 1500, cone = 25, prox = 600 },
+    rattletrap_hookshot = { mod = "modifier_rattletrap_hookshot", range = 3000, cone = 25, prox = 600 },
+    -- Power Cogs is NO_TARGET (no facing cone). range = prox makes hook_gate_pass proximity-only
+    -- (dist <= prox passes; dist > range=prox returns false before the cone branch). prox 250 ~=
+    -- cogs_radius 215 + margin (KV rattletrap_power_cogs; tune from the demo dist=). mod =
+    -- _cog_marker (the trap marker that lands on the victim, DEMO-confirmed; the VPK grep missed
+    -- it but the runtime log is ground truth) so the cast-poll dedups vs the reactive landing.
+    rattletrap_power_cogs = { mod = "modifier_rattletrap_cog_marker", range = 250, cone = 360, prox = 250 },
+}
+
+-- v0.5.147.x hook cast-poll gate (PURE; offline-tested via HK01 + standalone lua).
+-- Fire if within the hook's cast range AND (caster facing within cone_deg of Lina
+-- OR within the close-range prox fallback). angle_deg = deg(|FindRotationAngle|),
+-- may be nil if unreadable (cone then fails; prox can still pass).
+function state.hook_gate_pass(dist, angle_deg, range, cone_deg, prox)
+    if not dist or dist > range then return false end
+    if dist <= prox then return true end
+    return angle_deg ~= nil and angle_deg <= cone_deg
+end
+
+-- v0.5.147.x hook cast-poll SAVE (Demo-1 confirmed H-A: Pudge Hook / Clockwerk Hookshot
+-- emit NO OnUnitAnimation + no OnLinearProjectileCreate; the reactive landing is too late).
+-- Poll enemies' HOOK_CAST_POLL abilities for Ability.IsInAbilityPhase (validated enemy-side),
+-- gate (facing-cone OR close-range prox, re-checked each tick; Cogs is prox-only), and dispatch
+-- the per-skill chain pre-impact via the dispatcher (LINA_SAVE_OVERRIDES[cfg.mod] -> CH.HOOK_
+-- INTERCEPT / CH.CLOCKWERK_HOOKSHOT / CH.CLOCKWERK_COGS). Per-cast latch (state.hook_cast_
+-- dispatched, GC'd when the cast ends) = at most one dispatch per hook; the v0.5.40 lock dedups
+-- vs any later reactive landing -> single save. ~16Hz throttle, 3000u scan.
+local function cast_poll_save_tick()
+    if state.menu and state.menu.hook_cast_poll and not state.menu.hook_cast_poll:Get() then return end
+    if not defense_enabled() then return end
+    if not self_alive_ok() then return end
+    local now_t = state.frame_t or now()
+    if (now_t - (state.cast_poll_t or 0)) < 0.06 then return end
+    state.cast_poll_t = now_t
+    local me = state.self_npc
+    local me_pos = me and NPCLib.origin(me)
+    if not me_pos then return end
+    local enemies = NPCs.InRadius(me_pos, 3000,
+        Entity.GetTeamNum(me), Enum.TeamType.TEAM_ENEMY, true, true)
+    if not enemies then return end
+    local dispatched = state.hook_cast_dispatched or {}
+    local active = {}
+    for _, e in ipairs(enemies) do
+        if Target.IsValid(e) and Target.IsAlive(e)
+           and Target.IsEnemyHero(e, me) and Target.NotIllusion(e) then
+            for slot = 0, 5 do
+                local ok_a, a = pcall(NPC.GetAbilityByIndex, e, slot)
+                if ok_a and a and Ability.GetLevel(a) > 0 then
+                    local ok_n, nm = pcall(Ability.GetName, a)
+                    local cfg = ok_n and nm and HOOK_CAST_POLL[nm]
+                    if cfg then
+                        local ok_p, inphase = pcall(Ability.IsInAbilityPhase, a)
+                        if ok_p and inphase then
+                            local key = Entity.GetIndex(e) .. ":" .. nm
+                            active[key] = true
+                            if not dispatched[key] then
+                                local d = dist_to(e)
+                                local ang
+                                local ok_r, r = pcall(NPC.FindRotationAngle, e, me_pos)
+                                if ok_r and r then ang = math.deg(math.abs(r)) end
+                                if state.hook_gate_pass(d, ang, cfg.range, cfg.cone, cfg.prox) then
+                                    dispatched[key] = true
+                                    local via = (d and d <= cfg.prox) and "prox" or "cone"
+                                    tlog(1, "hook_cast_poll_fire", {
+                                        enemy   = uname(e),
+                                        ability = nm,
+                                        mod     = cfg.mod,
+                                        dist    = string.format("%.0f", d or -1),
+                                        angle   = ang and string.format("%.0f", ang) or "?",
+                                        via     = via,
+                                    })
+                                    defense_dispatcher:Dispatch(
+                                        "hook_cast_poll_" .. nm,           -- intent
+                                        cfg.mod,                           -- threat_mod
+                                        e,                                 -- threat_caster
+                                        me,                                -- target_unit
+                                        nil,                               -- fire_thunk (chain walker)
+                                        "close_gap",                       -- category_hint
+                                        nil,                               -- ability_name
+                                        nil,                               -- armed_entry
+                                        record_save,                       -- on_save_fired
+                                        { fs_shard_window = fs_shard_window_active() }  -- ctx
+                                    )
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for k in pairs(dispatched) do
+        if not active[k] then dispatched[k] = nil end
+    end
+    state.hook_cast_dispatched = dispatched
+end
+
 -- Anim subscribers: route the lib's role events (fired by the per-enemy
 -- RegisterMap catalog below, wired in v0.2.5) to the Layer-2 dispatchers.
 -- OnModifierCreate detection still runs in parallel and dedups any overlap.
@@ -4730,6 +5090,17 @@ local function on_gap_close(ev)
         end
         return
     end
+    -- v0.5.136 Slice 2B: traveling gap-closers (leap / charge) ARM + fire by
+    -- PROXIMITY (the Bara pattern) instead of dispatching the save at cast -- an
+    -- instant airborne save fired at cast is too early (the "fire by proximity"
+    -- rule). try_arm_catalog_gap_closer arms iff the threat is registered
+    -- (LINA_ARM_TUNED, e.g. Slark) or catalogued as a travel kind; it returns
+    -- false for non-traveling close-gappers, which fall through to the immediate
+    -- reactive dispatch below. (The charge trio already arm via OnModifierCreate,
+    -- so an anim hit here is a dedup'd no-op via the same-caster key guard.)
+    if threat and state.try_arm_catalog_gap_closer(ev.caster, threat) then
+        return
+    end
     -- v0.5.25 RPR-03: stamp dedup AFTER try_save_self success. The
     -- pre-v0.5.25 stamp-before-call would leave the threat dedup-locked
     -- for THREAT_WINDOW=2s (lib/dedup.lua:49) when try_save_self bailed
@@ -4752,7 +5123,7 @@ end
 local function on_hard_disable(ev)
     if not ev.target_self then return end
     if not is_threat_caster(ev) then return end
-    -- v0.5.39 BUG-3: cast-point arming via the anim path. PRIMARY entry --
+    -- v0.5.39 BUG-3: cast-point arming via the anim path. PRIMARY entry -
     -- anim fires at cast-start (true pre-cast window), whereas
     -- OnModifierCreate fires after the modifier lands (catch-up only).
     -- If ev.ability_name maps to a CAST_POINT_THREATS entry, ARM and bail;
@@ -4913,6 +5284,35 @@ local function lina_eff_hp_magical(target)
         if ok and type(rgn) == "number" then eff = eff + rgn * 0.55 end
     end
     return eff
+end
+
+-- v0.5.137: expose the (target-independent) combo damage helpers + the
+-- target-specific eff-HP helper on state.* so state.combo_can_kill reads them
+-- indirectly and the in-brain test (state.tests.W01_combo_can_kill) can inject
+-- controlled numbers (the v0.5.17 lesson-14 mockability pattern). Production
+-- behavior is identical -- the aliases ARE the locals.
+state.lina_r_damage       = lina_r_damage
+state.lina_q_damage       = lina_q_damage
+state.lina_w_damage       = lina_w_damage
+state.lina_eff_hp_magical = lina_eff_hp_magical
+
+-- v0.5.137 W-capitalize kill gate (consumed by state.w_capitalize_tick). Can the
+-- brain SECURE a kill on `target` RIGHT NOW? The defensive W (Light Strike Array)
+-- has ALREADY dealt its damage + stun, so credit only the REMAINING burst Q
+-- (Dragon Slave) + R (Laguna) -- NOT W again -- against the target's CURRENT
+-- magical eff-HP (which already reflects the W hit; lina_eff_hp_magical reads
+-- live HP). Conservative form mirrors r_alone_kill (eff_hp * 1.05 <= burst):
+-- commit the dive only when the burst CLEARLY kills, never on a maybe (the
+-- user's "only when the probability to kill is high" rule). Autos are NOT
+-- credited (unreliable: range / disarm / turn). nil/dead target -> false (dead
+-- yields eff_hp = math.huge from lina_eff_hp_magical, so math.huge*1.05 > burst).
+state.combo_can_kill = function(target)
+    if not target then return false end
+    local burst = (state.lina_r_damage and state.lina_r_damage() or 0)
+                + (state.lina_q_damage and state.lina_q_damage() or 0)
+    if burst <= 0 then return false end
+    local eff_hp = (state.lina_eff_hp_magical and state.lina_eff_hp_magical(target)) or math.huge
+    return eff_hp * 1.05 <= burst
 end
 
 -- v0.5.36 MAINT-13: single source of truth for the Fiery Soul stack/cap
@@ -7391,6 +7791,54 @@ state.blink_capitalize_tick = function()
     if enemies >= 3 then state.lina_teamfight_tick(false) else state.lina_starter_tick(false) end
 end
 
+-- v0.5.137 W-CAPITALIZE: the offensive completion of the defensive W stun. When
+-- the W fired to stun a gap-closer / committed attacker (stamped in the W .fire),
+-- seize a short window to COMMIT the combo on that stunned target -- but ONLY if
+-- the brain can SECURE the kill (state.combo_can_kill). The W stun (1.2-2.4s)
+-- outlasts the 1.2s window, so the target is still locked down. Mirrors
+-- state.blink_capitalize_tick (same offense/HP/gank gates + the enemies>=3
+-- teamfight-vs-starter dispatch) + adds the target/range/kill gates. Defined
+-- here so offense_enabled / self_alive_ok / count_engaged_enemies / lina_*_tick
+-- / dist_to / cast_range_of are all already in scope. Default ON. Target aim:
+-- v1 relies on the combo's own nearest-enemy selection (the stunned gap-closer
+-- is adjacent); a preference hook is the demo-gated follow-up if it mis-targets.
+state.w_capitalize_tick = function()
+    local m = state.menu
+    if not (m and m.w_capitalize and m.w_capitalize:Get()) then return end
+    if not state.w_capitalize_t then return end
+    if (state.frame_t - state.w_capitalize_t) >= 1.2 then return end   -- 1.2s window
+    local tgt = state.w_capitalize_target
+    if not (tgt and Entity.IsEntity(tgt) and Target.IsAlive and Target.IsAlive(tgt)) then
+        state.w_capitalize_target = nil
+        tlog(2, "w_capitalize_skip", { reason = "target_gone" }); return
+    end
+    if state.combo_hold_active then return end          -- user already comboing
+    if not offense_enabled() then return end
+    local me = state.self_npc
+    if not (me and self_alive_ok()) then return end
+    local r_range = cast_range_of(ability(A.R), FALLBACK_RANGES.R)
+    if dist_to(tgt) > r_range then
+        tlog(2, "w_capitalize_skip", { reason = "out_of_range" }); return
+    end
+    if not state.combo_can_kill(tgt) then
+        tlog(2, "w_capitalize_skip", { reason = "no_kill" }); return     -- W stays defensive
+    end
+    local hp_floor = (m.w_capitalize_hp and m.w_capitalize_hp:Get()) or 35
+    if state.blink_in_hp_frac(me) * 100 < hp_floor then
+        tlog(2, "w_capitalize_skip", { reason = "hp_floor" }); return
+    end
+    if state.gank_imminent_self and state.gank_imminent_self() then
+        tlog(2, "w_capitalize_skip", { reason = "gank" }); return
+    end
+    local enemies = state.count_engaged_enemies()
+    tlog(1, "w_capitalize", {
+        target  = uname(tgt),
+        enemies = string.format("%d", enemies),
+        hp      = string.format("%.2f", state.blink_in_hp_frac(me)),
+    })
+    if enemies >= 3 then state.lina_teamfight_tick(false) else state.lina_starter_tick(false) end
+end
+
 -- v0.5.78 wave-clear: gather farmable units (lane creeps + neutrals) near Lina.
 -- DEFENSIVE enumeration -- the hero brains have never enumerated creeps before,
 -- so every engine call is pcall-guarded and degrades to "no creeps" instead of
@@ -7876,7 +8324,7 @@ state.tests["A9_pudge_chain_order"] = {
 -- v0.5.82 quality: contract / no-throw smoke test for the v0.5.76-78 lib-alias
 -- surface (fog + escape + farm). Drives each alias with state.self_npc = nil
 -- and asserts the documented return shape WITHOUT erroring -- exactly the class
--- of nil-deref / shape-divergence the optimization workflow flagged. Mock-driven:
+-- of nil-deref / shape-divergence the optimization review flagged. Mock-driven:
 -- nils self_npc via the cleanup stack, restores after. Complements the offline
 -- tools/run_tests.lua pure-lib tests by covering the Lina-side glue (aliases +
 -- _fog_opts + arg passing).
@@ -8015,6 +8463,128 @@ state.tests["M05_panic_bypass_fires"] = {
                 .. tostring(state.panic_override_until) }
         end
         return { pass = true, reason = "panic press armed window, try_save_self bypassed throttle and fired" }
+    end,
+}
+
+-- v0.5.137 W-capitalize kill gate. state.combo_can_kill(target) decides whether
+-- the brain can SECURE a kill on an arbitrary (W-stunned) target with the
+-- REMAINING burst (Q + R; the defensive W already dealt its damage), using the
+-- CONSERVATIVE r_alone_kill margin (eff_hp * 1.05 <= burst -- commit only when
+-- it clearly kills). combo_can_kill reads the damage helpers via state.* so this
+-- test injects controlled numbers (the v0.5.17 lesson-14 mockability pattern):
+-- it mocks r/q/eff-HP to pin the verdict, and mocks W HUGE to prove W is NOT
+-- credited (a future edit that wrongly adds state.lina_w_damage flips this red).
+state.tests["W01_combo_can_kill"] = {
+    desc = "v0.5.137: combo_can_kill = remaining Q+R burst kills target (conservative 1.05; W excluded)",
+    fn = function(cu)
+        if type(state.combo_can_kill) ~= "function" then
+            return { pass = false, reason = "state.combo_can_kill not exposed" }
+        end
+        local s_r, s_q, s_w, s_eff = state.lina_r_damage, state.lina_q_damage,
+                                     state.lina_w_damage, state.lina_eff_hp_magical
+        _cu_push(cu, function()
+            state.lina_r_damage = s_r; state.lina_q_damage = s_q
+            state.lina_w_damage = s_w; state.lina_eff_hp_magical = s_eff
+        end)
+        -- remaining burst = R 750 + Q 245 = 995; W mocked HUGE (must be ignored).
+        state.lina_r_damage = function() return 750 end
+        state.lina_q_damage = function() return 245 end
+        state.lina_w_damage = function() return 99999 end
+        local eff_ref = 0
+        state.lina_eff_hp_magical = function() return eff_ref end
+        local tgt = { __wcap_mock = true }
+        -- clear kill: eff_hp 900 -> 900*1.05=945 <= 995
+        eff_ref = 900
+        if not state.combo_can_kill(tgt) then
+            return { pass = false, reason = "should kill at eff_hp 900 (945<=995)" }
+        end
+        -- near-boundary kill: eff_hp 940 -> 987 <= 995
+        eff_ref = 940
+        if not state.combo_can_kill(tgt) then
+            return { pass = false, reason = "should kill at eff_hp 940 (987<=995)" }
+        end
+        -- near-boundary NO kill: eff_hp 960 -> 1008 > 995. A lenient form
+        -- (eff_hp <= burst*1.05) OR W-credited (burst ~100994) would wrongly fire.
+        eff_ref = 960
+        if state.combo_can_kill(tgt) then
+            return { pass = false, reason = "must NOT kill at eff_hp 960 (1008>995): margin not conservative or W credited" }
+        end
+        -- clear no-kill: tanky
+        eff_ref = 5000
+        if state.combo_can_kill(tgt) then
+            return { pass = false, reason = "must NOT kill a tanky target" }
+        end
+        -- nil target -> false
+        if state.combo_can_kill(nil) then
+            return { pass = false, reason = "nil target must be false" }
+        end
+        -- zero burst (R+Q unleveled) -> false even vs a frail target
+        state.lina_r_damage = function() return 0 end
+        state.lina_q_damage = function() return 0 end
+        eff_ref = 50
+        if state.combo_can_kill(tgt) then
+            return { pass = false, reason = "zero burst must be false" }
+        end
+        return { pass = true, reason = "kill/no-kill/1.05-margin/W-excluded/nil/zero-burst all correct" }
+    end,
+}
+
+-- v0.5.137.1: regression guard for the Pugna mid-channel interrupt fix. The
+-- v0.5.137 demo found Pugna Life Drain un-interrupted when W was on CD at
+-- channel-start (every CH.PUGNA_DRAIN save not_ready -> no_effective_save) and
+-- never re-dispatched as W came off CD mid-channel. Root cause:
+-- modifier_pugna_life_drain was NOT in PERSISTENT_THREATS, so persistent_threats_tick
+-- never re-walked it. Fix = add it (it lands on the victim, so the tick's
+-- HasModifier(me) gate matches). This is a data-membership guard (mirrors A9);
+-- the BEHAVIORAL validation is the demo (W on CD -> off CD -> persistent_threat_tick
+-- fires the W interrupt). Also pins no-regression on the original two members.
+state.tests["W02_pugna_persistent_rewalk"] = {
+    desc = "v0.5.137.1: modifier_pugna_life_drain is a PERSISTENT threat (re-walked mid-channel)",
+    fn = function(_cu)
+        local set = state.lina_persistent_threats
+        if type(set) ~= "table" then
+            return { pass = false, reason = "state.lina_persistent_threats not exposed" }
+        end
+        if not set["modifier_pugna_life_drain"] then
+            return { pass = false, reason = "modifier_pugna_life_drain missing from PERSISTENT_THREATS" }
+        end
+        if not set["modifier_legion_commander_duel"] then
+            return { pass = false, reason = "regression: Duel dropped from PERSISTENT_THREATS" }
+        end
+        if not set["modifier_disruptor_static_storm_thinker"] then
+            return { pass = false, reason = "regression: Static Storm dropped from PERSISTENT_THREATS" }
+        end
+        return { pass = true, reason = "pugna + duel + static-storm all persistent" }
+    end,
+}
+
+-- v0.5.147.x hook cast-poll gate predicate truth table (pure; no game-API mocks).
+state.tests["HK01_hook_gate"] = {
+    desc = "hook_gate_pass: range gate + proximity fallback + facing cone",
+    fn = function(_cu)
+        local g = state.hook_gate_pass
+        if type(g) ~= "function" then
+            return { pass = false, reason = "state.hook_gate_pass not exposed" }
+        end
+        -- {dist, angle_deg, expect, label} with range=1500, cone=25, prox=600
+        local cases = {
+            { 800, 10, true,  "in-cone within range" },
+            { 800, 40, false, "out-of-cone beyond prox" },
+            { 500, 90, true,  "within prox fires regardless of facing" },
+            { 1600, 5, false, "beyond range" },
+            { 1500, 25, true, "edge: at range + at cone" },
+        }
+        for _, c in ipairs(cases) do
+            local got = g(c[1], c[2], 1500, 25, 600)
+            if got ~= c[3] then
+                return { pass = false, reason = c[4] .. " expected " .. tostring(c[3]) .. " got " .. tostring(got) }
+            end
+        end
+        -- nil angle (unreadable facing) beyond prox -> cone cannot pass
+        if g(800, nil, 1500, 25, 600) ~= false then
+            return { pass = false, reason = "nil angle beyond prox should be false" }
+        end
+        return { pass = true, reason = "range/prox/cone/nil-angle/edge all correct" }
     end,
 }
 
@@ -8830,6 +9400,15 @@ local function setup_menu()
         .. "target, fire the W-Q-R combo (use the engine's blink as a free "
         .. "gap-close). Gated on HP floor + not-into-a-gank. Default OFF.")
     m.blink_capitalize_hp = gCore:Slider("Blink-capitalize: min HP %", 0, 90, 35)
+    -- v0.5.137: W-capitalize -- after the defensive W stuns a gap-closer /
+    -- committed attacker, commit the combo on that stunned target IF killable.
+    -- Default ON (the offensive completion of the W save).
+    m.w_capitalize = gCore:Switch("W-capitalize (combo the W-stunned target if killable)", true)
+    m.w_capitalize:ToolTip("After the defensive W stuns an incoming gap-closer "
+        .. "or committed attacker, fire the W-Q-R combo to SECURE the kill -- "
+        .. "but only when the remaining Q+R clearly kills it (else the W stays "
+        .. "purely defensive). Gated on HP floor + not-into-a-gank. Default ON.")
+    m.w_capitalize_hp = gCore:Slider("W-capitalize: min HP %", 0, 90, 35)
     -- v0.5.95: brain-cast Blink-in (re-enabled FALLBACK) -- when the engine did NOT
     -- blink (dagger ready) + you hold combo on an out-of-range target, the brain
     -- blinks in itself, then combos. Reserves the dagger if a threat is incoming.
@@ -8871,6 +9450,11 @@ local function setup_menu()
         .. "line-traveling threats (Pudge Hook, Mirana Arrow, Magnus Skewer, "
         .. "Sven Storm Bolt, ES Fissure). Disable if the intercept fires on "
         .. "hooks you wanted to dodge manually.")
+    m.hook_cast_poll = gDef:Switch("Hook cast-poll save", true)
+    m.hook_cast_poll:ToolTip("Detect Pudge Hook / Clockwerk Hookshot AT CAST via an "
+        .. "active-ability poll (the line-projectile + anim paths do NOT fire for "
+        .. "hooks) and fire a displacement save (Force/Pike/Blink, WW/Eul fallback) "
+        .. "before it lands. Facing-cone gated, with a close-range proximity fallback.")
     m.enable_lotus_first = gDef:Switch("Lotus-worthy ult reflect-first", true)
     m.enable_lotus_first:ToolTip("When a Lotus-reflectable threat lands "
         .. "(LC Duel, Doom, Hex, etc.), try Lotus Orb FIRST to reflect the "
@@ -9445,7 +10029,7 @@ local function register_anim_maps()
     -- save fires even when Pudge faces away. Meat Hook is a line skill-
     -- shot (Pudge DOES aim it) -- facing gate stays for that one.
     Anim.RegisterMap("npc_dota_hero_pudge", {
-        [AB[1]] = { ability = "pudge_meat_hook", role = "gap_close" },
+        [AB[1]] = { ability = "pudge_meat_hook", role = "gap_close", range = 1500 },  -- v0.5.147.2: hook_distance 1300 (+talent ~1500); without range the facing gate used DEFAULT_RANGE 1200 and silently rejected max-range hooks
         [AB[4]] = { ability = "pudge_dismember", role = "channel_start", instant_target = true },
     })
     -- pugna
@@ -9454,7 +10038,7 @@ local function register_anim_maps()
     })
     -- rattletrap
     Anim.RegisterMap("npc_dota_hero_rattletrap", {
-        [AB[4]] = { ability = "rattletrap_hookshot", role = "gap_close" },
+        [AB[4]] = { ability = "rattletrap_hookshot", role = "gap_close", range = 3000 },  -- v0.5.147.2: Hookshot cast range 2000-3000; DEFAULT_RANGE 1200 rejected it (the v0.5.147 demo blind spot)
     })
     -- riki (v6.15.267 added blink_strike + smoke_screen)
     -- Blink Strike is UNIT_TARGET 0.3 cast IGNORE_BACKSWING -- Riki blinks
@@ -9514,7 +10098,7 @@ local function register_anim_maps()
     })
     -- slark
     Anim.RegisterMap("npc_dota_hero_slark", {
-        [AB[2]] = { ability = "slark_pounce", role = "gap_close" },
+        [AB[2]] = { ability = "slark_pounce", role = "gap_close", instant_target = true },  -- v0.5.136 Slice 2B: no_target pounce -> force target_self so on_gap_close detects + arms it
     })
     -- snapfire
     -- spectre (v6.15.265 zero-coverage fill)
@@ -9862,6 +10446,7 @@ function callbacks.OnUpdateEx()
                                          -- the airborne modifier clears
                                          -- (or restore Native on timeout)
         pre_face_tick()            -- E12: opt-in pre-face incoming threats
+        cast_poll_save_tick()      -- v0.5.147.x hook cast-poll save (detect hook cast -> displacement save)
         -- Layer 1 offense (Phase F): latch -> scheduled steps -> R-abort ->
         -- auto-R kill-steal -> HOLD/TAP combo-key dispatch.
         Geometry.SampleVelocities(state.self_npc)  -- v0.3.6: feed the smoothed-prediction buffer
@@ -9895,6 +10480,7 @@ function callbacks.OnUpdateEx()
         end
         state.combo_key_tick()     -- HOLD/TAP classify + starter/teamfight dispatch
         state.blink_capitalize_tick()  -- v0.5.94: seize engine blinks (auto-combo, default OFF)
+        state.w_capitalize_tick()  -- v0.5.137: combo the W-stunned gap-closer/committed attacker if killable (default ON)
         state.wave_clear_tick()    -- v0.5.78: HOLD wave-clear (Q line + W dense camp), mana-floor + creep-count gated
         state.dump_key_tick()      -- v0.5.15 OBS-08: one-press brain state dump bind
         state.panic_key_tick()     -- v0.5.37 MAINT-05: one-press 2.0s panic throttle-bypass bind
@@ -10414,7 +11000,7 @@ local function handle_lotus_first(npc, modifier, mod_name, is_self)
     -- targeted_burst chain leads with item_lotus_orb); the arming branch
     -- just gates WHEN the save fires. lina_laguna_blade self-mirror skip:
     -- if the caster is OUR Lina (Rubick spell-steal mirror, Morphling
-    -- adaptive-strike echo), no save makes sense -- our own cast resolved
+    -- adaptive-strike echo), no save makes sense - our own cast resolved
     -- already. Fall through to the legacy lotus_first path in that case.
     local cp_entry_lw = CAST_POINT_THREATS[mod_name]
     local laguna_self_mirror = (mod_name == "modifier_lina_laguna_blade"
@@ -10455,7 +11041,7 @@ local function handle_lotus_first(npc, modifier, mod_name, is_self)
     -- to stop; the armed_threats_tick lotus_pending branch will fire Lotus the
     -- moment it readies and stamp dedup then. Note: BUG-3's CAST_POINT_THREATS
     -- arming runs BEFORE the dedup check above; for LOTUS_WORTHY ∩ CAST_POINT
-    -- intersection (Laguna, Finger) BUG-3 wins and this branch is unreachable --
+    -- intersection (Laguna, Finger) BUG-3 wins and this branch is unreachable -
     -- intentional, castpt arming gives a more precise fire moment.
     if lotus_defer_if_close(mod_name, caster_lw) then
         return true
@@ -10545,7 +11131,7 @@ local function handle_threat_on_self(npc, modifier, mod_name, is_self)
     -- armed_threats_tick can fire the save within the residual window.
     -- lina_laguna_blade self-mirror skip mirrors handle_lotus_first's
     -- guard: if OUR Lina is the caster (Rubick mirror, etc.), no save
-    -- makes sense -- fall through so the legacy try_save_self path runs
+    -- makes sense - fall through so the legacy try_save_self path runs
     -- (which will no-op for self-cast via the dispatcher's own guards).
     local cp_entry_ts = CAST_POINT_THREATS[mod_name]
     local cp_caster = cp_entry_ts and Modifier.GetCaster(modifier) or nil
@@ -10637,62 +11223,12 @@ function callbacks.OnModifierCreate(npc, modifier)
     handle_unrecognized_harvest(npc, modifier, mod_name, is_self)
     if handle_threat_on_self(npc, modifier, mod_name, is_self) then return end
 
-    -- Homing close-gap: ARM at modifier-create, FIRE near impact (armed tick).
-    if mod_name == "modifier_spirit_breaker_charge_of_darkness"
-       and Target.IsEnemyHero and Target.IsEnemyHero(npc, state.self_npc) then
-        local existing = state.armed_threats["bara_charge"]
-        if not existing or existing.caster ~= npc then
-            tlog(1, "bara_charge_armed", { caster = uname(npc) })
-            state.modcreate_counter = state.modcreate_counter + 1
-            -- v0.5.4: key on KV-stable ability name so armed_threats_tick hits
-            -- the ANIM_SAVE_OVERRIDES branch; survives future lib modifier renames.
-            state.armed_threats["bara_charge"] = { caster = npc,
-                ability = "spirit_breaker_charge_of_darkness",
-                threat_mod = "modifier_spirit_breaker_charge_of_darkness",
-                -- v0.5.114: armed_t anchors the ramp clock. The modifier
-                -- appears at charge START, so (now - armed_t) = wind-up
-                -- elapsed, which the precise ramp model needs (remaining
-                -- ramp = windup_time - elapsed; see state.bara_charge_elapsed).
-                armed_t = now(),
-                eta_speed = 600, eta_trigger = 0.8, fired = false }
-        end
-    elseif mod_name == "modifier_tusk_snowball_movement"
-       and Target.IsEnemyHero and Target.IsEnemyHero(npc, state.self_npc) then
-        local existing = state.armed_threats["tusk_snowball"]
-        if not existing or existing.caster ~= npc then
-            tlog(1, "tusk_snowball_armed", { caster = uname(npc) })
-            state.modcreate_counter = state.modcreate_counter + 1
-            -- v0.5.4: key on KV-stable ability name (see bara_charge note above).
-            state.armed_threats["tusk_snowball"] = { caster = npc,
-                ability = "tusk_snowball",
-                threat_mod = "modifier_tusk_snowball_movement",
-                eta_speed = 1200, eta_trigger = 0.5, fired = false }
-        end
-    elseif mod_name == "modifier_primal_beast_onslaught_movement_adjustable"
-       and Target.IsEnemyHero and Target.IsEnemyHero(npc, state.self_npc) then
-        -- v0.5.128.1: Primal Beast Onslaught. Onslaught STUNS on impact (KV stun
-        -- 0.7/1/1.3/1.6) so a reactive save is impossible (the knockback +
-        -- modifier_stunned land together -> Lina stunned before any chain casts;
-        -- both logged threat_unrecognized). User: "WW is instant so it should be
-        -- used by proximity like bara charge." So ARM on the DASH modifier (this
-        -- one spans the charge, the bara-analog -- the windup modifier ends
-        -- before the dash) and fire WW by PROXIMITY via armed_threats_tick. WW is
-        -- an instant cast, so firing as the charging Primal closes in lifts Lina
-        -- airborne in time; the eta gate also gates aim for free (if the dash
-        -- brings him close the eta drops and fires; if he charges away it never
-        -- does). eta_speed = KV charge_speed 1200; eta_trigger 0.4 -> fire ~480u
-        -- out (same effective proximity as bara's 0.8 @ 600). Resolves via
-        -- ANIM_SAVE_OVERRIDES["primal_beast_onslaught"] -> CH.PRIMAL_ONSLAUGHT.
-        local existing = state.armed_threats["primal_onslaught"]
-        if not existing or existing.caster ~= npc then
-            tlog(1, "primal_onslaught_armed", { caster = uname(npc) })
-            state.modcreate_counter = state.modcreate_counter + 1
-            state.armed_threats["primal_onslaught"] = { caster = npc,
-                ability = "primal_beast_onslaught",
-                threat_mod = "modifier_primal_beast_onslaught_movement_adjustable",
-                eta_speed = 1200, eta_trigger = 0.4, fired = false }
-        end
-    end
+    -- v0.5.135 close-gap redesign (Slice 2A): catalog-driven gap-closer arming,
+    -- replacing the 3 hardcoded if/elseif arms. Behaviour-preserving for the
+    -- validated trio (LINA_ARM_TUNED -> same keys / eta / armed_t / tlogs);
+    -- extends to other travel gap-closers via TD.THREAT_ARRIVAL_TIMING in Slice
+    -- 2B. FIRE happens near impact by proximity/eta in armed_threats_tick.
+    state.try_arm_catalog_gap_closer(npc, mod_name)
 end
 
 -- v0.5.36 MAINT-07: removed empty OnUnitAnimation stub (E9 cleanup leftover
@@ -10746,173 +11282,39 @@ function callbacks.OnModifierDestroy(npc, modifier)
     end
 end
 
--- v0.5.11 PE-02: line-projectile intercept (port of Sniper.lua
--- callbacks.OnLinearProjectileCreate, the Pudge-hook perpendicular-distance
--- save). OnModifierCreate fires AFTER the hook has already grabbed Lina, so
--- Force / Pike / WW can no longer displace her out of the line. By the time
--- the modifier lands the cast is committed; the only window where a self-
--- displacement save can actually break the threat is between projectile
--- creation and projectile arrival. Generalized to the five signature line
--- threats called out in PE-02: pudge hook, mirana arrow, magnataur skewer,
--- sven storm bolt, earthshaker fissure. The hit-radius column is the
--- projectile collision width on Lina (1.0 hull); +75 buffer covers Lina's
--- own jitter while the order resolves.
---
--- Threat-mod resolution: where a canonical pre-impact modifier exists in
--- lib/threat_data.lua (verified at port time: modifier_pudge_meat_hook,
--- modifier_mirana_arrow, modifier_magnataur_skewer, modifier_sven_storm_bolt)
--- it is passed to try_save_self so ResolveSaveOrder consults
--- LINA_SAVE_OVERRIDES / PATCHED_RECOMMENDED_SAVES (mirrors Sniper). Fissure
--- has no per-modifier pre-impact entry, so threat_mod is left nil and the
--- "line_projectile" category_hint drives the chain via CATEGORY_CHAINS
--- (line_projectile is the canonical lib category; lib/threat_data.lua key).
-local LINE_PROJECTILE_INTERCEPTS = {
-    -- src_unit_name              ability_name                threat_mod (nilable, canonical)              hit_radius
-    npc_dota_hero_pudge         = { ability = "pudge_meat_hook",        threat_mod = "modifier_pudge_meat_hook",     hit_radius = 130 },
-    npc_dota_hero_mirana        = { ability = "mirana_arrow",           threat_mod = "modifier_mirana_arrow",        hit_radius = 115 },
-    npc_dota_hero_magnataur     = { ability = "magnataur_skewer",       threat_mod = "modifier_magnataur_skewer",    hit_radius = 125 },
-    npc_dota_hero_sven          = { ability = "sven_storm_bolt",        threat_mod = "modifier_sven_storm_bolt",     hit_radius = 96  },
-    npc_dota_hero_earthshaker   = { ability = "earthshaker_fissure",    threat_mod = nil,                            hit_radius = 100 },
-}
+-- v0.5.147 lib-first lift: the line-projectile intercept CATALOG + geometry +
+-- dispatch moved to the shared lib (general item-saves live in lib; only
+-- ability injection is hero-local). Catalog = TD.LINE_PROJECTILE_INTERCEPTS
+-- (lib/threat_data.lua); mechanism = defense_dispatcher:HandleLineProjectile
+-- (lib/defense.lua). The thin OnLinearProjectileCreate below only wires Lina's
+-- glue (menu toggle, dedup state, record_save, fs_shard_window) into the lib
+-- call. See changelog v0.5.146 (Clockwerk Hookshot added) + v0.5.147 (the lift).
 
 function callbacks.OnLinearProjectileCreate(data)
-    -- v0.5.21 OBS-05: per-reason skip emits so future debug.log retests can
-    -- localize which gate killed a projectile event (engine delivered vs
-    -- filtered here vs filtered downstream). Level 3 throughout to keep
-    -- default verbosity 1 quiet; the 5-hero LINE_PROJECTILE_INTERCEPTS gate
-    -- is the highest-volume branch when -v 3 is set.
-    if not state.self_npc or not data then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "no_self_or_data" }) end
-        return
-    end
-    -- v0.5.13 E3 (HI-1, HI-2 option a): align gate with Sniper.lua:9647 by
-    -- dropping the layer2_can_fire() precheck. A recently-fired save would
-    -- otherwise silently suppress the line-intercept event entirely; the
-    -- dispatcher's CanFire still gates the actual cast downstream.
-    if not defense_enabled() then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "defense_off" }) end
-        return
-    end
-    -- v0.5.21 OBS-11: per-subsystem toggle. Bypass the entire line-projectile
-    -- intercept layer (Pudge Hook, Mirana Arrow, Magnus Skewer, Sven Bolt,
-    -- ES Fissure) when the user wants to handle those manually.
-    if state.menu and state.menu.enable_line_intercept
-       and not state.menu.enable_line_intercept:Get() then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "subsystem_off" }) end
-        return
-    end
-    local src = data.source
-    if not src or not Entity.IsEntity(src) or not Entity.IsNPC(src) then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "src_not_npc" }) end
-        return
-    end
-    if not Target.IsEnemyHero or not Target.IsEnemyHero(src, state.self_npc) then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "src_not_enemy" }) end
-        return
-    end
-    local src_name = NPC.GetUnitName(src)
-    local entry = LINE_PROJECTILE_INTERCEPTS[src_name]
-    if not entry then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "src_not_hook_caster" }) end
-        return
-    end
-
-    local me_pos = NPCLib.origin(state.self_npc)
-    local origin = data.origin or NPCLib.origin(src)
-    local velocity = data.velocity
-    if not me_pos or not origin or not velocity then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "missing_geometry", src = uname(src) }) end
-        return
-    end
-    local vel_len = velocity:Length2D()
-    if vel_len < 1 then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "zero_velocity", src = uname(src) }) end
-        return
-    end
-    local dir = velocity:Normalized()
-    local to_me = me_pos - origin
-    local along = to_me:Dot(dir)
-    -- Heading-toward-Lina: projectile origin is behind us along its travel
-    -- axis. Same gate Sniper uses (along < 0 -> reject); also implicitly
-    -- prevents firing on a projectile already past us.
-    if along < 0 then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "heading_away", src = uname(src) }) end
-        return
-    end
-    local perp = (to_me - dir * along):Length2D()
-    -- v0.5.13 E3 (HI-1, HI-2): observability tlog so future Pudge / Mirana /
-    -- Magnus / Sven / ES retests can tell apart "engine never delivered the
-    -- event" (no log line) from "delivered but filtered downstream" (this
-    -- line present, followed by a skip or intercepted line).
-    -- v0.5.14 E9 (BL-A8): moved BELOW perp/along compute so the logged values
-    -- are real, not "-" placeholders. The original placement at the top of
-    -- the function logged before either was computed; the relocation costs
-    -- one extra reject path (along<0) of silence but every other branch
-    -- (skip / intercept) now reflects the actual numbers.
-    if TLOG3_ENABLED then
-        tlog(3, "line_projectile_seen", {
-            src   = uname(src),
-            vel   = string.format("%.0f", vel_len),
-            perp  = string.format("%.0f", perp),
-            along = string.format("%.0f", along),
-        })
-    end
-    local fire_floor = entry.hit_radius + 75
-    if perp >= fire_floor then
-        -- v0.5.13 E3 (HI-1, HI-2): name the most common reject path so the
-        -- log distinguishes "geometry refused" from "throttle / source filter".
-        if TLOG3_ENABLED then
-            tlog(3, "line_projectile_skip", {
-                src    = uname(src),
-                reason = "perp_over_floor",
-                perp   = string.format("%.0f", perp),
-                floor  = tostring(fire_floor),
-            })
-        end
-        return
-    end
-
-    -- Dedup key: prefer canonical mod (matches OnModifierCreate's eventual
-    -- mark so the modifier-lands path no-ops cleanly). For fissure (no mod)
-    -- fall back to "<ability>_incoming" as called out in PE-02; keeps the
-    -- key unique per cast without colliding with any catalog mod_name.
-    local dedup_mod = entry.threat_mod or (entry.ability .. "_incoming")
-    if Dedup.threat_already_responded(state.responded_threats, src, dedup_mod) then
-        if TLOG3_ENABLED then tlog(3, "projectile_skip", { reason = "dedup_hit", src = uname(src), mod = dedup_mod }) end
-        return
-    end
-
-    tlog(1, "line_projectile_intercepted", {
-        src      = uname(src),
-        ability  = entry.ability,
-        perp     = string.format("%.0f", perp),
-        along    = string.format("%.0f", along),
-        floor    = tostring(fire_floor),
+    -- v0.5.147: thin wrapper over the lib mechanism (Dispatcher:HandleLineProjectile).
+    -- Behaviour-identical to the former hero-local port -- same gates, same tlog
+    -- stream (projectile_skip / line_projectile_seen / _skip / _intercepted), same
+    -- Dispatch("line_intercept_<ability>", ..., "line_projectile", ...). Engine
+    -- globals (Entity/NPC) run lib-side; Target/NPCLib (project libs not in the
+    -- lib's scope) + Lina state/menu come through these opts closures. opts are
+    -- built per-event (OnLinearProjectileCreate is rare, not per-frame).
+    defense_dispatcher:HandleLineProjectile(data, {
+        me              = state.self_npc,
+        catalog         = TD.LINE_PROJECTILE_INTERCEPTS,
+        tlog3           = TLOG3_ENABLED,
+        enabled         = defense_enabled,
+        subsystem_on    = function()
+            return not (state.menu and state.menu.enable_line_intercept
+                        and not state.menu.enable_line_intercept:Get())
+        end,
+        origin          = NPCLib.origin,
+        uname           = uname,
+        is_enemy_hero   = function(src, me) return Target.IsEnemyHero and Target.IsEnemyHero(src, me) end,
+        dedup_responded = function(src, mod) return Dedup.threat_already_responded(state.responded_threats, src, mod) end,
+        dedup_mark      = function(src, mod) Dedup.threat_mark_responded(state.responded_threats, src, mod) end,
+        record_save     = record_save,
+        fs_shard_window = fs_shard_window_active,
     })
-    -- v0.5.14 E3 (BL-A6): mark dedup BEFORE try_save_self (and after the
-    -- geometry gate passes), not only on save-success. Previously, if no save
-    -- was available the call returned without marking, so every subsequent
-    -- OnLinearProjectileCreate event for the same hook re-entered this path
-    -- and re-burned the dispatcher's layer-2 throttle. The THREAT_WINDOW
-    -- (2s, lib/dedup.lua:49) is wide enough to cover any legitimate
-    -- re-acquire for a single cast. Matches the Sniper.lua:9647 convention
-    -- of one dedup mark per intercepted line-projectile.
-    Dedup.threat_mark_responded(state.responded_threats, src, dedup_mod)
-    -- v0.5.40 A3-3: route line-projectile intercept through Dispatch with
-    -- category_hint="line_projectile" so fissure (threat_mod nil) still
-    -- resolves to the line-projectile chain via ResolveSaveOrder. The lock
-    -- key tuple is (state.self_npc, canonical(threat_mod), src). Per the
-    -- v0.5.40 dispatcher API, when src is nil (fog projectile) the lock leg
-    -- collapses to nil and the dispatcher logs lock_key_unresolvable at v=2
-    -- and falls through to the v0.5.39 unlocked path -- safe migration for
-    -- the fog case. For threats with a canonical mod, the hero/lib override
-    -- tables take precedence inside ResolveSaveOrder (perp_displacement primary).
-    defense_dispatcher:Dispatch("line_intercept_" .. entry.ability,
-                                entry.threat_mod, src,
-                                state.self_npc, nil,
-                                "line_projectile", entry.ability, nil,
-                                record_save,
-                                { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
 end
 
 -- v0.5.13 PM-1: Re-host the PE-05 postmortem on OnNpcDying because
@@ -11064,6 +11466,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.133.2 (Phase 2: add Storm Spirit Electric Vortex as a peel/punish): the v0.5.133.1 demo confirmed all the W-interrupts fire (Bane/Pudge/Lich single-target + Enigma BH caught=2, all aim=caster_origin). User: the only remaining case is SS Vortex (modifier_storm_spirit_electric_vortex_pull). Liquipedia 2026-06-14: Electric Vortex is NOT a channel -- stunning SS does NOT cancel the pull (the debuff persists), so W does NOT free the ally. Added anyway on a PEEL/PUNISH rationale (user-approved): SS dives the ally (Ball Lightning -> vortex), so W-stunning SS interrupts his follow-up burst + sets up a kill on the diving SS. One-line add to state.LINA_ALLY_CHANNEL_INTERRUPT; same dispatch path (W aimed at SS via the synthetic mod lina_ally_w_interrupt). Lina.lua only; libs untouched. luac clean; offline 370/370. DEMO-PENDING.")
+LOG:info("Lina brain v0.5.148 (hook + Power Cogs cast-poll saves, per-skill). Pudge Hook, Clockwerk Hookshot and Power Cogs emit no usable cast anim or OnLinearProjectileCreate signal, and reacting after contact is too late, so the brain polls enemy abilities for Ability.IsInAbilityPhase and dispatches a per-skill save PRE-impact, gated by facing-cone OR proximity (Power Cogs is prox-only, NO_TARGET). Separated per skill: Pudge Hook = instant-first Blink/WW/Eul (Pike and Force dropped, dead zone: a far hook is walkable, a close hook is too short and the turn-then-push too slow); Clockwerk Hookshot = airborne WW/Eul/Blink (the fast hook stuns Lina before Pike/Force can aim); Power Cogs = WW/Force/Pike/Eul (WW and Eul eat time in the airborne window, Force and Pike push out of the cog box). Severity fixes: Pudge hook low to high (the low_severity_high_hp gate was withholding WW at full HP), cog mod modifier_rattletrap_cog_marker medium. The lib carries the per-skill threat data (category, severity, counters); the hero owns the chain ordering. Demo-confirmed; coverage 44 of 46.")
 
 return callbacks

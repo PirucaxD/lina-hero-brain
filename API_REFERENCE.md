@@ -410,7 +410,7 @@ Full list: enums.md § Enum.ButtonCode (lines 729-861).
 |---|---|
 | Find enemies in range | `Heroes.InRadius(pos, r, team, type, omitIllusions, omitDormant)` |
 | Find any units in range | `NPCs.InRadius(pos, r, team, type, omitIllusions, omitDormant)` (general), `Entity.GetHeroesInRadius` / `GetUnitsInRadius` / `GetTreesInRadius` / `GetTempTreesInRadius` (entity-relative) |
-| Check if target is killable | `Target.EffectiveHpVs(target, self, dmg_type) < my_damage` AND `NPC.IsKillable(target)` |
+| Check if target is killable | `Target.EffectiveHpVs(target, self, dmg_type) < my_damage` AND `not Target.IsUnkillableNow(target)` (covers Shallow Grave / False Promise / WK Reincarnation; `NPC.IsKillable` is the lower-level framework check) |
 | Check if target will dodge | `NPC.GetStatesDuration(target, {INVULNERABLE=true, OUT_OF_GAME=true, MAGIC_IMMUNE=true})` at predicted impact tick |
 | Check if combo is mana-feasible | sum `Ability.GetManaCost` × `(1 - mana_cost_reduction)` ≤ `NPC.GetMana(self)` |
 | Predict impact position (skillshot) | `lib/prediction.lua` , target velocity + projectile speed + cast point |

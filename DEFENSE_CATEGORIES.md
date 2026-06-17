@@ -3,6 +3,16 @@
 Date: 2026-05-11
 Status: Categorization implemented in data; code-path separation deferred.
 
+> **Currency note (2026-06-17):** this is a historical design analysis, Sniper-framed
+> (v5.4), kept for its rationale. The 9-value `THREAT_CATEGORY` model below is still live
+> (`ThreatData.CategoryOf` plus the per-category `CATEGORY_CHAINS`). What has moved on:
+> counter selection is no longer "mostly documentation". The threat-counter axis now
+> derives each threat's counters from fact profiles (`THREAT_PROFILE` -> `DeriveCounters`
+> -> assembled `THREAT_COUNTER`), and `SaveCounters` filters save chains at compose time,
+> so a save is offered only when it actually counters the threat. The "categorization is
+> mostly documentation / the override table expresses preferences" conclusion below is
+> superseded by that axis. See the README and `lib/threat_data.lua`.
+
 ## What the user asked
 
 > "Analyze if it is good to do a separate section for anti close gap and threat stopper"

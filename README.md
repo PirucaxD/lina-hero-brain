@@ -76,6 +76,11 @@ What the brain adds on top of the native Lina script:
 - An always-on R kill-steal that fires Laguna Blade when the snipe
   is lethal-now and not blocked (Lotus, BKB, spell-deflect, hard CC
   reservation).
+- A cannot-kill gate (`Target.IsUnkillableNow`) on every kill-commit
+  and target pick: a target under Dazzle Shallow Grave, Oracle False
+  Promise, or with Wraith King Reincarnation ready cannot die now, so
+  the brain skips it instead of dumping a combo into a guaranteed
+  survivor and picks a killable target instead.
 - A team-fight mode for cluster_n>=3 with `tf_burst` (W+Q+R
   on a chosen R-target), `tf_sustain` (W+Q poke on the pile with no
   R commit), and `tf_q_poke` (a Q-only chip when the rest is on CD).
@@ -83,13 +88,35 @@ What the brain adds on top of the native Lina script:
   owned: the +35% spell amp + +35% magic resistance + uninterrupted
   movement for 7s is a kill accelerator, not a stack-conservation
   resource, so the brain fires it whenever a W+Q+R burst is about
-  to commit.
+  to commit. The +35% spell amp is also credited in the kill math:
+  while the buff is up, the effective R hit and W+Q+R combo burst
+  are scaled by x1.35 (stacking multiplicatively with an Ethereal
+  resist-reduction), so the brain commits the kills it can actually
+  secure with the buff on, not just the ones the un-amped burst
+  would land.
 - A teamfight-opener FC pre-amp at the first tick of a new
   engagement that pre-amps the W+R burst before the user's combo
   reaches the spells.
 
 **Defense, always on, no key:**
 
+- A fact-driven counter filter on every save chain. Each threat has
+  a `THREAT_PROFILE` of Liquipedia + KV facts (damage school,
+  spell-immunity piercing, dispel type, delivery, primary harm);
+  `DeriveCounters` assembles those into `THREAT_COUNTER`, the set of
+  save-kinds that actually counter the threat. At compose time
+  `SaveCounters` filters the chain so a save is only offered when it
+  genuinely counters what is incoming: no offering Eul against a
+  spell-immunity-piercing grip, no offering a magic-resist item
+  against pure damage. This is hero-agnostic and shared with the
+  sister Sniper brain.
+- A line-projectile intercept (`OnLinearProjectileCreate`): when a
+  linear skillshot is created with Lina in its path (Pudge Hook,
+  Mirana Arrow, Magnus Skewer, Clockwerk Hookshot), the brain
+  displaces her out of the line before impact. The mechanism lives
+  in the shared lib (`Defense.HandleLineProjectile` reading
+  `ThreatData.LINE_PROJECTILE_INTERCEPTS`); the hero only wires the
+  callback.
 - A per-(target, canonical_mod, caster) dispatch lock that
   structurally prevents two saves from firing for the same threat.
   When the anim path fires Wind Waker against Spirit Breaker's
@@ -330,6 +357,14 @@ when Aghs Shard is owned. Several decisions key on stack state:
   `ResolveSaveOrder` receives `ctx.fs_shard_window=true`, the
   chain walker demotes `lina_flame_cloak` to the chain tail so
   BKB / Pike / Force fire before FC.
+- **FC credited in the kill math** (v0.5.153), when Flame Cloak is
+  active the kill predicates scale the effective R hit and W+Q+R
+  combo by `ctx.fc_amp_mult` (`1 + 0.35`). The raw fields stay
+  un-amped for display and non-kill readers; only the `*_eff`
+  fields the commit gates compare against carry the +35%. It
+  stacks multiplicatively with the Ethereal resist-reduction, so
+  with the buff up the brain commits kills the un-amped burst
+  would not have secured.
 
 ### Defense: anim + cast-point arming
 
@@ -370,6 +405,45 @@ charge takes >2s to arrive) and lost the race against same-tick
 sibling fire paths. The lock is held for the threat's actual
 resolution window and held atomically inside `Dispatch`.
 
+### The threat-counter axis
+
+Which saves are even eligible against a given threat is not
+hand-listed; it is derived from facts. `lib/threat_data.lua` carries
+a `THREAT_PROFILE` per threat modifier, a small bundle of
+Liquipedia- and KV-grounded facts: damage school, whether it pierces
+spell immunity, dispel type, delivery (spell / channel / attack /
+projectile), the dominant harm (disable vs damage), and judgment
+fields like `lotus_reflectable`. `ThreatData.DeriveCounters` runs
+those facts through a fixed rule set at module load and assembles
+`THREAT_COUNTER`, the set of save-*kinds* that actually counter each
+threat. `ThreatData.SaveCounters(save, threat_mod)` is then a pure
+set intersection of the save's kinds against the threat's required
+kinds.
+
+`ResolveSaveOrder` calls `SaveCounters` as a compose-time filter on
+the item backbone, so a save is dropped from the chain whenever it
+does not genuinely counter the incoming threat: no magic-resist item
+against pure damage, no Eul against a spell-immunity-piercing grip,
+no displacement against a threat flagged `blocks_forced_movement`.
+The axis is hero-agnostic, the same profiles and rules serve the
+sister Sniper brain, and it is fact-based rather than per-threat
+hardcoded, so a corrected Liquipedia fact updates every chain that
+touches that threat at once.
+
+### Chain composition
+
+`Defense.ComposeChain` builds a final save chain from a category
+item backbone plus hero ability injections. The backbone is the raw
+`TD.CATEGORY_CHAINS` entry for the threat's category; each injection
+declares its anchor (`head`, `tail`, `{before=X}`, `{after=X}`) and
+is spliced in, with a first-occurrence-wins dedupe. It is pure (no
+engine calls, safe at load time) and used two ways: automatically by
+`ResolveSaveOrder` for category-resolved threats, and directly by
+the hero to build bespoke chains (Lina's committed-attacker
+variants). The compose-time `SaveCounters` filter runs on the
+backbone; hero ability injections are spliced after it and are never
+filtered, because the hero vouches for its own abilities.
+
 ### Always-on ticks
 
 Beyond the combo and defense layers, a set of ticks runs every
@@ -401,15 +475,28 @@ They split into tiers.
 **Tier 1, event plumbing:** `order` (one validated chokepoint for
 every order, with queue dedup), `damage` (recent-damage feed and
 kill math), `anim` (enemy animation -> "they cast X" events),
-`target` (composable unit predicates), `native` (Hit & Run / Orb
-Walker pause/resume + reassert wrappers).
+`target` (composable unit predicates, including `IsUnkillableNow`,
+the Shallow-Grave / False-Promise / WK-Reincarnation cannot-kill
+gate), `native` (Hit & Run / Orb Walker pause/resume + reassert
+wrappers).
 
-**Tier 2, reasoning and data:** `threat_data` (the threat /
-save-kind catalog + canonical-mod alias table), `save_select`
-(which save actually counters which threat), `defense` (the
-dispatcher: per-(target, mod, caster) lock + chain walk + ETA
-resolution + ally domain), `dedup`, `geometry`, `signal`, `npc`,
-`timing`.
+**Tier 2, reasoning and data:** `threat_data` (the threat catalog:
+per-threat `THREAT_PROFILE` facts, the `DeriveCounters`-assembled
+`THREAT_COUNTER` map, the canonical-mod alias table, and the
+line-projectile intercept catalog), `save_select` (scores and ranks
+the saves a threat exposes, gated by the `SaveCounters` set
+intersection so only genuine counters are ever offered), `defense`
+(the dispatcher: per-(target, mod, caster) lock + chain compose +
+chain walk + ETA resolution + line-projectile intercept + ally
+domain), `item_saves` (the hero-agnostic defensive item save bodies,
+one `.fire`-shaped builder per item that a hero merges into its own
+save map), `dedup`, `geometry`, `signal`, `npc`, `timing`.
+
+**Tier 3, positioning and capability:** `escape` (danger-aware
+escape-destination picking: fog-aware push, safe-direction search,
+and the turn-then-push harness Pike / Force / Eul self-casts share),
+`farm` (stateless wave-clear geometry and a mana- and stack-aware
+cast-worthiness policy for the AoE / line nukes).
 
 **The KV-data libraries:** `item_data`, `ability_data`,
 `unit_data`, `hero_data`. These are pure static reference,

@@ -5379,6 +5379,20 @@ end
 state.lina_r_ready = lina_r_ready
 state.lina_q_ready = lina_q_ready
 
+-- v0.5.153: Flame Cloak +35% OUTGOING spell amp (Liquipedia 7.41d). Credited in
+-- the kill predicates ONLY while the buff is on Lina (active-only choice). Sibling
+-- of ETHER_MAGIC_AMP (which lives by the ether-confirm region); declared HERE so
+-- combo_can_kill (just below) AND build_layer1_ctx can both see it. FC is an
+-- OUTGOING multiplier on Lina; Ethereal is a target resist-reduction (modeled
+-- x1.40), so the two stack MULTIPLICATIVELY (raw x1.35 x1.40). lina_fc_active is
+-- the mockable seam the in-brain W01 test stubs (mirrors lina_r_ready).
+local FC_SPELL_AMP = 0.35
+local function lina_fc_active()
+    local me = state.self_npc
+    return (me and NPC.HasModifier and NPC.HasModifier(me, "modifier_lina_flame_cloak")) and true or false
+end
+state.lina_fc_active = lina_fc_active
+
 -- v0.5.137 W-capitalize kill gate (consumed by state.w_capitalize_tick). Can the
 -- brain SECURE a kill on `target` RIGHT NOW? The defensive W (Light Strike Array)
 -- has ALREADY dealt its damage + stun, so credit only the REMAINING burst Q
@@ -5405,6 +5419,8 @@ state.combo_can_kill = function(target)
         burst = burst + (state.lina_q_damage() or 0)
     end
     if burst <= 0 then return false end
+    -- v0.5.153: while Flame Cloak is up, Lina's spell damage is +35% (active-only).
+    if state.lina_fc_active and state.lina_fc_active() then burst = burst * (1 + FC_SPELL_AMP) end
     local eff_hp = (state.lina_eff_hp_magical and state.lina_eff_hp_magical(target)) or math.huge
     return eff_hp * 1.05 <= burst
 end
@@ -5564,19 +5580,27 @@ local function build_layer1_ctx(target, out)
     ctx.r_impact         = impact
     ctx.r_total          = impact   -- no longer DoT-inflated; kept for readers
     ctx.eff_hp_magical   = lina_eff_hp_magical(target)
+    -- v0.5.153: Flame Cloak +35% outgoing spell amp, credited ACTIVE-ONLY (the
+    -- buff is on Lina right now). Raw r_impact / combo_total stay RAW (display +
+    -- non-kill readers); the *_eff fields are the FC-amped burst the kill
+    -- predicates compare against. Off-buff mult = 1.0 -> identical to v0.5.152.
+    -- FC (outgoing) and Ethereal (target resist-reduction) stack multiplicatively.
+    ctx.fc_amp_mult      = ctx.flame_cloak_active and (1 + FC_SPELL_AMP) or 1.0
+    ctx.r_impact_eff     = impact * ctx.fc_amp_mult
     -- r_alone_kill requires 5% headroom (user-picked margin over exact): commit
     -- solo R only when the instant hit clearly kills, else fall to W-stun-Q-R.
-    ctx.r_alone_kill     = impact > 0 and (ctx.eff_hp_magical * 1.05 <= impact)
+    ctx.r_alone_kill     = impact > 0 and (ctx.eff_hp_magical * 1.05 <= ctx.r_impact_eff)
     -- v0.5.85: full W+Q+R magical burst. The kill model was R-only
     -- (r_alone_kill / wqr_undershoots), so the brain under-credited the combo:
     -- Dragon Slave + Light Strike Array add real magic damage that lands inside
     -- the same commit. All three are magical, so they compare against the same
     -- eff_hp_magical. combo_kill = the bare W+Q+R combo kills (no ethereal amp);
-    -- the ether kill-confirm below amplifies combo_total instead of r_total.
+    -- the ether kill-confirm below amplifies combo_total_eff instead of r_total.
     ctx.q_dmg            = lina_q_damage()
     ctx.w_dmg            = lina_w_damage()
     ctx.combo_total      = ctx.r_impact + ctx.q_dmg + ctx.w_dmg
-    ctx.combo_kill       = ctx.eff_hp_magical <= ctx.combo_total
+    ctx.combo_total_eff  = ctx.combo_total * ctx.fc_amp_mult
+    ctx.combo_kill       = ctx.eff_hp_magical <= ctx.combo_total_eff
 
     ctx.r_range = cast_range_of(r, FALLBACK_RANGES.R)
     ctx.w_range = cast_range_of(w, FALLBACK_RANGES.W)
@@ -5731,6 +5755,8 @@ local Q_HALF_WIDTH, Q_LENGTH, Q_LINE_LEAD = 110, 1075, 0.8
 -- kill-confirm multiplies r_total by (1 + this) and compares to eff_hp_magical.
 -- Tunable here if the live amp differs; the kill-confirm toggle (default ON)
 -- and the wqr fall-through bound any error to "engage without ethereal".
+-- v0.5.153 sibling: FC_SPELL_AMP (defined up by the readiness hooks) credits
+-- Flame Cloak's +35% OUTGOING amp; it stacks multiplicatively with this.
 local ETHER_MAGIC_AMP = 0.40
 
 -- v0.5.80 feature D: power-spike save chips for the live Diagnostics HUD.
@@ -6548,7 +6574,7 @@ state.lina_starter_tick = function(force)
 
     local ctx = build_layer1_ctx(target)
     local fast = (target and NPC.GetMoveSpeed and (NPC.GetMoveSpeed(target) or 0) >= 290) or false
-    local target_fleeing_fast = ctx.kiting_us and fast and (ctx.eff_hp_magical <= ctx.r_impact)
+    local target_fleeing_fast = ctx.kiting_us and fast and (ctx.eff_hp_magical <= ctx.r_impact_eff)
 
     -- v0.5.95 brain-cast blink-in (re-enabled, crash-fixed): when the target is
     -- OUT of W range and the Blink Dagger is READY (= the engine did NOT use it),
@@ -6684,12 +6710,16 @@ state.lina_starter_tick = function(force)
     local kill_confirm_on = state.menu and state.menu.ether_kill_confirm
                             and state.menu.ether_kill_confirm:Get()
     if kill_confirm_on and ctx.ether_ready then
-        local amplified = (ctx.combo_total or ctx.r_total or 0) * (1 + ETHER_MAGIC_AMP)
+        -- v0.5.153: combo_total_eff already folds the FC x1.35 (active-only), so
+        -- this stacks FC x Ether multiplicatively; FC off -> combo_total_eff ==
+        -- combo_total -> unchanged from v0.5.152.
+        local amplified = (ctx.combo_total_eff or ctx.combo_total or 0) * (1 + ETHER_MAGIC_AMP)
         ether_kill_ok = (ctx.eff_hp_magical or math.huge) <= amplified
         if not ether_kill_ok then
             tlog(2, "ether_kill_confirm_skip", {
                 eff_hp      = string.format("%.0f", ctx.eff_hp_magical or 0),
                 combo_total = string.format("%.0f", ctx.combo_total or 0),
+                fc_mult     = string.format("%.2f", ctx.fc_amp_mult or 1.0),
                 amplified   = string.format("%.0f", amplified),
                 amp         = string.format("%.2f", ETHER_MAGIC_AMP),
             })
@@ -7331,7 +7361,9 @@ state.lina_teamfight_tick = function(force)
         else
             local r_impact = lina_r_damage()
             local eff_hp   = lina_eff_hp_magical(r_target)
-            r_worth = (r_impact >= eff_hp)
+            -- v0.5.153: FC outgoing amp is target-independent; ctx.fc_amp_mult is 1.0
+            -- when FC is off (unchanged from v0.5.152).
+            r_worth = (r_impact * ctx.fc_amp_mult >= eff_hp)
         end
         -- v0.5.15 IMP-A4 (cap_aware in TF): at fs cap, a clean r_alone_kill is
         -- the conversion path, never let the 60% HP fallback gate it out.
@@ -8590,7 +8622,7 @@ state.tests["M05_panic_bypass_fires"] = {
 -- it mocks r/q/eff-HP to pin the verdict, and mocks W HUGE to prove W is NOT
 -- credited (a future edit that wrongly adds state.lina_w_damage flips this red).
 state.tests["W01_combo_can_kill"] = {
-    desc = "v0.5.137: combo_can_kill = remaining Q+R burst kills target (conservative 1.05; W excluded; v0.5.150: R/Q on-CD not credited)",
+    desc = "v0.5.137: combo_can_kill = remaining Q+R burst kills target (conservative 1.05; W excluded; v0.5.150: R/Q on-CD not credited; v0.5.153: FC +35% amp active-only)",
     fn = function(cu)
         if type(state.combo_can_kill) ~= "function" then
             return { pass = false, reason = "state.combo_can_kill not exposed" }
@@ -8598,10 +8630,12 @@ state.tests["W01_combo_can_kill"] = {
         local s_r, s_q, s_w, s_eff = state.lina_r_damage, state.lina_q_damage,
                                      state.lina_w_damage, state.lina_eff_hp_magical
         local s_rr, s_qr = state.lina_r_ready, state.lina_q_ready
+        local s_fc = state.lina_fc_active
         _cu_push(cu, function()
             state.lina_r_damage = s_r; state.lina_q_damage = s_q
             state.lina_w_damage = s_w; state.lina_eff_hp_magical = s_eff
             state.lina_r_ready = s_rr; state.lina_q_ready = s_qr
+            state.lina_fc_active = s_fc
         end)
         -- remaining burst = R 750 + Q 245 = 995; W mocked HUGE (must be ignored).
         -- v0.5.150: both spells stubbed READY so the damage-math cases below behave
@@ -8611,6 +8645,7 @@ state.tests["W01_combo_can_kill"] = {
         state.lina_w_damage = function() return 99999 end
         state.lina_r_ready = function() return true end
         state.lina_q_ready = function() return true end
+        state.lina_fc_active = function() return false end  -- v0.5.153: FC off by default (existing cases unchanged)
         local eff_ref = 0
         state.lina_eff_hp_magical = function() return eff_ref end
         local tgt = { __wcap_mock = true }
@@ -8670,7 +8705,18 @@ state.tests["W01_combo_can_kill"] = {
         if not state.combo_can_kill(tgt) then
             return { pass = false, reason = "killable target (unkillable stub off) must kill at 945<=995" }
         end
-        return { pass = true, reason = "kill/no-kill/1.05-margin/W-excluded/nil/zero-burst/R-on-CD/unkillable all correct" }
+        -- v0.5.153: Flame Cloak +35% credited active-only. burst 995 vs eff_hp 1050
+        -- -> 1102.5 > 995 (NO kill FC-off) but 1102.5 <= 1343.25 (kill FC-on).
+        eff_ref = 1050
+        if state.combo_can_kill(tgt) then
+            return { pass = false, reason = "FC off: eff_hp 1050 (1102.5) must NOT be killable by raw 995" }
+        end
+        state.lina_fc_active = function() return true end
+        if not state.combo_can_kill(tgt) then
+            return { pass = false, reason = "FC on: eff_hp 1050 must be killable (1102.5<=1343.25)" }
+        end
+        state.lina_fc_active = function() return false end
+        return { pass = true, reason = "kill/no-kill/1.05-margin/W-excluded/nil/zero-burst/R-on-CD/unkillable/FC-amp all correct" }
     end,
 }
 
@@ -11662,6 +11708,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.152 (cannot-kill targeting rules). Lina no longer wastes R or her kill combo on an enemy that cannot be killed right now, and prefers a killable target: Dazzle Shallow Grave (min HP 1), Oracle False Promise (damage delayed, cannot die), and Wraith King with Reincarnation off cooldown (revives if killed). Shared lib predicates Target.HasUnkillableModifier (a threat_data UNKILLABLE_MODIFIERS set) and Target.WillReincarnate (WK ability-readiness; no off-cooldown modifier exists) combine into Target.IsUnkillableNow, gating r_target_blocked, the auto-R kill-steal (loop, re-issue, abort), combo_can_kill (so w_capitalize and the leap-defer do not commit), plus the offense and finisher target pickers now prefer a killable enemy. WK is hard-blocked here (uniform) where Sniper treats it soft. The temporary cluster diagnostics from the prior radius work were removed (clean v0.5.151 base). offline 387 of 387, coverage 48 of 48.")
+LOG:info("Lina brain v0.5.153 (Flame Cloak spell amp in the kill predicates). While Flame Cloak (Aghs Scepter) is active, Lina now credits its +35 percent outgoing spell amp in her kill math the same way the Ethereal +40 percent incoming amp is already credited, and the two stack multiplicatively. The burst-vs-effective-HP checks (r_alone_kill, combo_kill, target_fleeing_fast, the TF r_worth fallback, the Ethereal kill-confirm, and combo_can_kill which gates w_capitalize and the leap-defer) all multiply the burst by 1.35 while the buff is up, via ctx.fc_amp_mult, ctx.r_impact_eff, ctx.combo_total_eff and the lina_fc_active hook. Credited active-only (no speculative pre-cast crediting); with Flame Cloak inactive the math is byte-identical to v0.5.152. offline 387 of 387, coverage 48 of 48.")
 
 return callbacks

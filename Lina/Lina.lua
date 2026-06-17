@@ -1249,6 +1249,14 @@ K.LINA_ENIGMA_BH_RADIUS = 420  -- v0.5.133: Liquipedia 2026-06-14, Black Hole in
 -- component, and do NOT re-add a per-fire turn term, without a demo
 -- proving it.
 K.W_INTERCEPT_MARGIN_S = 0.345
+-- v0.5.151: committed-catch prediction margin. The single-target committed_catch
+-- aim leads the attacker by w_lead + THIS, not by + K.W_INTERCEPT_MARGIN_S above:
+-- the 0.345 bakes in a 0.175 max-180-degree-turn term specific to the Bara CHARGE
+-- intercept, which over-leads a near-Lina committed catch (the prediction landed
+-- ~1.295s ahead instead of the intended ~1.12). 0.17 = the animation envelope
+-- only, so the horizon is ~1.12 and the {cur,pred} band is narrower (cover-both
+-- catches more kiters). The CLUSTER path keeps K.W_INTERCEPT_MARGIN_S unchanged.
+K.W_COMMITTED_LEAD_MARGIN_S = 0.17
 -- v0.5.111.1 lethality horizon in HITS (user demo note: "ww fired when
 -- lethal but too close to lethal ... it was about the calculation based on
 -- hits"). The old inline 4.25 made lethal flip only when ~4 sustained
@@ -1437,6 +1445,43 @@ state.w_lead = function()
     end
     return cp + delay, aoe
 end
+
+-- v0.5.151: pure cover-both placement for the SINGLE-TARGET committed catch.
+-- The defensive committed-attacker W (lina_committed_attacker[_ranged|_melee])
+-- used to aim at one predicted point ~1s ahead; a kiter who changed direction
+-- ended up dist(cur,pred) from that point and the 250-AoE missed ("W way off
+-- Slark"). This aims a 250-AoE that spans BOTH his current and predicted
+-- positions, so the stun lands whether he continues, stops, or reverses; it
+-- skips when the band is too wide for one AoE. Returns (aim, kind, reason):
+--   "catch": aim a {x,y,z} midpoint that covers both, outside Lina's self-AoE
+--            and inside W cast range.
+--   "self":  the covering midpoint sits inside Lina's self-centered AoE, so the
+--            caller leaves committed_catch_pos nil and the self_origin path
+--            self-casts W (the glued-attacker case, unchanged).
+--   "skip":  reason "kiter_band_too_wide" (cur..pred span > 2*aoe; no single AoE
+--            covers it) or "no_catch" (covering aim beyond cast range).
+-- Pure: reads only p.x/p.y, returns a plain table; unit-tested offline + in-brain.
+local function committed_catch_aim(cur, pred, lina, aoe, range)
+    if not (cur and pred and lina) then return nil, "skip", "no_pos" end
+    local bdx = (pred.x or 0) - (cur.x or 0)
+    local bdy = (pred.y or 0) - (cur.y or 0)
+    if (bdx * bdx + bdy * bdy) > (2 * aoe) * (2 * aoe) then
+        return nil, "skip", "kiter_band_too_wide"
+    end
+    local mx = ((cur.x or 0) + (pred.x or 0)) * 0.5
+    local my = ((cur.y or 0) + (pred.y or 0)) * 0.5
+    local ldx = mx - (lina.x or 0)
+    local ldy = my - (lina.y or 0)
+    local d_lina2 = ldx * ldx + ldy * ldy
+    if d_lina2 <= aoe * aoe then
+        return nil, "self", nil
+    elseif d_lina2 <= range * range then
+        return { x = mx, y = my, z = lina.z or 0 }, "catch", nil
+    else
+        return nil, "skip", "no_catch"
+    end
+end
+state.committed_catch_aim = committed_catch_aim
 
 -- v0.5.115.1 (user: "lina is starting the casting too late"): the ONE
 -- segment-coverage intercept criterion, shared by BOTH the armed-peek
@@ -2580,12 +2625,13 @@ local SAVE_FIRE = {
                 local lina_pos = Entity.GetAbsOrigin(me)
                 local att_pos
                 local w_lead_s, w_aoe = state.w_lead()  -- v0.5.112 (#1): was 0.95 / 225 literals
-                -- v0.5.114.3: predict at the full issue-to-effect horizon
-                -- (KV lead + the measured ~0.17 overhead = the user's
-                -- validated 1.12), not the bare KV lead. Stationary
-                -- attackers (the common committed case) are unaffected;
-                -- moving ones predict slightly further along their path.
-                local w_plan_s = w_lead_s + K.W_INTERCEPT_MARGIN_S
+                -- v0.5.151: the CLUSTER path below keeps the Bara-margin horizon
+                -- (w_plan_s = w_lead + K.W_INTERCEPT_MARGIN_S 0.345) for its pts[1]
+                -- / centroid, byte-identical. The SINGLE-TARGET catch uses
+                -- catch_plan_s (~1.12) instead: the 0.345 over-leads a near-Lina
+                -- committed catch (see K.W_COMMITTED_LEAD_MARGIN_S).
+                local w_plan_s     = w_lead_s + K.W_INTERCEPT_MARGIN_S        -- cluster (unchanged)
+                local catch_plan_s = w_lead_s + K.W_COMMITTED_LEAD_MARGIN_S   -- single-target (~1.12)
                 local w_range = FALLBACK_RANGES.W  -- v0.5.113: hoisted (catch + cluster both read it)
                 if Ability.GetCastRange then
                     local okr, r = pcall(Ability.GetCastRange, w)
@@ -2596,33 +2642,36 @@ local SAVE_FIRE = {
                               or Entity.GetAbsOrigin(att)
                 end
                 if not (att_pos and lina_pos) then return false end
-                local dx = (att_pos.x or 0) - (lina_pos.x or 0)
-                local dy = (att_pos.y or 0) - (lina_pos.y or 0)
-                local d2 = dx * dx + dy * dy
-                if d2 > w_aoe * w_aoe then
-                    -- v0.5.112 (#2, user-approved aim-rule extension): the
-                    -- self-centered AoE cannot catch, but an attacker whose
-                    -- PREDICTED position sits inside W's cast range can
-                    -- still be caught by aiming AT that position. This
-                    -- finally gives the v0.5.110.1 ranged W-only chain
-                    -- teeth: a Sniper standing at 600u autoing eats a
-                    -- 130-mana / 8s-CD stun instead of nothing. Committed
-                    -- attackers are mid-attack-chain and mostly stationary,
-                    -- so the predicted point is reliable and the AoE
-                    -- absorbs the residual drift. Out of cast range ->
-                    -- skip exactly as before (re-evaluated next dispatch).
-                    if d2 <= w_range * w_range then
-                        committed_catch_pos = att_pos
-                    else
-                        tlog(2, "w_defensive_skip_no_catch", {
-                            intent = intent_s,
-                            mod    = tostring(threat_mod),
-                            d_pred = string.format("%.0f", math.sqrt(d2)),
-                            range  = string.format("%.0f", w_range),
-                        })
-                        return false
-                    end
+                -- v0.5.151 cover-both single-target placement: aim a 250-AoE that
+                -- spans the attacker's CURRENT and PREDICTED positions so the stun
+                -- lands whether he continues, stops, or reverses; skip when the band
+                -- is too wide for one AoE (the "W way off Slark" whiff). "self"
+                -- leaves committed_catch_pos nil so the self_origin path self-casts W
+                -- (the glued attacker, unchanged). The cluster block below still runs
+                -- on "catch"/"self" (it can override with a centroid), exactly as
+                -- before; "skip" returns false here, mirroring the old out-of-range
+                -- no_catch return. Preserves the v0.5.112 value case (stationary
+                -- attacker: cur == pred so the midpoint == cur).
+                local cur = Entity.GetAbsOrigin(att)
+                local pred_catch = (state.predict_target_pos
+                                    and state.predict_target_pos(att, catch_plan_s)) or cur
+                local c_aim, c_kind, c_reason =
+                    state.committed_catch_aim(cur, pred_catch, lina_pos, w_aoe, w_range)
+                if c_kind == "skip" then
+                    local cdx = (cur and (cur.x or 0) or 0) - (lina_pos.x or 0)
+                    local cdy = (cur and (cur.y or 0) or 0) - (lina_pos.y or 0)
+                    tlog(2, "w_defensive_skip_no_catch", {
+                        intent = intent_s,
+                        mod    = tostring(threat_mod),
+                        reason = c_reason,
+                        d_cur  = string.format("%.0f", math.sqrt(cdx * cdx + cdy * cdy)),
+                        range  = string.format("%.0f", w_range),
+                    })
+                    return false
+                elseif c_kind == "catch" then
+                    committed_catch_pos = c_aim
                 end
+                -- c_kind == "self": committed_catch_pos stays nil (self-cast).
                 -- v0.5.113 (#3, the v0.5.34 max-stun doctrine applied to
                 -- defense): with 2+ committed attackers whose PREDICTED
                 -- positions fit ONE AoE, aim the centroid instead of the
@@ -5342,6 +5391,9 @@ state.lina_q_ready = lina_q_ready
 -- yields eff_hp = math.huge from lina_eff_hp_magical, so math.huge*1.05 > burst).
 state.combo_can_kill = function(target)
     if not target then return false end
+    -- v0.5.152: cannot-kill targets (Shallow Grave / False Promise / WK Reincarnation
+    -- ready) have no securable kill, so w_capitalize + the leap-defer must not commit.
+    if Target.IsUnkillableNow and Target.IsUnkillableNow(target) then return false end
     -- v0.5.150: credit only the spells Lina can ACTUALLY cast right now (off CD +
     -- castable). A spell on cooldown contributes 0 to the burst, so the predicate
     -- reflects a kill she can secure, not one the damage math alone implies.
@@ -5821,6 +5873,9 @@ local function r_target_blocked(c)
     -- v0.5.35 task Nyx-carapace: refuse R against any active spell-deflect
     -- modifier (Nyx Spiked Carapace = 100% spell damage reflect for 4s).
     if target_has_spell_deflect(t) then return true end
+    -- v0.5.152: refuse R on a target that cannot be killed right now (Dazzle Shallow
+    -- Grave / Oracle False Promise / WK Reincarnation ready) -- the kill will not stick.
+    if Target.IsUnkillableNow and Target.IsUnkillableNow(t) then return true end
     return false
 end
 
@@ -6186,19 +6241,30 @@ local function pick_offense_target()
     if not me then return nil end
     local list = get_enemies_in_classify_radius(me)  -- v0.5.36 PERF-12: shared per-tick cache
     if not list then return nil end
-    local attacking, nearest, best_d
+    -- v0.5.152: prefer a KILLABLE target. Track the best killable (attacking-else-
+    -- nearest) AND a fallback that includes cannot-kill targets (Shallow Grave /
+    -- False Promise / WK Reincarnation ready), so Lina switches off an unkillable
+    -- enemy when a killable one exists, but still harasses/W's it if ALL are
+    -- unkillable (never idle; R-commit is gated separately by r_target_blocked).
+    local attacking, nearest, best_d                  -- killable-only
+    local fb_attacking, fb_nearest, fb_best_d         -- fallback (incl unkillable)
     for i = 1, #list do
         local h = list[i]
         -- Skip magic-immune: Lina's entire kit (Q/W/R) is magical, so a BKB'd
         -- target is untouchable - never pick it as a burst target.
         if h and Target.IsAlive(h) and Target.NotIllusion(h) and Target.NotClone(h)
            and not NPC.HasState(h, MS.MODIFIER_STATE_MAGIC_IMMUNE) then
-            local hd = dist_to(h)
-            if not attacking and NPC.IsAttacking and NPC.IsAttacking(h) and hd <= 600 then attacking = h end
-            if not best_d or hd < best_d then best_d, nearest = hd, h end
+            local hd  = dist_to(h)
+            local atk = (NPC.IsAttacking and NPC.IsAttacking(h) and hd <= 600) and true or false
+            if not fb_attacking and atk then fb_attacking = h end
+            if not fb_best_d or hd < fb_best_d then fb_best_d, fb_nearest = hd, h end
+            if not (Target.IsUnkillableNow and Target.IsUnkillableNow(h)) then
+                if not attacking and atk then attacking = h end
+                if not best_d or hd < best_d then best_d, nearest = hd, h end
+            end
         end
     end
-    return attacking or nearest
+    return attacking or nearest or fb_attacking or fb_nearest
 end
 
 -- v0.5.15 IMP-A2: r_finisher target is NOT necessarily the offense target.
@@ -6219,6 +6285,7 @@ local function pick_r_finisher_target()
         local h = list[i]
         if h and Target.IsAlive(h) and Target.NotIllusion(h) and Target.NotClone(h)
            and not NPC.HasState(h, MS.MODIFIER_STATE_MAGIC_IMMUNE)
+           and not (Target.IsUnkillableNow and Target.IsUnkillableNow(h))  -- v0.5.152: a finisher cannot finish an unkillable target
            and dist_to(h) <= rng then
             local eff = lina_eff_hp_magical(h)
             if not best_eff or eff < best_eff then best_eff, best = eff, h end
@@ -7483,7 +7550,8 @@ state.lina_r_kill_steal_tick = function()
            and not NPC.HasState(e, MS.MODIFIER_STATE_MAGIC_IMMUNE)
            and not (Target.HasReadyLinkens and Target.HasReadyLinkens(e))
            and not (Target.HasReadyLotus and Target.HasReadyLotus(e))
-           and not target_has_spell_deflect(e) then
+           and not target_has_spell_deflect(e)
+           and not (Target.IsUnkillableNow and Target.IsUnkillableNow(e)) then
             local eff = lina_eff_hp_magical(e)
             if eff <= impact and dist_to(e) <= rng and eff < best_eff then
                 best, best_eff = e, eff
@@ -7509,6 +7577,7 @@ state.lina_r_kill_steal_tick = function()
                      and not (Target.HasReadyLinkens and Target.HasReadyLinkens(tgt))
                      and not (Target.HasReadyLotus and Target.HasReadyLotus(tgt))
                      and not target_has_spell_deflect(tgt)
+                     and not (Target.IsUnkillableNow and Target.IsUnkillableNow(tgt))
                      and dist_to(tgt) <= rng and lina_eff_hp_magical(tgt) <= impact
               end },
         }, { target = tgt })
@@ -7541,6 +7610,7 @@ state.r_abort_tick = function()
     elseif Target.HasReadyLinkens and Target.HasReadyLinkens(t) then abort, reason = true, "linkens"
     elseif Target.HasReadyLotus and Target.HasReadyLotus(t) then abort, reason = true, "lotus"
     elseif target_has_spell_deflect(t) then abort, reason = true, "spell_deflect"
+    elseif Target.IsUnkillableNow and Target.IsUnkillableNow(t) then abort, reason = true, "unkillable"
     elseif not self_alive_ok() then abort, reason = true, "self_cc"
     end
     if abort then
@@ -8587,7 +8657,20 @@ state.tests["W01_combo_can_kill"] = {
             return { pass = false, reason = "R on CD must not be credited (Q 245 cannot kill eff_hp 900)" }
         end
         state.lina_r_ready = function() return true end
-        return { pass = true, reason = "kill/no-kill/1.05-margin/W-excluded/nil/zero-burst/R-on-CD all correct" }
+        -- v0.5.152: an unkillable target (Shallow Grave / False Promise / WK
+        -- Reincarnation) is never a securable kill, regardless of burst.
+        eff_ref = 900   -- r 750 + q 245 = 995; 945 <= 995 would otherwise kill
+        local s_unk = Target.IsUnkillableNow
+        _cu_push(cu, function() Target.IsUnkillableNow = s_unk end)
+        Target.IsUnkillableNow = function() return true end
+        if state.combo_can_kill(tgt) then
+            return { pass = false, reason = "unkillable target must never be a securable kill" }
+        end
+        Target.IsUnkillableNow = function() return false end
+        if not state.combo_can_kill(tgt) then
+            return { pass = false, reason = "killable target (unkillable stub off) must kill at 945<=995" }
+        end
+        return { pass = true, reason = "kill/no-kill/1.05-margin/W-excluded/nil/zero-burst/R-on-CD/unkillable all correct" }
     end,
 }
 
@@ -8617,6 +8700,57 @@ state.tests["W02_pugna_persistent_rewalk"] = {
             return { pass = false, reason = "regression: Static Storm dropped from PERSISTENT_THREATS" }
         end
         return { pass = true, reason = "pugna + duel + static-storm all persistent" }
+    end,
+}
+
+-- v0.5.151: cover-both committed W-aim placement (pure; no game-API mocks). Guards
+-- the "W way off Slark" fix: the single-target committed catch must aim a 250-AoE
+-- that spans the attacker's current AND predicted positions (midpoint when the
+-- band fits), self-cast a glued attacker, and skip an un-coverable / out-of-range
+-- kiter instead of whiffing.
+state.tests["W06_committed_catch_aim"] = {
+    desc = "v0.5.151: committed_catch_aim covers cur+pred; glued->self; wide band / out-of-range -> skip",
+    fn = function(_cu)
+        local f = state.committed_catch_aim
+        if type(f) ~= "function" then
+            return { pass = false, reason = "committed_catch_aim missing" }
+        end
+        local AOE, RANGE = 250, 750
+        local lina = { x = 0, y = 0, z = 0 }
+        local function d(a, b)
+            local dx = (a.x or 0) - (b.x or 0); local dy = (a.y or 0) - (b.y or 0)
+            return math.sqrt(dx * dx + dy * dy)
+        end
+        -- in-band kiter (cur 400, pred 700; band 300 <= 500): catch covering both
+        local cur, pred = { x = 400, y = 0 }, { x = 700, y = 0 }
+        local aim, kind = f(cur, pred, lina, AOE, RANGE)
+        if kind ~= "catch" then
+            return { pass = false, reason = "in-band kiter must catch, got " .. tostring(kind) }
+        end
+        if d(aim, cur) > AOE or d(aim, pred) > AOE then
+            return { pass = false, reason = "midpoint must cover both endpoints" }
+        end
+        -- value case: stationary attacker at 600u -> catch at ~600
+        local a2, k2 = f({ x = 600, y = 0 }, { x = 600, y = 0 }, lina, AOE, RANGE)
+        if k2 ~= "catch" or math.abs((a2 and a2.x or 0) - 600) > 0.5 then
+            return { pass = false, reason = "stationary 600u must catch at 600" }
+        end
+        -- glued: cur==pred at 150u (inside self-AoE) -> self-cast
+        local _, k3 = f({ x = 150, y = 0 }, { x = 150, y = 0 }, lina, AOE, RANGE)
+        if k3 ~= "self" then
+            return { pass = false, reason = "glued must self-cast, got " .. tostring(k3) }
+        end
+        -- too wide: cur 400, pred 1000 (band 600 > 500) -> skip kiter_band_too_wide
+        local _, k4, r4 = f({ x = 400, y = 0 }, { x = 1000, y = 0 }, lina, AOE, RANGE)
+        if k4 ~= "skip" or r4 ~= "kiter_band_too_wide" then
+            return { pass = false, reason = "wide band must skip kiter_band_too_wide" }
+        end
+        -- out of range: cur==pred at 900u (> 750) -> skip no_catch
+        local _, k5, r5 = f({ x = 900, y = 0 }, { x = 900, y = 0 }, lina, AOE, RANGE)
+        if k5 ~= "skip" or r5 ~= "no_catch" then
+            return { pass = false, reason = "out-of-range must skip no_catch" }
+        end
+        return { pass = true, reason = "catch/self/wide/out-of-range all correct" }
     end,
 }
 
@@ -11528,6 +11662,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.150 (offense-study correctness fixes). combo_can_kill is now readiness-aware: it credits the R and Q burst only when each spell is actually castable (off CD), via mockable lina_r_ready / lina_q_ready hooks. This fixes two consumers at one point: w_capitalize (offense) no longer commits a non-securing combo when R is on cooldown, and the leap-defer killable gate (defense) no longer keeps W and eats a leap it cannot finish, it defers to the airborne or blink dodge. The always-on auto-R kill-steal now refuses a spell-deflect target (Nyx Spiked Carapace) in its selection, its re-issue check, and the in-flight abort (the same guard the manual combo already used), so Laguna is never reflected back onto Lina. Readiness hooks coerce truthy (Ability.IsReady is treated truthy across the codebase, never == true). Demo-confirmed: w_capitalize fires on a killable target with R up and skips when R is down; leap-defer dodges; brain tests 10 of 10. Lina.lua only; offline 384 of 384, coverage 48 of 48.")
+LOG:info("Lina brain v0.5.152 (cannot-kill targeting rules). Lina no longer wastes R or her kill combo on an enemy that cannot be killed right now, and prefers a killable target: Dazzle Shallow Grave (min HP 1), Oracle False Promise (damage delayed, cannot die), and Wraith King with Reincarnation off cooldown (revives if killed). Shared lib predicates Target.HasUnkillableModifier (a threat_data UNKILLABLE_MODIFIERS set) and Target.WillReincarnate (WK ability-readiness; no off-cooldown modifier exists) combine into Target.IsUnkillableNow, gating r_target_blocked, the auto-R kill-steal (loop, re-issue, abort), combo_can_kill (so w_capitalize and the leap-defer do not commit), plus the offense and finisher target pickers now prefer a killable enemy. WK is hard-blocked here (uniform) where Sniper treats it soft. The temporary cluster diagnostics from the prior radius work were removed (clean v0.5.151 base). offline 387 of 387, coverage 48 of 48.")
 
 return callbacks

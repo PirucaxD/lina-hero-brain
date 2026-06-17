@@ -2523,13 +2523,21 @@ local SAVE_FIRE = {
                             local killable = state.combo_can_kill
                                 and _w_caster_for_gate
                                 and state.combo_can_kill(_w_caster_for_gate)
-                            local _ww  = NPCLib.item and NPCLib.item(me, "item_wind_waker")
-                            local _eul = NPCLib.item and NPCLib.item(me, "item_cyclone")
-                            local airborne_ready =
-                                (_ww  and Ability.IsReady and Ability.IsReady(_ww))
-                                or (_eul and Ability.IsReady and Ability.IsReady(_eul))
+                            local _ww   = NPCLib.item and NPCLib.item(me, "item_wind_waker")
+                            local _eul  = NPCLib.item and NPCLib.item(me, "item_cyclone")
+                            -- v0.5.149: Blink is also a defer-target -- a 1200u blink fully
+                            -- exits the leap's landing AoE (the Liquipedia "distance-cancel"
+                            -- nullifier). Without it, when WW/Eul were both on CD (e.g. spent
+                            -- on a Techies minefield) W fired the stun and Lina ATE the Blast
+                            -- Off (demo: threat_unrecognized modifier_stunned x3). Now W steps
+                            -- aside so the chain reaches item_blink (3rd in close_gap).
+                            local _blink = NPCLib.item and NPCLib.item(me, "item_blink")
+                            local dodge_ready =
+                                (_ww   and Ability.IsReady and Ability.IsReady(_ww))
+                                or (_eul  and Ability.IsReady and Ability.IsReady(_eul))
+                                or (_blink and Ability.IsReady and Ability.IsReady(_blink))
                                 or false
-                            if (not killable) and airborne_ready then
+                            if (not killable) and dodge_ready then
                                 tlog(2, "w_defensive_skip_window", {
                                     impact_t = string.format("%.2f", _g_impact_t),
                                     lower    = string.format("%.2f", W_LEAD),
@@ -4944,6 +4952,11 @@ local HOOK_CAST_POLL = {
     -- _cog_marker (the trap marker that lands on the victim, DEMO-confirmed; the VPK grep missed
     -- it but the runtime log is ground truth) so the cast-poll dedups vs the reactive landing.
     rattletrap_power_cogs = { mod = "modifier_rattletrap_cog_marker", range = 250, cone = 360, prox = 250 },
+    -- v0.5.149: the "un-keyable stun" cast-poll entries (Dragon Tail / Storm Bolt / Lightning Bolt /
+    -- Slardar Crush) were REVERTED 2026-06-16. The demo proved those threats have REAL victim modifiers
+    -- already cataloged + handled by the existing composed chains (so the cast-poll was redundant = the
+    -- overlap the user flagged; the stale "un-keyable" VPK list missed the real modifiers -- the runtime
+    -- log is ground truth, the cog lesson again). Cast-poll watches hooks + cogs ONLY.
 }
 
 -- v0.5.147.x hook cast-poll gate (PURE; offline-tested via HK01 + standalone lua).
@@ -11466,6 +11479,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.148 (hook + Power Cogs cast-poll saves, per-skill). Pudge Hook, Clockwerk Hookshot and Power Cogs emit no usable cast anim or OnLinearProjectileCreate signal, and reacting after contact is too late, so the brain polls enemy abilities for Ability.IsInAbilityPhase and dispatches a per-skill save PRE-impact, gated by facing-cone OR proximity (Power Cogs is prox-only, NO_TARGET). Separated per skill: Pudge Hook = instant-first Blink/WW/Eul (Pike and Force dropped, dead zone: a far hook is walkable, a close hook is too short and the turn-then-push too slow); Clockwerk Hookshot = airborne WW/Eul/Blink (the fast hook stuns Lina before Pike/Force can aim); Power Cogs = WW/Force/Pike/Eul (WW and Eul eat time in the airborne window, Force and Pike push out of the cog box). Severity fixes: Pudge hook low to high (the low_severity_high_hp gate was withholding WW at full HP), cog mod modifier_rattletrap_cog_marker medium. The lib carries the per-skill threat data (category, severity, counters); the hero owns the chain ordering. Demo-confirmed; coverage 44 of 46.")
+LOG:info("Lina brain v0.5.149 (Techies threat coverage + close-gap blink). Blast Off! (techies_suicide) cataloged as a leap across the shared lib (profile, arrival kind=leap, category close_gap, severity high) so it arms by proximity on the in-flight modifier_techies_suicide_leap and fires the composed close_gap chain PRE-landing instead of eating a generic modifier_stunned. Sticky Bomb downranked medium to low (the low_severity_high_hp gate now withholds WW at full HP, like Land Mines). M.A.D. cataloged low. Aghanim Minefield Sign (1000r damages-moving zone) gets a 3-item escape chain Blink then BKB then Wind Waker (Eul and Force/Pike cannot clear it). Blink added to the leap-defer dodge set so when WW/Eul are on cooldown W steps aside and a 1200u blink fully exits the leap AoE. Hero-agnostic lib data; offline 384 of 384, coverage 48 of 48. Demo-confirmed Blast Off + Minefield.")
 
 return callbacks

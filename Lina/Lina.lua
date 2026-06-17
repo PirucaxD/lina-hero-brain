@@ -5309,6 +5309,27 @@ state.lina_q_damage       = lina_q_damage
 state.lina_w_damage       = lina_w_damage
 state.lina_eff_hp_magical = lina_eff_hp_magical
 
+-- v0.5.150: ability-readiness hooks for the kill predicate, mockable like the
+-- damage helpers (the in-brain W01 test stubs them). "Ready" = leveled + off CD
+-- + castable (Ability.IsReady). The v0.5.149 offense study found combo_can_kill
+-- credited R/Q while ON COOLDOWN, so w_capitalize committed a non-securing combo
+-- and the leap-defer kept W (no dodge) when it could not actually finish.
+-- NOTE: Ability.IsReady is used TRUTHY everywhere in this codebase (ready_from
+-- L365, the leap-defer dodge_ready, L4606's `... and true or false`); it is NOT
+-- guaranteed to return the literal boolean `true`. So coerce truthy->true rather
+-- than comparing `== true` (which would be stuck-false if IsReady returns a
+-- truthy non-boolean). Mirrors ready_from: leveled + off CD + castable.
+local function lina_r_ready()
+    local r = ability(A.R)
+    return (r ~= nil and Ability.GetLevel(r) > 0 and Ability.IsReady(r)) and true or false
+end
+local function lina_q_ready()
+    local q = ability(A.Q)
+    return (q ~= nil and Ability.GetLevel(q) > 0 and Ability.IsReady(q)) and true or false
+end
+state.lina_r_ready = lina_r_ready
+state.lina_q_ready = lina_q_ready
+
 -- v0.5.137 W-capitalize kill gate (consumed by state.w_capitalize_tick). Can the
 -- brain SECURE a kill on `target` RIGHT NOW? The defensive W (Light Strike Array)
 -- has ALREADY dealt its damage + stun, so credit only the REMAINING burst Q
@@ -5321,8 +5342,16 @@ state.lina_eff_hp_magical = lina_eff_hp_magical
 -- yields eff_hp = math.huge from lina_eff_hp_magical, so math.huge*1.05 > burst).
 state.combo_can_kill = function(target)
     if not target then return false end
-    local burst = (state.lina_r_damage and state.lina_r_damage() or 0)
-                + (state.lina_q_damage and state.lina_q_damage() or 0)
+    -- v0.5.150: credit only the spells Lina can ACTUALLY cast right now (off CD +
+    -- castable). A spell on cooldown contributes 0 to the burst, so the predicate
+    -- reflects a kill she can secure, not one the damage math alone implies.
+    local burst = 0
+    if (state.lina_r_ready and state.lina_r_ready()) and state.lina_r_damage then
+        burst = burst + (state.lina_r_damage() or 0)
+    end
+    if (state.lina_q_ready and state.lina_q_ready()) and state.lina_q_damage then
+        burst = burst + (state.lina_q_damage() or 0)
+    end
     if burst <= 0 then return false end
     local eff_hp = (state.lina_eff_hp_magical and state.lina_eff_hp_magical(target)) or math.huge
     return eff_hp * 1.05 <= burst
@@ -7453,7 +7482,8 @@ state.lina_r_kill_steal_tick = function()
         if e and Target.IsAlive(e) and Target.NotIllusion(e) and Target.NotClone(e)
            and not NPC.HasState(e, MS.MODIFIER_STATE_MAGIC_IMMUNE)
            and not (Target.HasReadyLinkens and Target.HasReadyLinkens(e))
-           and not (Target.HasReadyLotus and Target.HasReadyLotus(e)) then
+           and not (Target.HasReadyLotus and Target.HasReadyLotus(e))
+           and not target_has_spell_deflect(e) then
             local eff = lina_eff_hp_magical(e)
             if eff <= impact and dist_to(e) <= rng and eff < best_eff then
                 best, best_eff = e, eff
@@ -7478,6 +7508,7 @@ state.lina_r_kill_steal_tick = function()
                      and not NPC.HasState(tgt, MS.MODIFIER_STATE_MAGIC_IMMUNE)
                      and not (Target.HasReadyLinkens and Target.HasReadyLinkens(tgt))
                      and not (Target.HasReadyLotus and Target.HasReadyLotus(tgt))
+                     and not target_has_spell_deflect(tgt)
                      and dist_to(tgt) <= rng and lina_eff_hp_magical(tgt) <= impact
               end },
         }, { target = tgt })
@@ -7509,6 +7540,7 @@ state.r_abort_tick = function()
     elseif NPC.HasState(t, MS.MODIFIER_STATE_OUT_OF_GAME) then abort, reason = true, "out_of_game"
     elseif Target.HasReadyLinkens and Target.HasReadyLinkens(t) then abort, reason = true, "linkens"
     elseif Target.HasReadyLotus and Target.HasReadyLotus(t) then abort, reason = true, "lotus"
+    elseif target_has_spell_deflect(t) then abort, reason = true, "spell_deflect"
     elseif not self_alive_ok() then abort, reason = true, "self_cc"
     end
     if abort then
@@ -8488,21 +8520,27 @@ state.tests["M05_panic_bypass_fires"] = {
 -- it mocks r/q/eff-HP to pin the verdict, and mocks W HUGE to prove W is NOT
 -- credited (a future edit that wrongly adds state.lina_w_damage flips this red).
 state.tests["W01_combo_can_kill"] = {
-    desc = "v0.5.137: combo_can_kill = remaining Q+R burst kills target (conservative 1.05; W excluded)",
+    desc = "v0.5.137: combo_can_kill = remaining Q+R burst kills target (conservative 1.05; W excluded; v0.5.150: R/Q on-CD not credited)",
     fn = function(cu)
         if type(state.combo_can_kill) ~= "function" then
             return { pass = false, reason = "state.combo_can_kill not exposed" }
         end
         local s_r, s_q, s_w, s_eff = state.lina_r_damage, state.lina_q_damage,
                                      state.lina_w_damage, state.lina_eff_hp_magical
+        local s_rr, s_qr = state.lina_r_ready, state.lina_q_ready
         _cu_push(cu, function()
             state.lina_r_damage = s_r; state.lina_q_damage = s_q
             state.lina_w_damage = s_w; state.lina_eff_hp_magical = s_eff
+            state.lina_r_ready = s_rr; state.lina_q_ready = s_qr
         end)
         -- remaining burst = R 750 + Q 245 = 995; W mocked HUGE (must be ignored).
+        -- v0.5.150: both spells stubbed READY so the damage-math cases below behave
+        -- as before (the R-on-CD case at the end flips lina_r_ready to test the gate).
         state.lina_r_damage = function() return 750 end
         state.lina_q_damage = function() return 245 end
         state.lina_w_damage = function() return 99999 end
+        state.lina_r_ready = function() return true end
+        state.lina_q_ready = function() return true end
         local eff_ref = 0
         state.lina_eff_hp_magical = function() return eff_ref end
         local tgt = { __wcap_mock = true }
@@ -8538,7 +8576,18 @@ state.tests["W01_combo_can_kill"] = {
         if state.combo_can_kill(tgt) then
             return { pass = false, reason = "zero burst must be false" }
         end
-        return { pass = true, reason = "kill/no-kill/1.05-margin/W-excluded/nil/zero-burst all correct" }
+        -- v0.5.150: R on cooldown -> R NOT credited; remaining Q (245) cannot kill
+        -- a 900-eff-HP target. Guards the study finding (combo_can_kill was
+        -- cooldown-blind, over-crediting w_capitalize + the leap-defer).
+        state.lina_r_damage = function() return 750 end   -- restore lethal damage
+        state.lina_q_damage = function() return 245 end
+        state.lina_r_ready = function() return false end
+        eff_ref = 900
+        if state.combo_can_kill(tgt) then
+            return { pass = false, reason = "R on CD must not be credited (Q 245 cannot kill eff_hp 900)" }
+        end
+        state.lina_r_ready = function() return true end
+        return { pass = true, reason = "kill/no-kill/1.05-margin/W-excluded/nil/zero-burst/R-on-CD all correct" }
     end,
 }
 
@@ -11479,6 +11528,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.149 (Techies threat coverage + close-gap blink). Blast Off! (techies_suicide) cataloged as a leap across the shared lib (profile, arrival kind=leap, category close_gap, severity high) so it arms by proximity on the in-flight modifier_techies_suicide_leap and fires the composed close_gap chain PRE-landing instead of eating a generic modifier_stunned. Sticky Bomb downranked medium to low (the low_severity_high_hp gate now withholds WW at full HP, like Land Mines). M.A.D. cataloged low. Aghanim Minefield Sign (1000r damages-moving zone) gets a 3-item escape chain Blink then BKB then Wind Waker (Eul and Force/Pike cannot clear it). Blink added to the leap-defer dodge set so when WW/Eul are on cooldown W steps aside and a 1200u blink fully exits the leap AoE. Hero-agnostic lib data; offline 384 of 384, coverage 48 of 48. Demo-confirmed Blast Off + Minefield.")
+LOG:info("Lina brain v0.5.150 (offense-study correctness fixes). combo_can_kill is now readiness-aware: it credits the R and Q burst only when each spell is actually castable (off CD), via mockable lina_r_ready / lina_q_ready hooks. This fixes two consumers at one point: w_capitalize (offense) no longer commits a non-securing combo when R is on cooldown, and the leap-defer killable gate (defense) no longer keeps W and eats a leap it cannot finish, it defers to the airborne or blink dodge. The always-on auto-R kill-steal now refuses a spell-deflect target (Nyx Spiked Carapace) in its selection, its re-issue check, and the in-flight abort (the same guard the manual combo already used), so Laguna is never reflected back onto Lina. Readiness hooks coerce truthy (Ability.IsReady is treated truthy across the codebase, never == true). Demo-confirmed: w_capitalize fires on a killable target with R up and skips when R is down; leap-defer dodges; brain tests 10 of 10. Lina.lua only; offline 384 of 384, coverage 48 of 48.")
 
 return callbacks

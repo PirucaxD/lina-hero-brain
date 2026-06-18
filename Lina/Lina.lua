@@ -679,7 +679,7 @@ end
 
 -- v0.5.2: authoritative save chain for Sniper Assassinate (user note
 -- 2026-05-29 + DEMO 3 data). Single-target magical ult; Ethereal-self is
--- DELIBERATELY ABSENT (it amplifies magical damage taken by +40%). The Lotus
+-- DELIBERATELY ABSENT (it amplifies magical damage taken by +30%). The Lotus
 -- HP gate (v0.5.2 C) bypasses lotus-worthy threats.
 --
 -- v0.5.39 BUG-2: chain reordered for the Lotus-defer punishment intent.
@@ -1266,6 +1266,23 @@ K.W_COMMITTED_LEAD_MARGIN_S = 0.17
 -- is far above 7), so the v0.5.110.1 W-only conservation is intact. Tune
 -- from the committed_attacker_armed hits= field.
 K.LINA_LETHAL_HITS = 7
+
+-- v0.5.156 FC TTK gate (FLAME_CLOAK_TTK_PLAN.md). Tunables for the offense-pillar
+-- time-to-kill simulation that replaces the flip-test on the 1-2 enemy starter
+-- path. All demo-tuned; bounded risk = FC fired/held a hair off on a 1-2 kill.
+K.FC_TTK_BASE_REACTION  = 0.8   -- short window for the BKB case (no W-stun lockout) + curated-escape floor (later)
+K.FC_TTK_ACCEL_ABS      = 1.5   -- min seconds saved to count as "meaningfully accelerates" (binds with ACCEL_FRAC via max)
+K.FC_TTK_ACCEL_FRAC     = 0.25  -- and >= this fraction of ttk_off saved (the larger of the two is the threshold)
+K.FC_TTK_DT             = 0.1   -- sim step (s)
+K.FC_TTK_HORIZON        = 12.0  -- sim horizon (s) = the GENERIC non-escape window. A committed equal-speed target cannot
+                                -- outrun a chasing Lina (net separation ~0), so the kill stays reliable for ~the whole
+                                -- fight; the W-stun was the WRONG bound (it assumed the target teleports away at stun-end).
+                                -- Curated per-hero INSTANT escapes (blink/Force/Eul/save) collapse the window later (phased).
+K.FC_DURATION           = 7.0   -- Flame Cloak buff duration (KV flame_cloak_duration)
+K.LINA_BASE_ATTACK_TIME = 1.7   -- Lina base attack time (Liquipedia; no GetBaseAttackTime API).
+                                -- The GetAttackSpeed->interval conversion is the design's flagged
+                                -- risk; the fc_offense_ttk diagnostic logs the derived interval so
+                                -- a demo confirms/tunes it.
 
 -- v0.5.110.1 LETHAL-ONLY ITEM RULE (user demo feedback on v0.5.110: "all
 -- attacks are using items, this way it is impossible for me to commit
@@ -5425,6 +5442,39 @@ state.combo_can_kill = function(target)
     return eff_hp * 1.05 <= burst
 end
 
+-- v0.5.155 FC arbiter, OFFENSE pillar (work-queue #6, Lina/FLAME_CLOAK_ARBITER_DESIGN.md).
+-- The count of kills Flame Cloak's x(1+FC_SPELL_AMP) outgoing amp FLIPS on a committed
+-- burst: the bare burst does NOT kill but the amped burst clearly does (1.05 headroom,
+-- the r_alone_kill convention). The primary target uses the full combo_total (W+Q+R);
+-- AoE members (enemies_in_aoe, may be nil for single-target) use q+w only since R hits
+-- only the primary. Returns the flip COUNT: 0 = do not spend FC offensively (the bare
+-- combo already kills, or the target is un-killable even amped); >=1 = FC rescues that
+-- many kills. Phase 1 gates the existing FC openers on count >= 1 (primary-only); the
+-- per-tick arbiter + the AoE/multi-target magnitude land in later phases.
+state.fc_offense_value = function(ctx, target, enemies_in_aoe)
+    if not (ctx and target) then return 0 end
+    local amp = 1 + FC_SPELL_AMP
+    local count = 0
+    local combo_total = ctx.combo_total or 0
+    local eff_p = (state.lina_eff_hp_magical and state.lina_eff_hp_magical(target)) or math.huge
+    if combo_total > 0 and eff_p > combo_total and eff_p * 1.05 <= combo_total * amp then
+        count = count + 1
+    end
+    local aoe_burst = (ctx.q_dmg or 0) + (ctx.w_dmg or 0)
+    if aoe_burst > 0 and enemies_in_aoe then
+        for i = 1, #enemies_in_aoe do
+            local u = enemies_in_aoe[i]
+            if u and u ~= target then
+                local eff_u = (state.lina_eff_hp_magical and state.lina_eff_hp_magical(u)) or math.huge
+                if eff_u > aoe_burst and eff_u * 1.05 <= aoe_burst * amp then
+                    count = count + 1
+                end
+            end
+        end
+    end
+    return count
+end
+
 -- v0.5.36 MAINT-13: single source of truth for the Fiery Soul stack/cap
 -- snapshot. build_layer1_ctx and the tf_q_poke pre-ctx branch both need
 -- {stacks, cap, at_cap, shard_window} and used to duplicate the lookup -
@@ -5749,15 +5799,20 @@ local W_AOE, W_LEAD = 250, 0.95
 -- half ~110; length 1075; representative lead = cast 0.35 + ~half-length travel
 -- at 1200 u/s).
 local Q_HALF_WIDTH, Q_LENGTH, Q_LINE_LEAD = 110, 1075, 0.8
--- v0.5.79 feature C: Ethereal Blade magic-damage amplification used by the
--- ether_wqr kill-confirm. Ethereal's debuff amplifies magic damage taken by
--- the target (~+40% in 7.4x; the IMP-A10 gate frames it as "-30 MR amp"). The
--- kill-confirm multiplies r_total by (1 + this) and compares to eff_hp_magical.
--- Tunable here if the live amp differs; the kill-confirm toggle (default ON)
--- and the wqr fall-through bound any error to "engage without ethereal".
+-- v0.5.79 feature C / v0.5.154: Ethereal Blade magic-damage amplification used
+-- by the ether_wqr kill-confirm. Ether Blast reduces the target's magic
+-- resistance by 30% (Liquipedia 7.41d; nerfed from 40% in 7.40), and since Dota
+-- magic resistance stacks multiplicatively a -30% reduction is exactly a x1.30
+-- multiplier on magic damage taken -> amp = 0.30. The IMP-A10 gate's "-30 MR
+-- amp" comments already tracked this; only the constant was stale at 0.40.
+-- The kill-confirm multiplies combo_total_eff by (1 + this) and compares to
+-- eff_hp_magical (which already bakes in the target's base resistance, so the
+-- x1.30 Ethereal factor is exact). Tunable here if the live value changes; the
+-- toggle (default ON) and the wqr fall-through bound any error to "engage
+-- without ethereal".
 -- v0.5.153 sibling: FC_SPELL_AMP (defined up by the readiness hooks) credits
 -- Flame Cloak's +35% OUTGOING amp; it stacks multiplicatively with this.
-local ETHER_MAGIC_AMP = 0.40
+local ETHER_MAGIC_AMP = 0.30
 
 -- v0.5.80 feature D: power-spike save chips for the live Diagnostics HUD.
 -- The at-a-glance "am I safe right now" set: high-impact defensive saves +
@@ -5903,6 +5958,270 @@ local function r_target_blocked(c)
     -- Grave / Oracle False Promise / WK Reincarnation ready) -- the kill will not stick.
     if Target.IsUnkillableNow and Target.IsUnkillableNow(t) then return true end
     return false
+end
+
+-- ============================ FC TTK offense gate (v0.5.156) ============================
+-- Work-queue #6, FC value-arbiter OFFENSE pillar. Replaces the flip-test
+-- (state.fc_offense_value) on the 1-2 enemy STARTER path with a time-to-kill
+-- simulation: with FC, can Lina kill this target (instant W+Q+R burst, then
+-- Fiery-Soul autos + one W/Q re-cast, minus regen) before it escapes / pops a
+-- save, and does FC SECURE or meaningfully ACCELERATE that kill? Spec:
+-- Lina/FLAME_CLOAK_TTK_DESIGN.md. TF (3+) keeps state.fc_offense_value (the AoE
+-- flip) at the tf_opener + tf_burst sites. Defined HERE (after target_has_spell_
+-- deflect + r_target_blocked, before the openers) so those locals resolve at
+-- DEFINITION time -- the v0.5.92/95.1 forward-reference lesson.
+
+-- Lina's avg NOMINAL auto damage (pre-mitigation). (GetTrueDamage +
+-- GetTrueMaximumDamage)/2 is the canonical pair (NPC.GetAttackDamage does not
+-- exist; the attacker_can_kill_self precedent). Mockable seam.
+state.lina_auto_avg = function()
+    local me = state.self_npc
+    if not (me and NPC.GetTrueDamage and NPC.GetTrueMaximumDamage) then return 0 end
+    local ok1, dmin = pcall(NPC.GetTrueDamage, me)
+    local ok2, dmax = pcall(NPC.GetTrueMaximumDamage, me)
+    if ok1 and ok2 and type(dmin) == "number" and type(dmax) == "number" and dmax > 0 then
+        return (dmin + dmax) / 2
+    end
+    return 0
+end
+
+-- Pure: attack interval (s) at a Fiery Soul stack count, from the FS-free base
+-- multiplier + per-stack multiplier. as = base + stacks*per_mult, capped at the
+-- 700-AS multiplier (7.0); interval = BAT/as, clamped [0.1, BAT]. Used by both the
+-- starting-interval seam and the dynamic sim (which re-calls it as stacks climb).
+local function fs_interval(base_as, per_mult, stacks)
+    local as = math.min((base_as or 1.0) + (stacks or 0) * (per_mult or 0), 7.0)
+    if as <= 0 then return K.LINA_BASE_ATTACK_TIME end
+    return math.min(math.max(K.LINA_BASE_ATTACK_TIME / as, 0.1), K.LINA_BASE_ATTACK_TIME)
+end
+
+-- Strip the live Fiery Soul stacks out of NPC.GetAttackSpeed to a FS-free base
+-- multiplier (base + items) + the per-stack multiplier + the live stack count.
+-- Returns (base_as, per_mult, cur). The single seam touching the live AS / stack
+-- APIs (v0.5.156.1 contract: GetAttackSpeed = IAS multiplier (100+bonus)/100
+-- INCLUDING current FS; a FS stack is `per` AS POINTS, KV {8,16,24,32}, = per/100
+-- on the multiplier). fs_interval re-adds the SCENARIO stacks on top. Unreadable
+-- AS -> base 1.0 / per_mult 0 (base BAT cadence).
+state.lina_fs_model = function()
+    local me = state.self_npc
+    local as
+    if me and NPC.GetAttackSpeed then
+        local ok, v = pcall(NPC.GetAttackSpeed, me)
+        if ok and type(v) == "number" and v > 0 then as = v end
+    end
+    local fs  = state.compute_fs_state and state.compute_fs_state(me)
+    local cur = (fs and fs.stacks) or 0
+    local e   = ability(A.E)
+    local per = (e and Ability.GetLevel(e) > 0
+                 and state.item_kv(e, "fiery_soul_attack_speed_bonus", 0)) or 0
+    local per_mult = per / 100
+    if not as then return 1.0, per_mult, cur end                -- AS unreadable -> base cadence
+    return math.max(as - cur * per_mult, 0.1), per_mult, cur    -- FS-free base (base + items)
+end
+
+-- Starting attack interval for the scenario (v0.5.156.2 stack-aware; kept as a
+-- convenience + for the fc_offense_ttk i_off/i_fc display). no-FC starts at
+-- min(cur+3, 7) stacks (the WQR combo's own +3, one per spell cast); FC sets 7.
+-- The sim (fc_ttk_sim) climbs from here as W/Q re-casts add stacks (v0.5.156.3).
+-- CAVEAT: if FC is ALREADY active at eval (cur is FC's 7 -- e.g. a manual pre-cast),
+-- the no-FC counterfactual collapses to 7 (pre-FC stacks unknowable); the gate
+-- decides with FC NOT active, so cur is the natural pre-combo count there.
+state.lina_attack_interval = function(with_fc)
+    local base_as, per_mult, cur = state.lina_fs_model()
+    local stacks = with_fc and 7 or math.min(cur + 3, 7)
+    return fs_interval(base_as, per_mult, stacks)
+end
+
+-- True if the target is magic-immune via BKB (canonical modifier, VPK-verified).
+-- The sim zeroes magical damage during BKB (autos still land) + the window
+-- collapses to base_reaction (the W stun won't land). Mockable seam.
+state.lina_target_has_bkb = function(target)
+    return (target and NPC.HasModifier
+            and NPC.HasModifier(target, "modifier_black_king_bar_immune")) and true or false
+end
+
+-- PURE time-to-kill simulation (NO API calls -> offline-verifiable; FCTTK01 tests
+-- it directly with hand-built inputs). Drains the target's RAW HP: t=0 instant
+-- W+Q+R magical burst, then Fiery-Soul autos (physical) + one W and one Q re-cast
+-- (magical) at their base CDs, minus passive regen each step.
+-- DYNAMIC Fiery Soul stacks (v0.5.156.3): the auto cadence starts at stacks_off
+-- (no FC = min(cur+3,7), the combo's own +3) or stacks_fc (FC = 7), and EACH W/Q
+-- re-cast grants +1 stack (cap 7) -> the interval is recomputed from base_as +
+-- stacks*per_mult. So without FC the autos speed up as the recasts land (FC starts
+-- capped at 7, so its cadence is constant). This is what lets us value FC at any
+-- stack state (incl. mid-combo), not just a fixed snapshot.
+-- Magical packet = nominal * magic_mult * (FC amp while t < FC_DURATION); bkb zeroes
+-- ALL magical (autos still land). Returns TTK seconds (0 if burst one-shots) or huge.
+state.fc_ttk_sim = function(inputs, with_fc)
+    if not inputs then return math.huge end
+    local amp      = with_fc and (1 + FC_SPELL_AMP) or 1
+    local mm       = inputs.bkb and 0 or (inputs.magic_mult or 1)
+    local pm       = inputs.phys_mult or 1
+    local base_as  = inputs.base_as or 1.0
+    local per_mult = inputs.per_mult or 0
+    local stacks   = with_fc and (inputs.stacks_fc or 7) or (inputs.stacks_off or 0)
+    local interval = fs_interval(base_as, per_mult, stacks)
+    local hp = inputs.hp or math.huge
+    -- t=0 burst (within the FC window -> amped when with_fc)
+    hp = hp - (inputs.burst or 0) * mm * amp
+    if hp <= 0 then return 0 end
+    local next_auto = interval        -- first auto one interval in (she casts through the open)
+    local w_done, q_done = false, false
+    local t = K.FC_TTK_DT
+    while t <= K.FC_TTK_HORIZON + 1e-9 do
+        while next_auto <= t + 1e-9 do
+            hp = hp - (inputs.auto_avg or 0) * pm
+            next_auto = next_auto + interval
+        end
+        if (not w_done) and t + 1e-9 >= (inputs.w_recast_t or math.huge) then
+            local a = ((inputs.w_recast_t or math.huge) < K.FC_DURATION) and amp or 1
+            hp = hp - (inputs.w_dmg or 0) * mm * a
+            stacks = math.min(stacks + 1, 7)              -- the re-cast grants a Fiery Soul stack
+            interval = fs_interval(base_as, per_mult, stacks)
+            w_done = true
+        end
+        if (not q_done) and t + 1e-9 >= (inputs.q_recast_t or math.huge) then
+            local a = ((inputs.q_recast_t or math.huge) < K.FC_DURATION) and amp or 1
+            hp = hp - (inputs.q_dmg or 0) * mm * a
+            stacks = math.min(stacks + 1, 7)
+            interval = fs_interval(base_as, per_mult, stacks)
+            q_done = true
+        end
+        if hp <= 0 then return t end
+        hp = hp + (inputs.regen or 0) * K.FC_TTK_DT   -- passive regen over this dt
+        t = t + K.FC_TTK_DT
+    end
+    return math.huge
+end
+
+-- Gather the raw, item-aware sim inputs ONCE (so fc_offense_ttk runs the pure sim
+-- twice without re-reading APIs). All numeric reads pcall-guarded with conservative
+-- fallbacks. nil if target gone. burst/w_dmg/q_dmg are NOMINAL magical (ctx already
+-- summed them); the sim applies the resist mult + FC amp. W/Q re-cast at their BASE
+-- cooldown from t=0 (they fire in the burst), KV arrays keyed on live level.
+state.fc_ttk_inputs = function(ctx, target)
+    if not (ctx and target and Entity.IsEntity(target) and Target.IsAlive(target)) then return nil end
+    local hp = (Entity.GetHealth and Entity.GetHealth(target)) or math.huge
+    -- magical fraction-through: GetMagicalArmorDamageMultiplier (e.g. 0.75 = 25% MR);
+    -- fallback (1 - GetMagicalResist); fallback 1.0 (full damage = slight over-fire, accepted).
+    local mm = 1.0
+    if NPC.GetMagicalArmorDamageMultiplier then
+        local ok, v = pcall(NPC.GetMagicalArmorDamageMultiplier, target)
+        if ok and type(v) == "number" and v > 0 then mm = v
+        elseif NPC.GetMagicalResist then
+            local ok2, r = pcall(NPC.GetMagicalResist, target)
+            if ok2 and type(r) == "number" then mm = math.max(0, 1 - r) end
+        end
+    end
+    local pm = 1.0
+    if NPC.GetArmorDamageMultiplier then
+        local ok, v = pcall(NPC.GetArmorDamageMultiplier, target)
+        if ok and type(v) == "number" and v > 0 then pm = v end
+    end
+    local regen = 0
+    if NPC.CalculateHealthRegen then
+        local ok, v = pcall(NPC.CalculateHealthRegen, target)
+        if ok and type(v) == "number" and v > 0 then regen = v end
+    end
+    -- W/Q base cooldown (s) per live level (KV light_strike_array {13,11,9,7},
+    -- dragon_slave {11,10,9,8}); not leveled -> never re-casts (math.huge).
+    local w_ab, q_ab = ability(A.W), ability(A.Q)
+    local w_lvl = (w_ab and Ability.GetLevel(w_ab)) or 0
+    local q_lvl = (q_ab and Ability.GetLevel(q_ab)) or 0
+    -- Fiery Soul attack-speed model + the per-scenario starting stacks: no-FC the
+    -- WQR combo grants +3 (min(cur+3,7)); FC sets 7. The sim climbs from there.
+    local base_as, per_mult, cur = state.lina_fs_model()
+    local stacks_off = math.min(cur + 3, 7)
+    return {
+        hp           = hp,
+        magic_mult   = mm,
+        phys_mult    = pm,
+        regen        = regen,
+        burst        = ctx.combo_total or 0,   -- nominal W+Q+R magical
+        w_dmg        = ctx.w_dmg or 0,
+        q_dmg        = ctx.q_dmg or 0,
+        auto_avg     = state.lina_auto_avg(),
+        base_as      = base_as,
+        per_mult     = per_mult,
+        stacks_off   = stacks_off,
+        stacks_fc    = 7,
+        interval_off = fs_interval(base_as, per_mult, stacks_off),  -- starting cadence (log/display)
+        interval_fc  = fs_interval(base_as, per_mult, 7),
+        w_recast_t   = ({13, 11, 9, 7})[w_lvl] or math.huge,
+        q_recast_t   = ({11, 10, 9, 8})[q_lvl] or math.huge,
+        bkb          = state.lina_target_has_bkb(target),
+    }
+end
+
+-- Convenience wrapper named in the design (gather + sim). fc_offense_ttk gathers
+-- once + sims twice for efficiency; this is the one-shot form for callers/tests.
+state.fc_ttk = function(ctx, target, with_fc)
+    return state.fc_ttk_sim(state.fc_ttk_inputs(ctx, target), with_fc)
+end
+
+-- Escape/negate window: how long the target stays reliably killable. v0.5.157
+-- RATIONALIZED: a committed equal-speed target CANNOT outrun a chasing Lina (net
+-- separation ~0 -> no finite walk-out escape), so the GENERIC window = the sim
+-- horizon (the kill stays reliable for ~the whole fight). The old W-stun+reaction
+-- (~3.2s) modeled the wrong thing (target teleporting away at stun-end) and almost
+-- never fired. BKB is the exception: the W stun won't land (magic immune) AND FC's
+-- spell amp does nothing, so use the short base_reaction window -> FC refuses vs
+-- BKB. Mockable seam (FCTTK02 mocks it). PHASED: curated per-hero INSTANT escapes
+-- (ready blink/Force/Eul/save) will return W_stun+reaction or shorter here later.
+state.fc_offense_window = function(inputs)
+    if inputs and inputs.bkb then return K.FC_TTK_BASE_REACTION end
+    return K.FC_TTK_HORIZON
+end
+
+-- The OFFENSE-pillar FC trigger for the 1-2 enemy starter path (replaces the
+-- starter want_fc's fc_offense_value flip-gate). Fires FC iff it SECURES (the
+-- kill misses the window without FC) or meaningfully ACCELERATES it. Refuses on
+-- un-killable / spell-deflect / ready Lotus, or when FC can't secure even amped.
+-- Folds the removed v0.5.155.1 fc_offense_gate diagnostic into one fc_offense_ttk
+-- log (ttk_off / ttk_fc / window / decision + the derived interval for AS tuning).
+state.fc_offense_ttk = function(ctx, target)
+    if not (ctx and target) then return false end
+    if (Target.IsUnkillableNow and Target.IsUnkillableNow(target))
+       or target_has_spell_deflect(target)
+       or (Target.HasReadyLotus and Target.HasReadyLotus(target)) then
+        tlog(1, "fc_offense_ttk", { target = uname(target), decision = "refuse_unkillable" })
+        return false
+    end
+    local inputs = state.fc_ttk_inputs(ctx, target)
+    if not inputs then return false end
+    local window  = state.fc_offense_window(inputs)
+    local ttk_off = state.fc_ttk_sim(inputs, false)
+    local ttk_fc  = state.fc_ttk_sim(inputs, true)
+    local decision
+    if ttk_fc > window then
+        decision = "refuse_no_secure"
+    elseif ttk_off > window then
+        decision = "secure"
+    elseif (ttk_off - ttk_fc) >= math.max(K.FC_TTK_ACCEL_ABS, K.FC_TTK_ACCEL_FRAC * ttk_off) then
+        decision = "accelerate"
+    else
+        decision = "hold"
+    end
+    tlog(1, "fc_offense_ttk", {
+        target   = uname(target),
+        decision = decision,
+        ttk_off  = (ttk_off == math.huge) and "inf" or string.format("%.2f", ttk_off),
+        ttk_fc   = (ttk_fc  == math.huge) and "inf" or string.format("%.2f", ttk_fc),
+        window   = string.format("%.2f", window),
+        bkb      = inputs.bkb and "y" or "n",
+        fc_ready = (ctx and ctx.flame_cloak_ready) and "y" or "n",
+        i_off    = string.format("%.2f", inputs.interval_off or 0),
+        i_fc     = string.format("%.2f", inputs.interval_fc or 0),
+        auto     = string.format("%.0f", inputs.auto_avg or 0),
+        regen    = string.format("%.1f", inputs.regen or 0),
+        hp       = string.format("%.0f", inputs.hp or 0),
+        burst    = string.format("%.0f", inputs.burst or 0),
+        mm       = string.format("%.2f", inputs.magic_mult or 0),
+        pm       = string.format("%.2f", inputs.phys_mult or 0),
+        fs       = string.format("%d", (state.compute_fs_state and state.compute_fs_state(state.self_npc) or {}).stacks or 0),
+        s_off    = string.format("%d", inputs.stacks_off or 0),
+    })
+    return decision == "secure" or decision == "accelerate"
 end
 
 -- Fire one step now. kind: ut (R) / pt (W,Q) / nt (Flame Cloak) / item_target
@@ -6874,6 +7193,7 @@ state.lina_starter_tick = function(force)
     local fc_throttled = (now() - (state.last_fc_dispatch_t or 0)) < 1.5
     local fc_cost = ctx.flame_cloak_ready and ability_mana(A.FC) or 0
     local want_fc = fc_menu_on and is_burst_arch
+                    and state.fc_offense_ttk(ctx, target)  -- v0.5.156: TTK gate (1-2 starter path: secures or accelerates the kill)
                     and ctx.flame_cloak_ready
                     and not ctx.flame_cloak_in_flight  -- v0.5.34 task E (was flame_cloak_active)
                     and not ctx.is_channelling
@@ -7277,6 +7597,7 @@ state.lina_teamfight_tick = function(force)
     local opener_cost   = fc_cost + ability_mana(A.W) + ability_mana(A.Q)
                           + ability_mana(A.R)
     local want_fc_open = fc_menu_on
+                          and (state.fc_offense_value(ctx, ctx.target, nil) >= 1)  -- v0.5.156: TF (3+) keeps the flip/AoE pillar
                           and not state.fc_tf_opener_fired
                           and ctx.ready_w and ctx.ready_r
                           and ctx.flame_cloak_ready
@@ -7401,6 +7722,7 @@ state.lina_teamfight_tick = function(force)
         -- burst-site FC only re-fires after the per-engagement latch clears
         -- (>=4s TF-tick gap), avoiding double-spend on a 25s CD ability.
         local want_fc = fc_menu_on
+                        and (state.fc_offense_value(ctx, r_target, nil) >= 1)  -- v0.5.156: TF (3+) keeps the flip/AoE pillar
                         and not state.fc_tf_opener_fired
                         and ctx.flame_cloak_ready
                         and not ctx.flame_cloak_in_flight  -- v0.5.34 task E (was flame_cloak_active)
@@ -7881,6 +8203,11 @@ state.combo_key_tick = function()
                 state.combo_hold_active_mode = (enemies >= 3) and "tf" or "starter"
                 tlog(1, "combo_classify", { enemies = string.format("%d", enemies),
                     mode = state.combo_hold_active_mode })
+                -- v0.5.156.4 combo-to-kill timer: stamp the combo-press time + FC state
+                -- so OnNpcDying can log the REAL elapsed time to the target's death (to
+                -- validate the TTK model against a stopwatch). One stamp per hold.
+                state.combo_timer_t0       = state.combo_press_t or now()
+                state.combo_timer_fc_start = (state.lina_fc_active and state.lina_fc_active()) and true or false
             end
             if state.combo_hold_active_mode == "tf" then
                 state.lina_teamfight_tick(force_down)
@@ -8621,6 +8948,123 @@ state.tests["M05_panic_bypass_fires"] = {
 -- test injects controlled numbers (the v0.5.17 lesson-14 mockability pattern):
 -- it mocks r/q/eff-HP to pin the verdict, and mocks W HUGE to prove W is NOT
 -- credited (a future edit that wrongly adds state.lina_w_damage flips this red).
+state.tests["FC01_offense_value_flip"] = {
+    desc = "v0.5.155 FC offense pillar: fc_offense_value = count of kills FC's x(1+FC_SPELL_AMP) flips on the committed combo (primary-only)",
+    fn = function(cu)
+        if type(state.fc_offense_value) ~= "function" then
+            return { pass = false, reason = "state.fc_offense_value not exposed" }
+        end
+        local s_eff = state.lina_eff_hp_magical
+        _cu_push(cu, function() state.lina_eff_hp_magical = s_eff end)
+        -- combo_total = 1000; FC amp 1.35 -> amped 1350. Flip band = (1000, 1350/1.05 = 1285.7].
+        local cases = {
+            { eff = 1100, want = 1, why = "bare 1000 misses, amped 1350 kills (1155<=1350)" },
+            { eff = 1280, want = 1, why = "top of band (1344<=1350)" },
+            { eff = 900,  want = 0, why = "bare combo already kills" },
+            { eff = 1300, want = 0, why = "un-killable even amped (1365>1350)" },
+        }
+        for _, c in ipairs(cases) do
+            state.lina_eff_hp_magical = function(_) return c.eff end
+            local ctx = { combo_total = 1000, q_dmg = 0, w_dmg = 0 }
+            local got = state.fc_offense_value(ctx, "T", nil)
+            if got ~= c.want then
+                return { pass = false, reason = ("eff=%d got=%d want=%d (%s)"):format(c.eff, got, c.want, c.why) }
+            end
+        end
+        if state.fc_offense_value(nil, "T", nil) ~= 0 then return { pass = false, reason = "nil ctx must be 0" } end
+        if state.fc_offense_value({ combo_total = 1000 }, nil, nil) ~= 0 then return { pass = false, reason = "nil target must be 0" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCTTK01_fc_ttk_sim"] = {
+    desc = "v0.5.156.3 FC TTK sim: burst/autos/regen/FC-flip/BKB + DYNAMIC FS-stack climb on recasts",
+    fn = function(_cu)
+        if type(state.fc_ttk_sim) ~= "function" then
+            return { pass = false, reason = "state.fc_ttk_sim not exposed" }
+        end
+        -- base_as 1.7 + per_mult 0 -> fs_interval = BAT/1.7 = 1.0s regardless of stacks
+        -- (replicates the original fixed-1.0s cases). The dynamic cases set per_mult > 0.
+        local base = { magic_mult = 1, phys_mult = 1, regen = 0, w_dmg = 0, q_dmg = 0,
+            base_as = 1.7, per_mult = 0, stacks_off = 0, stacks_fc = 0,
+            w_recast_t = math.huge, q_recast_t = math.huge, bkb = false }
+        local function with(over)
+            local o = {} for k, v in pairs(base) do o[k] = v end
+            for k, v in pairs(over) do o[k] = v end return o
+        end
+        local function near(got, want)
+            return (want == math.huge and got == math.huge)
+                or (got ~= math.huge and math.abs(got - want) < 1e-6)
+        end
+        local cases = {
+            { name = "burst_one_shot",   inp = with{ hp = 900,  burst = 1000, auto_avg = 0 },   fc = false, want = 0 },
+            { name = "burst_plus_autos", inp = with{ hp = 1200, burst = 1000, auto_avg = 100 }, fc = false, want = 2.0 },
+            { name = "regen_sustains",   inp = with{ hp = 1100, burst = 1000, auto_avg = 10, regen = 50 }, fc = false, want = math.huge },
+            { name = "fc_flip_off",      inp = with{ hp = 1200, burst = 1000, auto_avg = 0 },   fc = false, want = math.huge },
+            { name = "fc_flip_on",       inp = with{ hp = 1200, burst = 1000, auto_avg = 0 },   fc = true,  want = 0 },
+            { name = "bkb_autos_only",   inp = with{ hp = 250,  burst = 1000, auto_avg = 100, bkb = true }, fc = false, want = 3.0 },
+            -- DYNAMIC climb: per_mult 1.7 -> each +1 stack shortens the interval. autos
+            -- 100/hit, hp 350. W recast t=1.5 -> 1 stack (interval 1.0->0.5), Q recast
+            -- t=2.5 -> 2 stacks (->0.333); autos land t=1,2,2.5,3 -> kill at t=3.0.
+            { name = "dynamic_recast_climb", inp = with{ hp = 350, burst = 0, auto_avg = 100,
+                base_as = 1.7, per_mult = 1.7, stacks_off = 0, w_recast_t = 1.5, q_recast_t = 2.5 },
+                fc = false, want = 3.0 },
+            -- same but per_mult 0 (no climb): interval 1.0 throughout -> autos t=1,2,3,4 -> 4.0.
+            { name = "no_climb_control", inp = with{ hp = 350, burst = 0, auto_avg = 100,
+                base_as = 1.7, per_mult = 0, stacks_off = 0, w_recast_t = 1.5, q_recast_t = 2.5 },
+                fc = false, want = 4.0 },
+        }
+        for _, c in ipairs(cases) do
+            local got = state.fc_ttk_sim(c.inp, c.fc)
+            if not near(got, c.want) then
+                return { pass = false, reason = ("%s got=%s want=%s"):format(c.name, tostring(got), tostring(c.want)) }
+            end
+        end
+        if state.fc_ttk_sim(nil, false) ~= math.huge then
+            return { pass = false, reason = "nil inputs must be inf" }
+        end
+        return { pass = true }
+    end,
+}
+state.tests["FCTTK02_fc_offense_ttk_trigger"] = {
+    desc = "v0.5.157 FC TTK trigger: window=horizon; secure / accelerate / hold / refuse_no_secure / refuse_unkillable (mocks sim+inputs+window)",
+    fn = function(cu)
+        if type(state.fc_offense_ttk) ~= "function" then
+            return { pass = false, reason = "state.fc_offense_ttk not exposed" }
+        end
+        local s_sim, s_in, s_win = state.fc_ttk_sim, state.fc_ttk_inputs, state.fc_offense_window
+        local s_unk, s_lot = Target.IsUnkillableNow, Target.HasReadyLotus
+        _cu_push(cu, function()
+            state.fc_ttk_sim = s_sim; state.fc_ttk_inputs = s_in; state.fc_offense_window = s_win
+            Target.IsUnkillableNow = s_unk; Target.HasReadyLotus = s_lot
+        end)
+        Target.IsUnkillableNow  = function() return false end
+        Target.HasReadyLotus    = function() return false end
+        state.fc_ttk_inputs     = function() return { bkb = false } end
+        state.fc_offense_window = function() return 12.0 end  -- generic = horizon (deterministic for the test)
+        local off_v, fc_v = 0, 0
+        state.fc_ttk_sim = function(_inp, with_fc) return with_fc and fc_v or off_v end
+        local tgt = { __fcttk = true }
+        local cases = {
+            { name = "secure",        off = math.huge, fc = 5.0,       want = true  },  -- bare misses horizon, FC kills
+            { name = "refuse_no_sec", off = math.huge, fc = math.huge, want = false }, -- FC also misses horizon -> refuse
+            { name = "accelerate",    off = 10.0,      fc = 5.0,       want = true  },  -- saved 5 >= max(1.5, 0.25*10=2.5)
+            { name = "hold",          off = 4.0,       fc = 3.5,       want = false }, -- saved 0.5 < max(1.5, 1.0)
+        }
+        for _, c in ipairs(cases) do
+            off_v, fc_v = c.off, c.fc
+            local got = state.fc_offense_ttk({}, tgt) and true or false
+            if got ~= c.want then
+                return { pass = false, reason = ("%s off=%.2f fc=%.2f got=%s want=%s"):format(c.name, c.off, c.fc, tostring(got), tostring(c.want)) }
+            end
+        end
+        Target.IsUnkillableNow = function() return true end
+        off_v, fc_v = 5.0, 0.0
+        if state.fc_offense_ttk({}, tgt) then
+            return { pass = false, reason = "refuse_unkillable must not fire" }
+        end
+        return { pass = true }
+    end,
+}
 state.tests["W01_combo_can_kill"] = {
     desc = "v0.5.137: combo_can_kill = remaining Q+R burst kills target (conservative 1.05; W excluded; v0.5.150: R/Q on-CD not credited; v0.5.153: FC +35% amp active-only)",
     fn = function(cu)
@@ -11575,6 +12019,23 @@ end
 --       use a `state.last_postmortem_t` dedup stamp to prevent double-logging
 --       when both callbacks fire for the same death.
 function callbacks.OnNpcDying(npc)
+    -- v0.5.156.4 combo-to-kill timer: when an enemy hero dies while a combo timer is
+    -- armed (stamped on combo-press in combo_key_tick), log the REAL elapsed time
+    -- combo-press -> death, so the TTK model can be validated against the stopwatch.
+    -- Enemy-hero only (skip creeps/illusions); 20s staleness guard; clears on log.
+    if state.combo_timer_t0 and npc and npc ~= state.self_npc
+       and Target.IsEnemyHero and Target.IsEnemyHero(npc, state.self_npc) then
+        local secs = now() - state.combo_timer_t0
+        if secs >= 0 and secs < 20 then
+            tlog(1, "combo_kill_time", {
+                target   = uname(npc),
+                secs     = string.format("%.2f", secs),
+                fc_start = state.combo_timer_fc_start and "y" or "n",
+                fc_now   = (state.lina_fc_active and state.lina_fc_active()) and "y" or "n",
+            })
+        end
+        state.combo_timer_t0 = nil
+    end
     -- v0.5.13 PM-1: standard-mode-reachable postmortem. `npc` is the dying
     -- entity (NPC handle). The host does not pass a `data.source` or
     -- `data.ability` here, so killer / killer_ability degrade to the
@@ -11708,6 +12169,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.153 (Flame Cloak spell amp in the kill predicates). While Flame Cloak (Aghs Scepter) is active, Lina now credits its +35 percent outgoing spell amp in her kill math the same way the Ethereal +40 percent incoming amp is already credited, and the two stack multiplicatively. The burst-vs-effective-HP checks (r_alone_kill, combo_kill, target_fleeing_fast, the TF r_worth fallback, the Ethereal kill-confirm, and combo_can_kill which gates w_capitalize and the leap-defer) all multiply the burst by 1.35 while the buff is up, via ctx.fc_amp_mult, ctx.r_impact_eff, ctx.combo_total_eff and the lina_fc_active hook. Credited active-only (no speculative pre-cast crediting); with Flame Cloak inactive the math is byte-identical to v0.5.152. offline 387 of 387, coverage 48 of 48.")
+LOG:info("Lina brain v0.5.157.1 (cleanup on top of the v0.5.157 Flame Cloak offense pillar: removed the dead armor/mr diagnostic fields from fc_offense_ttk because NPC.GetArmor/GetMagicalResist read 0 on this build, and deleted the temporary offline TTK scratch test; combo_kill_time stays. No behavior change. v0.5.157: the starter FC opener runs a time-to-kill sim (instant W+Q+R burst, then dynamic Fiery-Soul autos plus W/Q re-casts versus regen, with and without FC) and fires FC when it SECURES or meaningfully ACCELERATES the kill within the realistic non-escape horizon (12s); it fires when FC saves at least max(1.5s, 25 percent) of the kill time, and refuses only when even FC cannot kill within the horizon or the target is unkillable / spell-deflect / Lotus / BKB. TF 3-plus keeps state.fc_offense_value. In-brain tests FCTTK01 plus FCTTK02; offline 387 of 387; coverage 48 of 48. Lina.lua only, no lib change.")
 
 return callbacks

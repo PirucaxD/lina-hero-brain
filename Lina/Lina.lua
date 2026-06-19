@@ -1284,6 +1284,30 @@ K.LINA_BASE_ATTACK_TIME = 1.7   -- Lina base attack time (Liquipedia; no GetBase
                                 -- risk; the fc_offense_ttk diagnostic logs the derived interval so
                                 -- a demo confirms/tunes it.
 
+-- v0.5.158 FC defense reserve (FLAME_CLOAK_TF_ARBITER_PLAN.md, Phase A1). FC's
+-- +35% magic resistance = x0.65 incoming magic; the reserve holds/fires FC vs an
+-- uncovered lethal-survivable MAGIC threat. All demo-tuned.
+K.FC_DEF_MR_MULT          = 0.65  -- FC incoming-magic multiplier (Tier-A ceiling D < HP/0.65)
+K.FC_DEF_TIER_B_FLOOR     = 0.6   -- Tier-B: 0.6*HP <= D < HP (FC saves >= 21% HP)
+K.FC_DEF_PROACTIVE_HP     = 0.50  -- proactive focus band: Lina HP fraction below this
+K.FC_DEF_PROACTIVE_RADIUS = 1200  -- proactive band enemy-scan radius (u)
+K.FC_DEF_PROACTIVE_COUNT  = 2     -- proactive band: >= this many enemy heroes near
+K.FC_DEF_PRESSURE_DMG_WINDOW = 2.0   -- v0.5.158.5: a band-only proactive FC fires only under real pressure (damage within this window OR a committed attacker), not bare proximity
+K.FC_TURN             = 0.8   -- v0.5.159 A2: commit FC offense if allies_eff >= K_FC_TURN * enemies_eff (FC swings ~35%, so a modest deficit is still turnable)
+K.FC_MACRO_MIN_ENEMIES = 3    -- v0.5.159: macro_turnable only gates a TEAMFIGHT (>= this many enemies near); fewer = a pick, turnable by the TTK + bailout (a solo Lina bursting 1-2 must NOT read as "outnumbered")
+K.STACK_OPENER_MAX    = 3     -- v0.5.160 A3.2: cold-open fires FC standalone at a TF onset when Fiery Soul stacks <= this (the 0->7 jump is the value)
+K.FC_AOE_FLIP_RADIUS  = 250   -- v0.5.160 A3.1: the W (Light Strike Array) AoE radius -- only enemies the W+Q burst hits can be flip-counted
+K.JUGG_OMNI_DODGE_DELAY   = 0.4  -- v0.5.160.2 Note-1: delay the WW/Eul (untargetable) dodge vs Jugg Omnislash this long past cast-detection so his cast COMMITS first (dodging during the ~0.3s cast point cancels+refunds the ult); the mid-ult dodge then whiffs the rest of the strikes (ends-early on no target) = Jugg loses the ult
+K.JUGG_OMNI_MIN_HP_ACCEPT = 450  -- v0.5.160.2 Note-1: only accept the first strike + defer when Lina has at least this much HP; below it, dodge at cast to SURVIVE (defense first) even though Jugg keeps the ult
+K.FC_MACRO_RADIUS     = 1500  -- v0.5.159 A2: fight-area radius for the eff-strength scan + the dest risk score
+K.FC_DEST_RISK_MAX    = 60    -- v0.5.159 A2: AdvanceRiskScore at the commit pos must be < this (lib doc: >60 = abort)
+K.FC_ALLY_NEAR_RADIUS = 1200  -- v0.5.159 A2: dest_safe ally-support scan radius
+K.FC_ALLY_NEAR_COUNT  = 1     -- v0.5.159 A2: dest_safe needs >= this many allied heroes near (excl. Lina)
+K.FC_BAILOUT_SAVES = {        -- v0.5.159 A2: ready non-FC escape/survive items that insure an offense commit (inventory-gated; design sec 5 set + Pike, == Force as a 600u displacement)
+    "item_blink", "item_cyclone", "item_wind_waker", "item_black_king_bar",
+    "item_glimmer_cape", "item_force_staff", "item_hurricane_pike", "item_aeon_disk",
+}
+
 -- v0.5.110.1 LETHAL-ONLY ITEM RULE (user demo feedback on v0.5.110: "all
 -- attacks are using items, this way it is impossible for me to commit
 -- attack to an enemy"). The v0.5.110 full-backbone composition is
@@ -2140,10 +2164,12 @@ CH.ABILITY_INJECTIONS = {
     -- no-ops the slot whenever the attacker would not be in the AoE.
     { save = "lina_w_anti_gap",  categories = { "close_gap" },
       anchor = "head" },
-    -- FC = 35 magic resist + spell amp: a deep MR tail vs magic burst and
-    -- lockdown, never ahead of the real saves (mirrors its tail slot in
-    -- the hand-curated Assassinate chain).
-    { save = "lina_flame_cloak", categories = { "targeted_burst", "lockdown" },
+    -- FC = 35 magic resist + spell amp: a deep MR tail vs magic burst,
+    -- lockdown, and delayed_aoe magical zones (v0.5.158.3: e.g. Skywrath
+    -- Mystic Flare -- FC mitigates the zone as a last-resort when the
+    -- displacement that would dodge it is down). Never ahead of the real
+    -- saves (tail anchor); the .fire only fires for magical threats.
+    { save = "lina_flame_cloak", categories = { "targeted_burst", "lockdown", "delayed_aoe" },
       anchor = "tail" },
 }
 CH.EXCLUSIONS = {
@@ -2293,31 +2319,25 @@ local SAVE_FIRE = {
         -- combo's pre-amp. At HP < 30% the 7s magic resistance + spell amp
         -- amounts to a meaningful clutch save. Returning false makes the
         -- chain walker advance past FC to the next chain entry.
-        fire  = function(intent)
-            -- v0.5.40.2: UCZone exposes HP via Entity.GetHealth /
-            -- GetMaxHealth, NOT NPC.GetHealth (used everywhere else in
-            -- Lina.lua at L940, L1579, L2172, L3640, L6082, L6184, etc.).
-            -- v0.5.40.1's NPC.* form threw `attempt to call a nil value
-            -- (field 'GetHealth')` at runtime when state.self_npc was
-            -- alive, crashing the chain walker. The two
-            -- fc_defensive_skip_hp tlogs that did fire in the v0.5.40.1
-            -- demo log were FALSE PASSES from the
-            -- `me and Entity.IsAlive(me) and ... or 1.0` short-circuit
-            -- defaulting hp_pct=1.0 when self_npc was nil/dead. Below uses
-            -- the canonical Lina pattern (L1579-1580) with full nil guards.
-            local me = state.self_npc
-            local hp_pct = 1.0
-            if me and Entity.IsAlive and Entity.IsAlive(me)
-               and Entity.GetHealth and Entity.GetMaxHealth then
-                local hp    = Entity.GetHealth(me)    or 0
-                local hpmax = Entity.GetMaxHealth(me) or 1
-                if hpmax > 0 then hp_pct = hp / hpmax end
-            end
-            if hp_pct > 0.30 then
-                tlog(2, "fc_defensive_skip_hp", {
-                    reason   = "hp_above_30pct",
-                    hp_pct   = string.format("%.2f", hp_pct),
-                })
+        fire  = function(intent, threat_caster, threat_mod)
+            -- v0.5.158.1: skip if Lina cannot cast right now (stunned/hexed/silenced/
+            -- invulnerable/airborne) -- else the engine silently drops the cast
+            -- (cast_verify fired=n; the v0.5.158 demo fired FC during not_self_alive).
+            if state.lina_self_alive_ok and not state.lina_self_alive_ok() then return false end
+            -- v0.5.158 A1: defensive FC fires on the threat/HP/item-aware reserve
+            -- claim (Tier-A) instead of the old <30% HP panic. state.fc_defense_tick
+            -- is the primary proactive fire; this save-chain entry is the reactive
+            -- belt-and-suspenders (the single-spend lock dedups vs the tick).
+            local claim = state.fc_defense_claim and state.fc_defense_claim(nil, threat_mod, true)
+            -- v0.5.158.2: fire FC on Tier-A (lethal-survivable) OR Tier-B (heavy) as the
+            -- reactive LAST-RESORT -- the save chain only reaches FC after every better
+            -- save is not_ready. v0.5.158.1 demo: vs Sniper Assassinate with Lotus/BKB/
+            -- Eul/WW/Glimmer all on CD the chain fell to FC but A1 held it on claim=B and
+            -- Lina ate the nuke unsaved. Tier-B is the moderate tier (design 4.4: fires
+            -- over a HOLD); fc_defense_claim's matched coverage already drops the claim to
+            -- none when a better item is ready, so FC fires only when it is the last option.
+            if claim ~= "A" and claim ~= "B" then
+                tlog(2, "fc_defensive_skip_claim", { claim = tostring(claim) })
                 return false
             end
             local fs_state = state.compute_fs_state and state.compute_fs_state(state.self_npc)
@@ -3538,6 +3558,7 @@ local LINA_ETA_RESOLVERS = {
     lina_fc_offensive_pre_tf_opener  = _lina_eta_fc_offensive,
     lina_fc_offensive_pre_tf_burst   = _lina_eta_fc_offensive,
     lina_fc_offensive_pre_tf_sustain = _lina_eta_fc_offensive,
+    lina_fc_arbiter_defense          = _lina_eta_fc_offensive,  -- v0.5.158 A1: defensive FC reserve (1.9s lock TTL)
 }
 
 -- v0.5.46.3: drop `local` keyword so this assigns the forward-declared
@@ -4882,6 +4903,12 @@ local function self_alive_ok()
     if NPC.HasState(me, MS.MODIFIER_STATE_OUT_OF_GAME)  then return false end
     return true
 end
+-- v0.5.158.1: exposed for the FC defensive fire (SAVE_FIRE.lina_flame_cloak.fire +
+-- state.fc_defense_tick) to gate on "can Lina cast an ability right now". A cast
+-- issued while STUNNED/HEXED/SILENCED/INVULNERABLE (e.g. airborne in her own
+-- Eul/WW) is silently dropped by the engine -- the v0.5.158 demo issued FC during
+-- not_self_alive and it never cast (cast_verify fired=n).
+state.lina_self_alive_ok = self_alive_ok
 
 local function enemy_has_ready_target_threat(enemy)
     for slot = 0, 5 do
@@ -5264,6 +5291,32 @@ local function on_channel_start(ev)
         tlog(3, "anim_dedup_skip", { mod = threat, path = "channel_start", ability = ev.ability_name or "?" })
         return
     end
+    -- v0.5.160.2 Note-1: Jugg Omnislash -- defer the untargetable (WW/Eul) dodge to
+    -- mid-ult so his cast COMMITS first (dodging in the ~0.3s cast point refunds the
+    -- ult). Ghost/E-blade (targetable, attack-immune) do not cancel the cast -> fire
+    -- now. A low-HP Lina that cannot safely eat the first strike dodges at cast to
+    -- survive. The defer tick fires the SAME chain Dispatch mid-ult.
+    if ev.ability_name == "juggernaut_omni_slash" then
+        local defer_on = not (state.menu and state.menu.jugg_omni_defer
+                              and not state.menu.jugg_omni_defer:Get())
+        local immediate_ready = (state.lina_save_ready and
+            (state.lina_save_ready("item_ghost") or state.lina_save_ready("item_ethereal_blade"))) or false
+        local me = state.self_npc
+        local cur_hp = (me and Entity.GetHealth and Entity.GetHealth(me)) or 0
+        if defer_on and state.jugg_omni_should_defer(immediate_ready, cur_hp) then
+            defense_dispatcher:ArmDodgeDefer({ caster = ev.caster,
+                -- v0.5.160.4: the RUNTIME modifier is modifier_juggernaut_omnislash (one
+                -- word, modseen ground truth) -- NOT ..._omni_slash. The ability name is
+                -- juggernaut_omni_slash and the chain override key keeps that form, but the
+                -- tick re-validates "still omnislashing" via NPC.HasModifier on THIS name.
+                watch_modifier = "modifier_juggernaut_omnislash",
+                fire_at = now() + K.JUGG_OMNI_DODGE_DELAY, min_hp = K.JUGG_OMNI_MIN_HP_ACCEPT })
+            tlog(1, "jugg_omni_defer_arm", { hp = string.format("%.0f", cur_hp),
+                delay = string.format("%.2f", K.JUGG_OMNI_DODGE_DELAY) })
+            return   -- the defer tick fires WW/Eul mid-ult
+        end
+        -- else fall through to immediate Dispatch (Ghost/E-blade ready, low HP, toggle off)
+    end
     -- v0.5.40 A3-7 (+v0.5.41 DEDUP-CLEANUP): route channel-on-self anim
     -- through Dispatch with category_hint="channel_on_self". v0.5.41:
     -- Dispatcher lock is sole gate; belt-and-suspenders Dedup post-stamp
@@ -5274,6 +5327,35 @@ local function on_channel_start(ev)
                                 "channel_on_self", ev.ability_name, nil,
                                 record_save,
                                 { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
+end
+
+-- v0.5.160.3 Note-1 (Jugg Omnislash mid-ult dodge). The general decision + defer
+-- state machine were LIFTED to lib/defense.lua (Defense.ShouldDeferDodge +
+-- Dispatcher:ArmDodgeDefer / :DodgeDeferTick) so any hero benefits; these are the
+-- thin Lina wrappers -- the chain, the omni modifier name, and the K tunables stay
+-- hero-local. PURE decision (FCDEF11 + offline lib test): defer the untargetable
+-- WW/Eul dodge iff no immediate save (Ghost/E-blade, attack-immune but TARGETABLE ->
+-- does not cancel the cast) is ready AND Lina has the HP to eat the first strike.
+-- Dodging during Jugg's ~0.3s cast point cancels + REFUNDS his ult; deferring past
+-- it lets the ult commit, then the dodge whiffs the rest = Jugg loses the ult.
+state.jugg_omni_should_defer = function(immediate_ready, cur_hp)
+    return Defense.ShouldDeferDodge(immediate_ready, cur_hp, K.JUGG_OMNI_MIN_HP_ACCEPT)
+end
+
+-- Thin wrapper over the lib defer tick: passes Lina's self + clock + the dispatch
+-- closure (which runs Lina's CH.JUGG_OMNI chain). The lib owns the pending state, the
+-- mid-ult / hp-bail timing, and the re-validation (Jugg still slashing, Lina alive).
+state.jugg_omni_defer_tick = function()
+    defense_dispatcher:DodgeDeferTick({
+        me = state.self_npc, now = now(),
+        dispatch = function(caster, via, hp)
+            defense_dispatcher:Dispatch("channel_juggernaut_omni_slash",
+                "modifier_juggernaut_omni_slash", caster, state.self_npc, nil,
+                "channel_on_self", "juggernaut_omni_slash", nil,
+                record_save, { fs_shard_window = fs_shard_window_active() })
+            tlog(1, "jugg_omni_defer_fire", { via = via, hp = string.format("%.0f", hp) })
+        end,
+    })
 end
 
 ------------------------------------------------- Layer 1 offense foundation --
@@ -5473,6 +5555,15 @@ state.fc_offense_value = function(ctx, target, enemies_in_aoe)
         end
     end
     return count
+end
+
+-- v0.5.160 A3.2: the stack-aware cold-open predicate. Low Fiery Soul stacks at a
+-- TF onset justify FC on their OWN (no kill-flip): the 0->7 jump is instant max
+-- attack speed + the +35% amp landing across the whole opener. The TF-onset gating
+-- (the fc_tf_opener_fired re-arm latch) + the commit gate live at the call site;
+-- this is just the stack check. fs_at_cap is guarded by the opener chain.
+state.fc_cold_open = function(ctx)
+    return (ctx and (ctx.fiery_soul_stacks or 0) <= K.STACK_OPENER_MAX) or false
 end
 
 -- v0.5.36 MAINT-13: single source of truth for the Fiery Soul stack/cap
@@ -6222,6 +6313,393 @@ state.fc_offense_ttk = function(ctx, target)
         s_off    = string.format("%d", inputs.stacks_off or 0),
     })
     return decision == "secure" or decision == "accelerate"
+end
+
+-- ===================== FC defense reserve (v0.5.158, Phase A1) =====================
+-- FLAME_CLOAK_TF_ARBITER_DESIGN.md Phase A1. FC's +35% MR softens MAGICAL damage
+-- only, so a non-magical threat raises NO FC defense claim. Hybrid detection:
+-- reactive (the largest armed MAGICAL threat) + a cheap proactive band (Lina low +
+-- focused). Matched item-coverage releases the claim. The grader is PURE
+-- (offline-testable); the claim wrapper gathers live inputs. state.* indirection
+-- lets SAVE_FIRE / the openers (defined earlier) call these at runtime.
+
+-- Severity-derived incoming D when LINA_EXPECTED_DAMAGE has no entry (v0.5.72
+-- pattern). D is incoming-to-Lina, so it scales off Lina's max HP.
+local function fc_severity_D(sev, hpmax)
+    if sev == "lethal" then return hpmax end
+    if sev == "high"   then return 0.70 * hpmax end
+    if sev == "medium" then return 0.45 * hpmax end
+    if sev == "low"    then return 0.15 * hpmax end
+    return 0
+end
+
+-- Mockable: is a defensive item owned + off cooldown (for matched coverage).
+state.lina_save_ready = function(name)
+    return (state.self_npc and NPCLib.item_ready
+            and NPCLib.item_ready(state.self_npc, name)) and true or false
+end
+
+-- PURE grade + matched coverage (offline-testable; FCDEF01/02). D = incoming magic
+-- damage; hp/hpmax = Lina. pierces=true means the threat pierces spell immunity
+-- (BKB does NOT cover it). sustained=true = a multi-source focus (only BKB covers);
+-- false = a single burst (any dodge/immunity/block covers). save_ready(name) is the
+-- item-readiness predicate (injected so tests mock it). Returns "A" / "B" / "none".
+state.fc_defense_grade = function(hp, hpmax, D, pierces, sustained, save_ready, last_resort)
+    if not (hp and hpmax and D) or hp <= 0 or hpmax <= 0 or D <= 0 then return "none" end
+    local tier
+    if hp <= D and D < hp / K.FC_DEF_MR_MULT then
+        tier = "A"
+    elseif (K.FC_DEF_TIER_B_FLOOR * hp) <= D and D < hp then
+        tier = "B"
+    elseif last_resort and D >= (K.FC_DEF_TIER_B_FLOOR * hp) then
+        -- v0.5.158.4: LAST-RESORT (the save chain reached FC = nothing else is
+        -- available). Fire FC to MITIGATE a heavy/lethal+ magical hit even when FC
+        -- alone cannot fully save (35% MR still cuts it; a zone DoT like Mystic Flare
+        -- is reduced every tick). The strict "unsurvivable -> none" ceiling is only
+        -- for proactive use (do not pre-burn FC on a hit it cannot survive).
+        tier = "B"
+    else
+        return "none"   -- poke (D < 0.6*HP), or proactive and D >= HP/0.65 unsurvivable
+    end
+    save_ready = save_ready or function() return false end
+    local bkb = (not pierces) and save_ready("item_black_king_bar")
+    if sustained then
+        if bkb then return "none" end   -- only BKB covers a sustained focus
+    else
+        if bkb
+           or save_ready("item_cyclone")     -- Eul
+           or save_ready("item_wind_waker")  -- WW
+           or save_ready("item_sphere")      -- Linkens
+           or save_ready("item_lotus_orb")   -- Lotus
+        then return "none" end
+    end
+    return tier
+end
+
+-- Live wrapper: gather hp / incoming-magic-D / pierce / the proactive band, then
+-- grade with state.lina_save_ready. ctx is unused today (kept for signature
+-- symmetry with the offense gate + future use). Returns "A" / "B" / "none".
+state.fc_defense_claim = function(ctx, threat_mod, last_resort)
+    local me = state.self_npc
+    if not (me and Entity.IsAlive and Entity.IsAlive(me)) then return "none" end
+    local hp    = (Entity.GetHealth and Entity.GetHealth(me)) or 0
+    local hpmax = (Entity.GetMaxHealth and Entity.GetMaxHealth(me)) or 1
+    if hp <= 0 or hpmax <= 0 then return "none" end
+
+    -- (1) reactive: the largest armed MAGICAL threat (FC's MR softens it).
+    local D, pierces = 0, false
+    for _key, e in pairs(state.armed_threats) do
+        local mod = e and e.threat_mod
+        local p   = mod and TD.THREAT_PROFILE[TD.CanonicalMod(mod)]
+        if p and p.school == "magical" then
+            local d = LINA_EXPECTED_DAMAGE[mod]
+                      or fc_severity_D(TD.SeverityOf(mod), hpmax)
+            if d > D then D = d; pierces = p.pierces_spell_immunity and true or false end
+        end
+    end
+
+    -- (1b) v0.5.158.3: also grade the threat currently being dispatched (the FC .fire's
+    -- 3rd arg) -- a reactive magical threat (e.g. a delayed_aoe zone like Skywrath
+    -- Mystic Flare) is NOT in armed_threats, so without this the reserve never sees it.
+    -- FC then fires as the chain's last-resort tail for it (the delayed_aoe injection).
+    if threat_mod then
+        local p = TD.THREAT_PROFILE[TD.CanonicalMod(threat_mod)]
+        if p and p.school == "magical" then
+            local d = LINA_EXPECTED_DAMAGE[threat_mod]
+                      or fc_severity_D(TD.SeverityOf(threat_mod), hpmax)
+            if d > D then D = d; pierces = p.pierces_spell_immunity and true or false end
+        end
+    end
+
+    -- (2) proactive band (sustained / multi-source focus): Lina low + >= N enemies
+    -- near. A1 uses the nearby-enemy count as the design-sanctioned "magical dealer"
+    -- fallback. Treated as lethal-incoming (Tier-A band) when it triggers.
+    local armed_D = D    -- v0.5.158.5: magical armed/threat_mod D BEFORE the band -> source (a real armed magical threat fires now; a band-only A requires pressure)
+    local sustained = false
+    if (hp / hpmax) < K.FC_DEF_PROACTIVE_HP then
+        local me_pos = NPCLib.origin(me)
+        local near = me_pos and Heroes.InRadius(me_pos, K.FC_DEF_PROACTIVE_RADIUS,
+                        Entity.GetTeamNum(me), Enum.TeamType.TEAM_ENEMY)
+        local n = 0
+        if near then
+            for i = 1, #near do
+                local h = near[i]
+                if h and Target.IsAlive(h) and Target.NotIllusion(h) then n = n + 1 end
+            end
+        end
+        if n >= K.FC_DEF_PROACTIVE_COUNT then
+            sustained = true
+            if D < hp then D = hp end   -- lethal-incoming pressure
+        end
+    end
+
+    local result = state.fc_defense_grade(hp, hpmax, D, pierces, sustained, state.lina_save_ready, last_resort)
+    -- v0.5.158.4 diag: on the reactive (.fire) path, log D / HP / result so a demo
+    -- shows exactly why FC fired or held for a dispatched threat (e.g. Mystic Flare).
+    if threat_mod then
+        tlog(2, "fc_claim_dbg", {
+            mod    = threat_mod,
+            d      = string.format("%.0f", D),
+            hp     = string.format("%.0f", hp),
+            hpmax  = string.format("%.0f", hpmax),
+            result = result,
+            lr     = last_resort and "y" or "n",
+        })
+    end
+    -- v0.5.158.5: source = what drives a firing-tier claim. "armed" = a real
+    -- armed/dispatched magical threat at least Tier-B heavy on its own (fire now);
+    -- "proactive" = only the proximity band (the tick requires real pressure to
+    -- fire). The result VALUE is unchanged; this is an additive 2nd return.
+    local source = nil
+    if armed_D >= (K.FC_DEF_TIER_B_FLOOR * hp) then source = "armed"
+    elseif sustained then source = "proactive" end
+    return result, source
+end
+
+-- v0.5.158.5: real-pressure predicate for the PROACTIVE FC fire -- recent damage
+-- (FC's MR is mitigating an in-progress hit) OR a committed attacker on self
+-- (someone is diving Lina). Bare proximity to idle/kiting enemies is NOT pressure
+-- (the v0.5.158.4 demo burned FC at <50% HP near 2 non-attacking enemies, armed=0).
+-- The Tier-A claim still reserves FC from offense regardless; this only gates FIRE.
+state.fc_under_pressure = function()
+    local me = state.self_npc
+    if not me then return false end
+    if Damage and Damage.GetRecentDamage then
+        local ok, d = pcall(Damage.GetRecentDamage, me, K.FC_DEF_PRESSURE_DMG_WINDOW)
+        if ok and (d or 0) > 0 then return true end
+    end
+    local me_pos = NPCLib.origin(me)
+    if me_pos then
+        local near = Heroes.InRadius(me_pos, K.FC_DEF_PROACTIVE_RADIUS,
+                        Entity.GetTeamNum(me), Enum.TeamType.TEAM_ENEMY)
+        if near then
+            for i = 1, #near do
+                local h = near[i]
+                if h and Target.IsAlive(h) and Target.NotIllusion(h)
+                   and state.is_committed_attacker_on_self(h) then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- Per-tick proactive defensive FC. On a Tier-A reserve claim (uncovered lethal-
+-- survivable magic), cast FC for its +35% MR via the dispatcher (single-spend lock
+-- shared with offensive FC -> no double-cast). Replaces the <30% panic. Guards:
+-- the fc_offensive_use menu, the 1.5s order-resolve throttle, FC ready + not
+-- channelling, the fs_shard_window (never downgrade the 12-stack window), and mana.
+state.fc_defense_tick = function()
+    local me = state.self_npc
+    if not me then return end
+    if not self_alive_ok() then return end  -- v0.5.158.1: cannot cast FC while stunned/hexed/silenced/invulnerable (airborne) -> the engine drops the order
+    if not (state.menu and state.menu.fc_offensive_use and state.menu.fc_offensive_use:Get()) then return end
+    local claim, source = state.fc_defense_claim(nil)
+    if claim ~= "A" then return end
+    -- v0.5.158.5: a band-only (proactive) Tier-A fires FC ONLY under real pressure
+    -- (recent damage OR a committed attacker). An armed/dispatched magical threat
+    -- (source=="armed") still pre-fires. Bare proximity to idle enemies does not.
+    if source ~= "armed" and not state.fc_under_pressure() then
+        if (now() - (state.fc_def_skip_log_t or 0)) >= 1.0 then  -- v0.5.160 item-4: throttle (was per-tick spam at verbosity>=2)
+            tlog(2, "fc_arbiter_defense_skip", { reason = "no_pressure" })
+            state.fc_def_skip_log_t = now()
+        end
+        return
+    end
+    -- v0.5.160 A1-6: a PROACTIVE (band-only) Tier-A claim stands down when a
+    -- full-negate save is ready -- WW/Eul (airborne dodge) or BKB. FC is the
+    -- reserve for when those are DOWN; the reactive last-resort chain still fires
+    -- FC if the dodge cannot cover. The source=="armed" path (a real armed magical
+    -- nuke, e.g. Assassinate when low) is unchanged -- it pre-fires FC's MR as
+    -- designed (A1-1, demo-validated). Fixes "FC used instead of WW".
+    if source == "proactive" then
+        local sr = state.lina_save_ready
+        if sr and (sr("item_wind_waker") or sr("item_cyclone")
+                   or sr("item_black_king_bar")) then
+            if (now() - (state.fc_def_skip_log_t or 0)) >= 1.0 then  -- v0.5.160 item-4: throttle
+                tlog(2, "fc_arbiter_defense_skip", { reason = "dodge_ready" })
+                state.fc_def_skip_log_t = now()
+            end
+            return
+        end
+    end
+    if (now() - (state.last_fc_dispatch_t or 0)) < 1.5 then return end
+    local fc = ability("lina_flame_cloak")
+    if not (fc and Ability.GetLevel(fc) > 0 and Ability.IsReady(fc)) then return end
+    if NPC.IsChannellingAbility and NPC.IsChannellingAbility(me) then return end
+    if not state.fc_def_probed then  -- v0.5.158.1 one-shot: confirm scepter/level/cd if FC still fails to cast
+        tlog(1, "fc_defense_probe", {
+            scepter = NPCLib.item(me, "item_ultimate_scepter") and "y" or "n",
+            level   = tostring(Ability.GetLevel(fc) or -1),
+            cd      = string.format("%.2f", (Ability.GetCooldown and Ability.GetCooldown(fc)) or -1),
+            ready   = Ability.IsReady(fc) and "y" or "n",
+        })
+        state.fc_def_probed = true
+    end
+    local fs = state.compute_fs_state and state.compute_fs_state(me)
+    if fs and fs.shard_window then return end
+    local mana = (NPC.GetMana and NPC.GetMana(me)) or 0
+    if mana < (ability_mana(A.FC) or 50) then return end
+    tlog(1, "fc_arbiter_defense", { tier = "A", reason = "reserve_fire" })
+    defense_dispatcher:Dispatch(
+        "lina_fc_arbiter_defense",
+        "lina_fc_arbiter_defense",
+        me, me,
+        function(intent, _mod, _caster)
+            return issue_cast_notarget(intent, fc, "def")
+        end,
+        nil, "lina_flame_cloak", nil, nil,
+        { fs_shard_window = (fs and fs.shard_window) or false })
+    state.last_fc_dispatch_t = now()
+end
+
+-- ============================ A2: the unified offense-commit gate ============
+-- FLAME_CLOAK_TF_ARBITER_DESIGN.md section 5. FC fires for OFFENSE (opener / amp /
+-- flip / TTK) only when the fight is turnable AND the commit is insured. Items 1-2
+-- of the gate (offense_value present, defense_claim != A) are already enforced by
+-- the openers; these helpers are items 3-4. All inputs reuse existing primitives.
+
+-- bailout_ready: >= 1 READY non-FC escape/survive item (inventory-gated via
+-- state.lina_save_ready = NPCLib.item_ready). Insures an FC offense commit.
+state.fc_bailout_ready = function()
+    local me = state.self_npc
+    if not me then return false end
+    local set = K.FC_BAILOUT_SAVES
+    for i = 1, #set do
+        if state.lina_save_ready(set[i]) then return true end
+    end
+    return false
+end
+
+-- macro_turnable: allies_eff_strength >= K_FC_TURN * enemies_eff_strength in the
+-- fight area. eff_strength = sum of HP-fraction over alive non-illusion heroes
+-- (cheap "bodies x health" proxy). Centered on Lina (a body in the fight). No
+-- enemies near -> trivially turnable.
+state.fc_macro_turnable = function()
+    local me = state.self_npc
+    if not me then return false end
+    local me_pos = NPCLib.origin(me)
+    if not me_pos then return false end
+    local team = Entity.GetTeamNum(me)
+    local function eff(list)
+        local s, n = 0, 0
+        if list then
+            for i = 1, #list do
+                local h = list[i]
+                if h and Target.IsAlive(h) and Target.NotIllusion(h) then
+                    local hp  = (Entity.GetHealth and Entity.GetHealth(h)) or 0
+                    local hpm = (Entity.GetMaxHealth and Entity.GetMaxHealth(h)) or 1
+                    if hpm > 0 then s = s + (hp / hpm); n = n + 1 end
+                end
+            end
+        end
+        return s, n
+    end
+    local ae      = eff(Heroes.InRadius(me_pos, K.FC_MACRO_RADIUS, team, Enum.TeamType.TEAM_FRIEND))
+    local ee, en  = eff(Heroes.InRadius(me_pos, K.FC_MACRO_RADIUS, team, Enum.TeamType.TEAM_ENEMY))
+    -- v0.5.159: macro_turnable is a TEAMFIGHT gate. A pick (< MIN_ENEMIES enemies)
+    -- is turnable by construction -- the TTK proves the kill + bailout/dest_safe
+    -- insure survival; team body-count is the wrong question for a solo pick.
+    if en < K.FC_MACRO_MIN_ENEMIES then return true end
+    if ee <= 0 then return true end
+    return ae >= (K.FC_TURN * ee)
+end
+
+-- v0.5.160.1 A2-2: favorable = allies_eff >= enemies_eff (even-or-ahead) in the
+-- fight area. A FAVORABLE teamfight commits FC offense WITHOUT the bailout/dest_safe
+-- insure -- secure the fastest TF (user). A turnable-but-behind fight
+-- (K.FC_TURN*ee <= ae < ee) still requires the insure. Mirrors fc_macro_turnable's
+-- eff scan (bodies x health-fraction); ee<=0 (no enemies) -> trivially favorable.
+state.fc_macro_favorable = function()
+    local me = state.self_npc
+    if not me then return false end
+    local me_pos = NPCLib.origin(me)
+    if not me_pos then return false end
+    local team = Entity.GetTeamNum(me)
+    local function eff(list)
+        local s = 0
+        if list then
+            for i = 1, #list do
+                local h = list[i]
+                if h and Target.IsAlive(h) and Target.NotIllusion(h) then
+                    local hp  = (Entity.GetHealth and Entity.GetHealth(h)) or 0
+                    local hpm = (Entity.GetMaxHealth and Entity.GetMaxHealth(h)) or 1
+                    if hpm > 0 then s = s + (hp / hpm) end
+                end
+            end
+        end
+        return s
+    end
+    local ae = eff(Heroes.InRadius(me_pos, K.FC_MACRO_RADIUS, team, Enum.TeamType.TEAM_FRIEND))
+    local ee = eff(Heroes.InRadius(me_pos, K.FC_MACRO_RADIUS, team, Enum.TeamType.TEAM_ENEMY))
+    if ee <= 0 then return true end
+    return ae >= ee
+end
+
+-- dest_safe: the commit spot is not over-exposed -- no fog-gank looming AND the
+-- AdvanceRiskScore is below the abort threshold AND >= 1 ally is near.
+state.fc_dest_safe = function()
+    local me = state.self_npc
+    if not me then return false end
+    if state.gank_imminent_self and state.gank_imminent_self() then return false end
+    local me_pos = NPCLib.origin(me)
+    if not me_pos then return false end
+    if Escape and Escape.AdvanceRiskScore then
+        local score = Escape.AdvanceRiskScore(me, me_pos,
+            { engage_radius = K.FC_MACRO_RADIUS, max_ms = 700, now = now })
+        if (score or math.huge) >= K.FC_DEST_RISK_MAX then return false end
+    end
+    local team = Entity.GetTeamNum(me)
+    local allies = Heroes.InRadius(me_pos, K.FC_ALLY_NEAR_RADIUS, team, Enum.TeamType.TEAM_FRIEND)
+    local n = 0
+    if allies then
+        for i = 1, #allies do
+            local h = allies[i]
+            if h and h ~= me and Target.IsAlive(h) and Target.NotIllusion(h) then n = n + 1 end
+        end
+    end
+    return n >= K.FC_ALLY_NEAR_COUNT
+end
+
+-- enemies within the fight area (alive, non-illusion). Used to scope the commit
+-- gate to TEAMFIGHTS -- a pick (< MIN_ENEMIES) is the shipped TTK's + player's call.
+state.fc_enemies_near = function()
+    local me = state.self_npc
+    if not me then return 0 end
+    local me_pos = NPCLib.origin(me)
+    if not me_pos then return 0 end
+    local near = Heroes.InRadius(me_pos, K.FC_MACRO_RADIUS, Entity.GetTeamNum(me), Enum.TeamType.TEAM_ENEMY)
+    local n = 0
+    if near then
+        for i = 1, #near do
+            local h = near[i]
+            if h and Target.IsAlive(h) and Target.NotIllusion(h) then n = n + 1 end
+        end
+    end
+    return n
+end
+
+-- offense_commit_ok = (TEAMFIGHT) macro_turnable AND (dest_safe OR bailout_ready).
+-- v0.5.159: the gate is a TEAMFIGHT mechanism. A pick (< MIN_ENEMIES enemies) is the
+-- shipped TTK's + the player's call -> the gate is a NO-OP for 1-2 (gating the 1-2
+-- offense with a defensive insure would invade the attack system). The menu
+-- sub-toggle (default ON) isolates the gate for demo: OFF -> returns true (pre-A2).
+-- Logs WHY it vetoes (unturnable vs uninsured) so a demo shows the reason.
+state.fc_offense_commit_ok = function(ctx, target)
+    local m = state.menu
+    if m and m.fc_commit_gate and not m.fc_commit_gate:Get() then return true end
+    if state.fc_enemies_near() < K.FC_MACRO_MIN_ENEMIES then return true end  -- pick: TTK/player owns it, A2 stays out
+    if not state.fc_macro_turnable() then
+        tlog(2, "fc_commit_skip", { reason = "unturnable" })
+        return false
+    end
+    -- v0.5.160.1 A2-2: a FAVORABLE TF (allies_eff >= enemies_eff) commits without the
+    -- insure -- secure the fastest TF. Turnable-but-behind still needs dest_safe/bailout.
+    if state.fc_macro_favorable() then return true end
+    if state.fc_dest_safe() or state.fc_bailout_ready() then return true end
+    tlog(2, "fc_commit_skip", { reason = "uninsured_exposed" })
+    return false
 end
 
 -- Fire one step now. kind: ut (R) / pt (W,Q) / nt (Flame Cloak) / item_target
@@ -7194,6 +7672,8 @@ state.lina_starter_tick = function(force)
     local fc_cost = ctx.flame_cloak_ready and ability_mana(A.FC) or 0
     local want_fc = fc_menu_on and is_burst_arch
                     and state.fc_offense_ttk(ctx, target)  -- v0.5.156: TTK gate (1-2 starter path: secures or accelerates the kill)
+                    and (state.fc_defense_claim(ctx) ~= "A")  -- v0.5.158 A1: stand down when FC is the lethal-magic lifeline
+                    and state.fc_offense_commit_ok(ctx, target)  -- v0.5.159 A2: turnable + insured commit (sec 5)
                     and ctx.flame_cloak_ready
                     and not ctx.flame_cloak_in_flight  -- v0.5.34 task E (was flame_cloak_active)
                     and not ctx.is_channelling
@@ -7596,8 +8076,13 @@ state.lina_teamfight_tick = function(force)
     local fc_cost       = ctx.flame_cloak_ready and ability_mana(A.FC) or 0
     local opener_cost   = fc_cost + ability_mana(A.W) + ability_mana(A.Q)
                           + ability_mana(A.R)
+    local fc_aoe       = cluster_center and aoe_enemy_units(cluster_center, K.FC_AOE_FLIP_RADIUS) or nil  -- v0.5.160 A3.1
+    local fc_flip      = state.fc_offense_value(ctx, ctx.target, fc_aoe)  -- v0.5.160 A3.1: AoE flip-count (cluster fed, was nil)
+    local fc_cold_open = state.fc_cold_open(ctx)                          -- v0.5.160 A3.2: low-stacks cold-open
     local want_fc_open = fc_menu_on
-                          and (state.fc_offense_value(ctx, ctx.target, nil) >= 1)  -- v0.5.156: TF (3+) keeps the flip/AoE pillar
+                          and (fc_flip >= 1 or fc_cold_open)              -- v0.5.160 A3: AoE flip OR stack cold-open
+                          and (state.fc_defense_claim(ctx) ~= "A")  -- v0.5.158 A1: survival outranks the kill
+                          and state.fc_offense_commit_ok(ctx, ctx.target)  -- v0.5.159 A2: turnable + insured commit (sec 5)
                           and not state.fc_tf_opener_fired
                           and ctx.ready_w and ctx.ready_r
                           and ctx.flame_cloak_ready
@@ -7629,6 +8114,8 @@ state.lina_teamfight_tick = function(force)
         tlog(1, "lina_flame_cloak_offensive", {
             trigger = "pre_tf_opener", archetype = "tf_opener",
             cluster = string.format("%d", cluster_n),
+            flip      = string.format("%d", fc_flip),
+            cold_open = (fc_flip < 1 and fc_cold_open) and "y" or "n",
             fs      = tostring(ctx.fiery_soul_stacks or 0),
             mana    = string.format("%.0f", ctx.mana or 0),
         })
@@ -7721,8 +8208,11 @@ state.lina_teamfight_tick = function(force)
         -- opener-site FC owns the first FC commit in an engagement and this
         -- burst-site FC only re-fires after the per-engagement latch clears
         -- (>=4s TF-tick gap), avoiding double-spend on a 25s CD ability.
+        local fc_aoe = cluster_center and aoe_enemy_units(cluster_center, K.FC_AOE_FLIP_RADIUS) or nil  -- v0.5.160 A3.1
         local want_fc = fc_menu_on
-                        and (state.fc_offense_value(ctx, r_target, nil) >= 1)  -- v0.5.156: TF (3+) keeps the flip/AoE pillar
+                        and (state.fc_offense_value(ctx, r_target, fc_aoe) >= 1)  -- v0.5.160 A3.1: AoE flip-count (cluster fed)
+                        and (state.fc_defense_claim(ctx) ~= "A")  -- v0.5.158 A1: survival outranks the kill
+                        and state.fc_offense_commit_ok(ctx, r_target)  -- v0.5.159 A2: turnable + insured commit (sec 5)
                         and not state.fc_tf_opener_fired
                         and ctx.flame_cloak_ready
                         and not ctx.flame_cloak_in_flight  -- v0.5.34 task E (was flame_cloak_active)
@@ -8971,8 +9461,61 @@ state.tests["FC01_offense_value_flip"] = {
                 return { pass = false, reason = ("eff=%d got=%d want=%d (%s)"):format(c.eff, got, c.want, c.why) }
             end
         end
+        -- v0.5.160 A3.1: AoE-cluster path. aoe_burst = q+w = 400, amped 540, flip band (400, 514.3]; primary uses
+        -- combo_total 1000 (band (1000,1285.7]). enemies_in_aoe={T,U1,U2}: T(primary)=1100 flips on combo (+1),
+        -- U1=450 flips on aoe_burst (+1), U2=600 no flip (>540). Expect 2.
+        local eff_map = { T = 1100, U1 = 450, U2 = 600 }
+        state.lina_eff_hp_magical = function(u) return eff_map[u] or math.huge end
+        local actx = { combo_total = 1000, q_dmg = 200, w_dmg = 200 }
+        local agot = state.fc_offense_value(actx, "T", { "T", "U1", "U2" })
+        if agot ~= 2 then
+            return { pass = false, reason = ("AoE flip got=%d want=2 (primary T + U1)"):format(agot) }
+        end
         if state.fc_offense_value(nil, "T", nil) ~= 0 then return { pass = false, reason = "nil ctx must be 0" } end
         if state.fc_offense_value({ combo_total = 1000 }, nil, nil) ~= 0 then return { pass = false, reason = "nil target must be 0" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF10_cold_open"] = {
+    desc = "v0.5.160 A3 fc_cold_open: Fiery Soul stacks <= STACK_OPENER_MAX -> standalone cold-open true; above -> false; nil ctx -> false",
+    fn = function(_cu)
+        if type(state.fc_cold_open) ~= "function" then
+            return { pass = false, reason = "state.fc_cold_open not exposed" }
+        end
+        local cases = {
+            { s = 0, want = true }, { s = 3, want = true }, { s = 4, want = false }, { s = 7, want = false },
+        }
+        for _, c in ipairs(cases) do
+            local got = state.fc_cold_open({ fiery_soul_stacks = c.s })
+            if got ~= c.want then
+                return { pass = false, reason = ("stacks=%d got=%s want=%s"):format(c.s, tostring(got), tostring(c.want)) }
+            end
+        end
+        if state.fc_cold_open(nil) ~= false then return { pass = false, reason = "nil ctx -> false" } end
+        if state.fc_cold_open({}) ~= true then return { pass = false, reason = "missing stacks defaults 0 -> true" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF11_jugg_omni_defer"] = {
+    desc = "v0.5.160.2 Note-1 jugg_omni_should_defer: defer iff no immediate save (Ghost/E-blade) AND HP >= K.JUGG_OMNI_MIN_HP_ACCEPT",
+    fn = function(_cu)
+        if type(state.jugg_omni_should_defer) ~= "function" then
+            return { pass = false, reason = "state.jugg_omni_should_defer not exposed" }
+        end
+        local floor = K.JUGG_OMNI_MIN_HP_ACCEPT
+        local cases = {
+            { imm = true,  hp = 1000,      want = false, why = "Ghost/E-blade ready -> immediate, no defer" },
+            { imm = false, hp = floor,     want = true,  why = "no immediate + HP at floor -> defer" },
+            { imm = false, hp = floor + 1, want = true,  why = "no immediate + HP above floor -> defer" },
+            { imm = false, hp = floor - 1, want = false, why = "no immediate + HP below floor -> survive at cast" },
+            { imm = true,  hp = 10,        want = false, why = "immediate wins regardless of HP" },
+        }
+        for _, c in ipairs(cases) do
+            local got = state.jugg_omni_should_defer(c.imm, c.hp)
+            if got ~= c.want then
+                return { pass = false, reason = ("imm=%s hp=%d got=%s want=%s (%s)"):format(tostring(c.imm), c.hp, tostring(got), tostring(c.want), c.why) }
+            end
+        end
         return { pass = true }
     end,
 }
@@ -9062,6 +9605,356 @@ state.tests["FCTTK02_fc_offense_ttk_trigger"] = {
         if state.fc_offense_ttk({}, tgt) then
             return { pass = false, reason = "refuse_unkillable must not fire" }
         end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF01_grade_bands"] = {
+    desc = "v0.5.158 FC defense grade: Tier-A lethal-survivable / Tier-B heavy / none (poke + unsurvivable + edges)",
+    fn = function(_cu)
+        if type(state.fc_defense_grade) ~= "function" then
+            return { pass = false, reason = "state.fc_defense_grade not exposed" }
+        end
+        local none = function() return false end
+        local cases = {
+            { name = "A_lethal",   hp = 1000, D = 1200, want = "A" },
+            { name = "B_heavy",    hp = 1000, D =  800, want = "B" },
+            { name = "none_poke",  hp = 1000, D =  400, want = "none" },
+            { name = "none_unsurv",hp = 1000, D = 1600, want = "none" },
+            { name = "A_edge_hp",  hp = 1000, D = 1000, want = "A" },
+            { name = "B_edge_flr", hp = 1000, D =  600, want = "B" },
+        }
+        for _, c in ipairs(cases) do
+            local got = state.fc_defense_grade(c.hp, 1000, c.D, false, false, none)
+            if got ~= c.want then
+                return { pass = false, reason = ("%s D=%d got=%s want=%s"):format(c.name, c.D, got, c.want) }
+            end
+        end
+        if state.fc_defense_grade(nil, nil, nil, false, false, none) ~= "none" then
+            return { pass = false, reason = "nil inputs must be none" }
+        end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF02_grade_coverage"] = {
+    desc = "v0.5.158 FC defense matched coverage: BKB/Eul/etc release a burst-A; only BKB releases a sustained-A; pierce -> BKB no cover",
+    fn = function(_cu)
+        if type(state.fc_defense_grade) ~= "function" then
+            return { pass = false, reason = "state.fc_defense_grade not exposed" }
+        end
+        local function ready(set) return function(n) return set[n] == true end end
+        local cases = {
+            { name = "burst_bkb",      pierce = false, sust = false, set = { item_black_king_bar = true }, want = "none" },
+            { name = "burst_eul",      pierce = false, sust = false, set = { item_cyclone = true },        want = "none" },
+            { name = "burst_linkens",  pierce = false, sust = false, set = { item_sphere = true },         want = "none" },
+            { name = "burst_pierced",  pierce = true,  sust = false, set = { item_black_king_bar = true }, want = "A" },
+            { name = "burst_none",     pierce = false, sust = false, set = {},                             want = "A" },
+            { name = "sustain_eul",    pierce = false, sust = true,  set = { item_cyclone = true },        want = "A" },
+            { name = "sustain_bkb",    pierce = false, sust = true,  set = { item_black_king_bar = true }, want = "none" },
+        }
+        for _, c in ipairs(cases) do
+            local got = state.fc_defense_grade(1000, 1000, 1200, c.pierce, c.sust, ready(c.set))
+            if got ~= c.want then
+                return { pass = false, reason = ("%s got=%s want=%s"):format(c.name, got, c.want) }
+            end
+        end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF03_grade_last_resort"] = {
+    desc = "v0.5.158.4 FC defense last-resort: an unsurvivable/heavy magical hit fires Tier-B when last_resort, none under the strict (proactive) ceiling",
+    fn = function(_cu)
+        if type(state.fc_defense_grade) ~= "function" then
+            return { pass = false, reason = "state.fc_defense_grade not exposed" }
+        end
+        local none = function() return false end
+        -- HP 1000: D=1600 is unsurvivable (>= HP/0.65=1538); D=800 heavy; D=400 poke.
+        local cases = {
+            { name = "unsurv_lastresort", D = 1600, lr = true,  want = "B" },
+            { name = "unsurv_strict",     D = 1600, lr = false, want = "none" },
+            { name = "poke_lastresort",   D = 400,  lr = true,  want = "none" },
+            { name = "heavy_lastresort",  D = 800,  lr = true,  want = "B" },
+        }
+        for _, c in ipairs(cases) do
+            local got = state.fc_defense_grade(1000, 1000, c.D, false, false, none, c.lr)
+            if got ~= c.want then
+                return { pass = false, reason = ("%s D=%d lr=%s got=%s want=%s"):format(c.name, c.D, tostring(c.lr), got, c.want) }
+            end
+        end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF04_claim_wrapper"] = {
+    desc = "v0.5.158 FC defense LIVE claim wrapper (real grader, no spy): magical-only filter (e), pierce threading, armed-D severity fallback, proactive band <50%HP+>=2 enemies + count threshold (d), item-release wiring (b), Tier-A veto input (c), threat_mod last-resort path",
+    fn = function(cu)
+        if type(state.fc_defense_claim) ~= "function" then
+            return { pass = false, reason = "state.fc_defense_claim not exposed" }
+        end
+        -- Save every seam the live wrapper reads; restore LIFO after the test.
+        local s_self, s_armed, s_ready = state.self_npc, state.armed_threats, state.lina_save_ready
+        local s_isal, s_ghp, s_gmhp, s_team = Entity.IsAlive, Entity.GetHealth, Entity.GetMaxHealth, Entity.GetTeamNum
+        local s_orig, s_near = NPCLib.origin, Heroes.InRadius
+        local s_tal, s_nill = Target.IsAlive, Target.NotIllusion
+        local s_prof, s_canon, s_sev = TD.THREAT_PROFILE, TD.CanonicalMod, TD.SeverityOf
+        _cu_push(cu, function()
+            state.self_npc, state.armed_threats, state.lina_save_ready = s_self, s_armed, s_ready
+            Entity.IsAlive, Entity.GetHealth, Entity.GetMaxHealth, Entity.GetTeamNum = s_isal, s_ghp, s_gmhp, s_team
+            NPCLib.origin, Heroes.InRadius = s_orig, s_near
+            Target.IsAlive, Target.NotIllusion = s_tal, s_nill
+            TD.THREAT_PROFILE, TD.CanonicalMod, TD.SeverityOf = s_prof, s_canon, s_sev
+        end)
+
+        -- Fixed mocks. Synthetic mods (absent from the real LINA_EXPECTED_DAMAGE)
+        -- force D through the severity fallback we control via TD.SeverityOf.
+        local ME = {}
+        state.self_npc     = ME
+        Entity.IsAlive     = function() return true end
+        Entity.GetTeamNum  = function() return 2 end
+        NPCLib.origin      = function() return { x = 0, y = 0, z = 0 } end
+        Target.IsAlive     = function() return true end
+        Target.NotIllusion = function() return true end
+        TD.CanonicalMod    = function(m) return m end
+        TD.THREAT_PROFILE  = {
+            mod_fcdef04_mag   = { school = "magical",  pierces_spell_immunity = false },
+            mod_fcdef04_mag_p = { school = "magical",  pierces_spell_immunity = true  },
+            mod_fcdef04_phys  = { school = "physical" },
+        }
+        TD.SeverityOf = function() return "lethal" end   -- fc_severity_D("lethal", hpmax) = hpmax
+
+        -- Per-case controllable seams.
+        local hp_cur, hp_max = 1000, 1000
+        Entity.GetHealth    = function() return hp_cur end
+        Entity.GetMaxHealth = function() return hp_max end
+        local NONE = {}
+        local function chk(name, mod, c, m, near_n, readyT, want, threat_mod, lr)
+            hp_cur, hp_max = c, m
+            state.armed_threats = mod and { only = { threat_mod = mod } } or {}
+            Heroes.InRadius = function() local t = {}; for i = 1, (near_n or 0) do t[i] = {} end; return t end
+            local r = readyT or NONE
+            state.lina_save_ready = function(name2) return r[name2] == true end
+            local got = state.fc_defense_claim(nil, threat_mod, lr)
+            if got ~= want then
+                return ("%s got=%s want=%s"):format(name, tostring(got), tostring(want))
+            end
+            return nil
+        end
+
+        local cases = {
+            -- (e) physical armed threat (no band) -> none: magical-only filter zeroes D.
+            { "e_physical_none",       "mod_fcdef04_phys",  1000, 1000, 0, NONE, "none" },
+            -- magical uncovered lethal -> A: the value the offense veto reads (c) + the reserve trigger (a).
+            { "c_magical_uncovered_A", "mod_fcdef04_mag",   1000, 1000, 0, NONE, "A" },
+            -- (b) magical + ready BKB (no pierce) -> none.
+            { "b_magical_bkb_none",    "mod_fcdef04_mag",   1000, 1000, 0, { item_black_king_bar = true }, "none" },
+            -- (b) magical + ready Eul -> none (burst coverage).
+            { "b_magical_eul_none",    "mod_fcdef04_mag",   1000, 1000, 0, { item_cyclone = true }, "none" },
+            -- pierce threading: magical-pierce + ready BKB -> still A (BKB cannot cover a pierce).
+            { "pierce_bkb_A",          "mod_fcdef04_mag_p", 1000, 1000, 0, { item_black_king_bar = true }, "A" },
+            -- (d) proactive band: <50% HP + 2 enemies, no item -> A (sustained focus, no BKB).
+            { "d_band_A",              nil,                  400, 1000, 2, NONE, "A" },
+            -- (d) band + BKB ready -> none (sustained focus -> only BKB releases).
+            { "d_band_bkb_none",       nil,                  400, 1000, 2, { item_black_king_bar = true }, "none" },
+            -- (d) band + Eul ready (not BKB) -> still A (Eul does not release a sustained focus).
+            { "d_band_eul_A",          nil,                  400, 1000, 2, { item_cyclone = true }, "A" },
+            -- (d) count threshold: <50% HP but only 1 enemy near -> no band -> none.
+            { "d_count_1_none",        nil,                  400, 1000, 1, NONE, "none" },
+        }
+        for _, c in ipairs(cases) do
+            local err = chk(c[1], c[2], c[3], c[4], c[5], c[6], c[7])
+            if err then return { pass = false, reason = err } end
+        end
+
+        -- threat_mod (.fire reactive) path + last_resort: an unsurvivable magical hit
+        -- (D = 1000 >= HP/0.65 = 923 at hp=600) fires Tier-B as last-resort, none under
+        -- the strict (proactive, no-last_resort) ceiling.
+        local e1 = chk("threatmod_lastresort_B", nil, 600, 1000, 0, NONE, "B",    "mod_fcdef04_mag", true)
+        if e1 then return { pass = false, reason = e1 } end
+        local e2 = chk("threatmod_strict_none",  nil, 600, 1000, 0, NONE, "none", "mod_fcdef04_mag", false)
+        if e2 then return { pass = false, reason = e2 } end
+
+        -- v0.5.158.5: the claim's 2nd return (source) drives the proactive fire gate.
+        -- A band-only Tier-A -> "proactive" (tick requires pressure); an armed magical
+        -- Tier-A -> "armed" (tick pre-fires). The result VALUE is unchanged either way.
+        hp_cur, hp_max = 400, 1000
+        state.armed_threats = {}
+        Heroes.InRadius = function() return { {}, {} } end
+        state.lina_save_ready = function() return false end
+        local rb, sb = state.fc_defense_claim(nil)
+        if rb ~= "A" or sb ~= "proactive" then
+            return { pass = false, reason = ("band source r=%s src=%s want A/proactive"):format(tostring(rb), tostring(sb)) }
+        end
+        hp_cur, hp_max = 1000, 1000
+        state.armed_threats = { only = { threat_mod = "mod_fcdef04_mag" } }
+        Heroes.InRadius = function() return {} end
+        local ra, sa = state.fc_defense_claim(nil)
+        if ra ~= "A" or sa ~= "armed" then
+            return { pass = false, reason = ("armed source r=%s src=%s want A/armed"):format(tostring(ra), tostring(sa)) }
+        end
+
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF05_under_pressure"] = {
+    desc = "v0.5.158.5 fc_under_pressure: recent damage OR a committed attacker on self -> true; idle/kiting proximity (no damage, none committed) -> false",
+    fn = function(cu)
+        if type(state.fc_under_pressure) ~= "function" then
+            return { pass = false, reason = "state.fc_under_pressure not exposed" }
+        end
+        local s_self = state.self_npc
+        local s_orig, s_near, s_team = NPCLib.origin, Heroes.InRadius, Entity.GetTeamNum
+        local s_tal, s_nill = Target.IsAlive, Target.NotIllusion
+        local s_comm = state.is_committed_attacker_on_self
+        local has_dmg = (type(Damage) == "table")
+        local s_dmg = has_dmg and Damage.GetRecentDamage
+        _cu_push(cu, function()
+            state.self_npc = s_self
+            NPCLib.origin, Heroes.InRadius, Entity.GetTeamNum = s_orig, s_near, s_team
+            Target.IsAlive, Target.NotIllusion = s_tal, s_nill
+            state.is_committed_attacker_on_self = s_comm
+            if has_dmg then Damage.GetRecentDamage = s_dmg end
+        end)
+        state.self_npc     = {}
+        NPCLib.origin      = function() return { x = 0, y = 0, z = 0 } end
+        Entity.GetTeamNum  = function() return 2 end
+        Target.IsAlive     = function() return true end
+        Target.NotIllusion = function() return true end
+        local enemies, committed_set, recent_dmg = {}, {}, 0
+        Heroes.InRadius = function() return enemies end
+        state.is_committed_attacker_on_self = function(h) return committed_set[h] == true end
+        if has_dmg then Damage.GetRecentDamage = function() return recent_dmg end end
+
+        local H1, H2 = {}, {}
+        -- idle/kiting proximity: 2 enemies near, none committed, no damage -> false
+        enemies = { H1, H2 }; committed_set = {}; recent_dmg = 0
+        if state.fc_under_pressure() ~= false then
+            return { pass = false, reason = "idle proximity should be false" }
+        end
+        -- recent damage -> true (assertable only when the Damage lib is present)
+        if has_dmg then
+            recent_dmg = 50
+            if state.fc_under_pressure() ~= true then
+                return { pass = false, reason = "recent damage should be true" }
+            end
+            recent_dmg = 0
+        end
+        -- a committed attacker on self -> true
+        committed_set = { [H1] = true }
+        if state.fc_under_pressure() ~= true then
+            return { pass = false, reason = "committed attacker should be true" }
+        end
+        -- nothing near, no damage -> false
+        enemies = {}; committed_set = {}
+        if state.fc_under_pressure() ~= false then
+            return { pass = false, reason = "no enemies/no damage should be false" }
+        end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF06_bailout_ready"] = {
+    desc = "A2 fc_bailout_ready: true iff >=1 K.FC_BAILOUT_SAVES item is ready; non-bailout (Lotus) -> false",
+    fn = function(cu)
+        if type(state.fc_bailout_ready) ~= "function" then return { pass = false, reason = "fc_bailout_ready not exposed" } end
+        local s_self, s_ready = state.self_npc, state.lina_save_ready
+        _cu_push(cu, function() state.self_npc = s_self; state.lina_save_ready = s_ready end)
+        state.self_npc = {}
+        local ready_set = {}
+        state.lina_save_ready = function(n) return ready_set[n] == true end
+        ready_set = {}
+        if state.fc_bailout_ready() ~= false then return { pass = false, reason = "none ready -> false" } end
+        ready_set = { item_cyclone = true }
+        if state.fc_bailout_ready() ~= true then return { pass = false, reason = "Eul ready -> true" } end
+        ready_set = { item_lotus_orb = true }
+        if state.fc_bailout_ready() ~= false then return { pass = false, reason = "Lotus is not a bailout -> false" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF07_macro_turnable"] = {
+    desc = "A2 fc_macro_turnable: TEAMFIGHT-only -- >=3 enemies applies the ratio (lost -> false); a pick (<3 enemies) or no enemies -> turnable",
+    fn = function(cu)
+        if type(state.fc_macro_turnable) ~= "function" then return { pass = false, reason = "fc_macro_turnable not exposed" } end
+        local s_self, s_orig, s_team, s_near = state.self_npc, NPCLib.origin, Entity.GetTeamNum, Heroes.InRadius
+        local s_tal, s_nill, s_ghp, s_gmhp = Target.IsAlive, Target.NotIllusion, Entity.GetHealth, Entity.GetMaxHealth
+        _cu_push(cu, function()
+            state.self_npc = s_self; NPCLib.origin = s_orig; Entity.GetTeamNum = s_team; Heroes.InRadius = s_near
+            Target.IsAlive = s_tal; Target.NotIllusion = s_nill; Entity.GetHealth = s_ghp; Entity.GetMaxHealth = s_gmhp
+        end)
+        state.self_npc = {}; NPCLib.origin = function() return { x = 0, y = 0, z = 0 } end; Entity.GetTeamNum = function() return 2 end
+        Target.IsAlive = function() return true end; Target.NotIllusion = function() return true end
+        Entity.GetHealth = function() return 1000 end; Entity.GetMaxHealth = function() return 1000 end  -- each hero eff = 1.0
+        local friends, enemies = {}, {}
+        Heroes.InRadius = function(_, _, _, tt) return (tt == Enum.TeamType.TEAM_FRIEND) and friends or enemies end
+        friends = { {}, {}, {} }; enemies = { {}, {}, {} }   -- 3v3 teamfight: 3.0 >= 0.8*3.0 = 2.4 -> turnable
+        if state.fc_macro_turnable() ~= true then return { pass = false, reason = "3v3 should be turnable" } end
+        friends = { {} }; enemies = { {}, {}, {} }            -- 1v3 teamfight: 1.0 >= 2.4 false -> not turnable
+        if state.fc_macro_turnable() ~= false then return { pass = false, reason = "1v3 should not be turnable" } end
+        friends = { {} }; enemies = { {}, {} }               -- v0.5.159 fix: 1v2 is a PICK (<3 enemies) -> turnable (was wrongly false)
+        if state.fc_macro_turnable() ~= true then return { pass = false, reason = "1v2 pick should be turnable" } end
+        friends = { {}, {} }; enemies = {}                   -- no enemies -> trivially turnable
+        if state.fc_macro_turnable() ~= true then return { pass = false, reason = "no enemies should be turnable" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF08_dest_safe"] = {
+    desc = "A2 fc_dest_safe: gank imminent OR high AdvanceRiskScore OR no ally near -> false; safe+ally -> true",
+    fn = function(cu)
+        if type(state.fc_dest_safe) ~= "function" then return { pass = false, reason = "fc_dest_safe not exposed" } end
+        local s_self, s_gank, s_orig, s_team, s_near = state.self_npc, state.gank_imminent_self, NPCLib.origin, Entity.GetTeamNum, Heroes.InRadius
+        local s_tal, s_nill = Target.IsAlive, Target.NotIllusion
+        local has_ars = (type(Escape) == "table" and type(Escape.AdvanceRiskScore) == "function")
+        local s_ars = has_ars and Escape.AdvanceRiskScore
+        _cu_push(cu, function()
+            state.self_npc = s_self; state.gank_imminent_self = s_gank; NPCLib.origin = s_orig
+            Entity.GetTeamNum = s_team; Heroes.InRadius = s_near; Target.IsAlive = s_tal; Target.NotIllusion = s_nill
+            if has_ars then Escape.AdvanceRiskScore = s_ars end
+        end)
+        state.self_npc = {}; NPCLib.origin = function() return { x = 0, y = 0, z = 0 } end; Entity.GetTeamNum = function() return 2 end
+        Target.IsAlive = function() return true end; Target.NotIllusion = function() return true end
+        local gank, risk, allies = false, 10, { {} }
+        state.gank_imminent_self = function() return gank end
+        if has_ars then Escape.AdvanceRiskScore = function() return risk end end
+        Heroes.InRadius = function() return allies end
+        gank = false; risk = 10; allies = { {} }
+        if state.fc_dest_safe() ~= true then return { pass = false, reason = "safe + ally -> true" } end
+        gank = true
+        if state.fc_dest_safe() ~= false then return { pass = false, reason = "gank imminent -> false" } end
+        gank = false
+        if has_ars then
+            risk = 99
+            if state.fc_dest_safe() ~= false then return { pass = false, reason = "high risk -> false" } end
+            risk = 10
+        end
+        allies = {}
+        if state.fc_dest_safe() ~= false then return { pass = false, reason = "no ally -> false" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCDEF09_offense_commit_ok"] = {
+    desc = "A2 fc_offense_commit_ok: TEAMFIGHT-scoped -- pick (<3 enemies) -> no-op true; else macro_turnable AND (favorable OR dest_safe OR bailout); menu OFF -> true",
+    fn = function(cu)
+        if type(state.fc_offense_commit_ok) ~= "function" then return { pass = false, reason = "fc_offense_commit_ok not exposed" } end
+        local s_menu, s_en, s_mt, s_fv, s_ds, s_br = state.menu, state.fc_enemies_near, state.fc_macro_turnable, state.fc_macro_favorable, state.fc_dest_safe, state.fc_bailout_ready
+        _cu_push(cu, function() state.menu = s_menu; state.fc_enemies_near = s_en; state.fc_macro_turnable = s_mt; state.fc_macro_favorable = s_fv; state.fc_dest_safe = s_ds; state.fc_bailout_ready = s_br end)
+        local en, mt, fv, ds, br = 3, true, false, true, true
+        state.fc_enemies_near    = function() return en end
+        state.fc_macro_turnable  = function() return mt end
+        state.fc_macro_favorable = function() return fv end
+        state.fc_dest_safe       = function() return ds end
+        state.fc_bailout_ready   = function() return br end
+        state.menu = { fc_commit_gate = { Get = function() return true end } }
+        en, mt, fv, ds, br = 3, true, false, true, false
+        if state.fc_offense_commit_ok({}, "T") ~= true then return { pass = false, reason = "TF turnable+safe -> true" } end
+        en, mt, fv, ds, br = 3, true, false, false, true
+        if state.fc_offense_commit_ok({}, "T") ~= true then return { pass = false, reason = "TF turnable+bailout -> true" } end
+        en, mt, fv, ds, br = 3, true, false, false, false
+        if state.fc_offense_commit_ok({}, "T") ~= false then return { pass = false, reason = "TF turnable-but-behind uninsured -> false" } end
+        en, mt, fv, ds, br = 3, true, true, false, false
+        if state.fc_offense_commit_ok({}, "T") ~= true then return { pass = false, reason = "TF favorable -> no insure needed -> true" } end
+        en, mt, fv, ds, br = 3, false, true, true, true
+        if state.fc_offense_commit_ok({}, "T") ~= false then return { pass = false, reason = "TF unturnable -> false (favorable moot)" } end
+        en, mt, fv, ds, br = 2, false, false, false, false
+        if state.fc_offense_commit_ok({}, "T") ~= true then return { pass = false, reason = "pick (<3 enemies) -> no-op true" } end
+        state.menu = { fc_commit_gate = { Get = function() return false end } }
+        en, mt, fv, ds, br = 3, false, false, false, false
+        if state.fc_offense_commit_ok({}, "T") ~= true then return { pass = false, reason = "gate OFF -> no-op true" } end
         return { pass = true }
     end,
 }
@@ -10013,6 +10906,13 @@ local function setup_menu()
     -- Default ON. Toggle OFF for clean revert if mana-burn or unexpected
     -- combo timing surfaces in real games.
     m.fc_offensive_use = gCore:Switch("Flame Cloak auto-fire (offensive)", true)
+    m.fc_commit_gate = gCore:Switch("FC offense-commit gate (A2)", true)
+    m.jugg_omni_defer = gCore:Switch("Jugg Omnislash mid-ult dodge", true)
+    m.jugg_omni_defer:ToolTip("Vs Juggernaut Omnislash, delay the WW/Eul untargetable "
+        .. "dodge until just after his cast commits (accept the first strike) so the "
+        .. "rest of the slashes whiff and he loses the ult; dodging during the cast "
+        .. "point only cancels and refunds it. Ghost/Ethereal fire immediately; a "
+        .. "low-HP Lina dodges at cast to survive. OFF = dodge at cast (pre-v0.5.160.2).")
     m.fc_offensive_use:ToolTip("Aghs Scepter only. Before any burst combo "
         .. "(ether_wqr / eul_wrq / ww_wrq / wqr / r_first_rwq), fire Flame "
         .. "Cloak first so its +35% spell amp lifts W/Q/R damage. Triggers: "
@@ -11164,6 +12064,8 @@ function callbacks.OnUpdateEx()
                 state.blink_cd_prev = _bd_cd
             end
         end
+        state.fc_defense_tick()    -- v0.5.158 A1: proactive defensive FC reserve (Tier-A) before the offense dispatch
+        state.jugg_omni_defer_tick()  -- v0.5.160.2 Note-1: fire the deferred Jugg Omnislash dodge mid-ult
         state.combo_key_tick()     -- HOLD/TAP classify + starter/teamfight dispatch
         state.blink_capitalize_tick()  -- v0.5.94: seize engine blinks (auto-combo, default OFF)
         state.w_capitalize_tick()  -- v0.5.137: combo the W-stunned gap-closer/committed attacker if killable (default ON)
@@ -12169,6 +13071,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.157.1 (cleanup on top of the v0.5.157 Flame Cloak offense pillar: removed the dead armor/mr diagnostic fields from fc_offense_ttk because NPC.GetArmor/GetMagicalResist read 0 on this build, and deleted the temporary offline TTK scratch test; combo_kill_time stays. No behavior change. v0.5.157: the starter FC opener runs a time-to-kill sim (instant W+Q+R burst, then dynamic Fiery-Soul autos plus W/Q re-casts versus regen, with and without FC) and fires FC when it SECURES or meaningfully ACCELERATES the kill within the realistic non-escape horizon (12s); it fires when FC saves at least max(1.5s, 25 percent) of the kill time, and refuses only when even FC cannot kill within the horizon or the target is unkillable / spell-deflect / Lotus / BKB. TF 3-plus keeps state.fc_offense_value. In-brain tests FCTTK01 plus FCTTK02; offline 387 of 387; coverage 48 of 48. Lina.lua only, no lib change.")
+LOG:info("Lina brain v0.5.160.4 (Note-1 FIX: the deferred dodge now keys on the RUNTIME modifier modifier_juggernaut_omnislash (was ..._omni_slash, never matched) and waits through the cast point before clearing (was cleared each cast-point frame so it never fired); the defer mechanism is in lib/defense (hero-agnostic, Sniper can opt in); A2 soften + Jugg Omni timing on the A3 + A1 build. A2-2: a FAVORABLE teamfight (allies_eff >= enemies_eff) commits FC offense without the bailout/dest_safe insure (secure the fast TF). Note-1: vs Jugg Omnislash the WW/Eul untargetable dodge defers ~0.4s past cast so his ult COMMITS then the rest whiffs (he loses it); Ghost/E-blade + a low-HP Lina fire at cast. Flame Cloak arbiter Phase A3 + A1 touch-up. A1: proactive defensive FC stands down when a ready full-negate save (WW/Eul/BKB) covers (fixes FC-fired-instead-of-WW); verbose proactive skip logs throttled to >=1s; the framework auto-BKB is the Dodger Specific-Settings panel (Min Enemies=1), unreachable via Menu.Find, disable it manually in the UCZone UI. A3: TF FC now actually fires - 7.1 AoE flip-count across the W+Q cluster (was primary-only; fed aoe_enemy_units at radius 250) + 7.2 a stack-aware cold-open (FC standalone at a 3+ teamfight onset when Fiery Soul stacks <= 3, the 0-to-7 jump is the value), both behind the A2 teamfight commit gate so A2 finally bites. Phase A2: the offense-commit gate, TEAMFIGHT-scoped -- in a 3+ fight FC commits for offense only when turnable (allies_eff >= 0.8 x enemies_eff) AND insured (a ready non-FC bail-out OR a safe spot); a 1-2 pick is the shipped TTK plus the player call, the gate no-ops there. A1 defense reserve + the v0.5.158.5 proactive-pressure fire unchanged). FC fires defensively for its 35-percent magic resistance vs an uncovered MAGIC threat: proactively when lethal-survivable (Tier-A: HP <= D < HP/0.65) or Lina is low and focused; reactively as the save chain last-resort tail (Tier-B heavy, and even unsurvivable since FC still mitigates) when every better save is down. The fire is gated on Lina being able to cast (not stunned/hexed/silenced/invulnerable/airborne) so the engine does not drop it. A ready matched save (BKB / Eul / WW / Linkens / Lotus) releases the claim, and the 3 offense FC openers stand down when FC is the lethal-magic lifeline. FC is injected as a tail of targeted_burst / lockdown / delayed_aoe, so magical nukes (Sniper Assassinate) and magical zones (Skywrath Mystic Flare, when the displacement to dodge it is down) reach it. New state.fc_macro_turnable / fc_bailout_ready / fc_dest_safe / fc_offense_commit_ok, ANDed into the 3 offense openers (menu-toggleable, OFF = pre-A2); in-brain FCDEF01-09; offline 387 of 387; coverage 48 of 48. Lina.lua only, no lib change. Next slices (TF last, per the original plan): B mobility escape, C mobility chase, D TF AoE flip-count plus tuning.")
 
 return callbacks

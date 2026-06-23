@@ -52,6 +52,7 @@ local Defense = require("lib.defense")    -- v0.5.0: generic Layer-2 save dispat
 local Escape = require("lib.escape")      -- v0.5.57: danger-aware escape destination picker (Phase 5)
 local Farm   = require("lib.farm")        -- v0.5.78: stateless farm geometry (line/point AoE optimizers + worth-casting)
 local ItemSaves = require("lib.item_saves") -- v0.5.108: hero-agnostic defensive item save bodies
+local HeroValue = require("lib.hero_value") -- v0.5.164 D1: per-hero combat-value model (Phase D value-weighting)
 
 local MS = Enum.ModifierState
 local UO = Enum.UnitOrder
@@ -265,7 +266,6 @@ state.recently_aborted_intents = {}
 -- tlog. Set to now() each time a picked-target summary fires; gated to ~1Hz
 -- to keep default-verbosity log clean during sustained combo holds.
 state.tf_r_pick_diag_t = 0
-state.last_preface_t       = 0    -- pre_face_tick cooldown cursor (E12 deviation)
 -- Layer 1 (offense, Phase F) constants + state. Adaptive model is HOLD-only
 -- (TAP stubbed for Lina). These are consumed by the dispatchers + HOLD
 -- detection wired in later increments; the foundation below only defines them.
@@ -287,6 +287,8 @@ state.pending_steps             = {}    -- scheduled combo steps (delay_s deferr
 state.last_r_target             = nil   -- R in flight: target (r_abort_tick)
 state.last_r_combo_name         = nil
 state.last_r_dispatch_t         = 0
+state.last_offense_target       = nil   -- v0.5.163 C2: broad chase-commit stamp (ANY W/Q/R combo step, R-independent)
+state.last_offense_dispatch_t   = 0
 state.last_r_cast_t             = nil   -- v0.5.5: most recent R cast timestamp (never cleared); used by fs_at_cap to detect the 5s Aghs Shard 12-stack Fiery Soul window. Distinct from last_r_dispatch_t, which r_abort_tick clears on resolve.
 state.last_fc_dispatch_t        = 0     -- v0.5.33 FC-B-04: throttle cursor for the Flame Cloak offensive auto-fire. The 25s ability CD prevents a real re-fire within the buff window but Ability.IsReady has a ~1-frame propagation lag at order-resolve time. 1.5s lockout is the cheapest safety net (matches the throttle pattern in state.lina_r_kill_steal_tick).
 state.last_tf_tick_t            = 0     -- v0.5.39 BUG-1: timestamp of the previous state.lina_teamfight_tick that reached the post-cluster-gate dispatch region. A gap >= FC_OPENER_REARM_GAP_S (4.0s) classifies the NEXT tick as a new engagement and re-arms state.fc_tf_opener_fired so the TF-opener FC pre-amp can fire once per fight.
@@ -803,7 +805,7 @@ CH.PRIMAL_ONSLAUGHT = {
     -- Same escape set as Mars Arena: WW/Eul are airborne + untargetable (no
     -- knockback/stun applies to a cycloned unit, regardless of position); Blink
     -- repositions clear. NO Force/Pike (push along Lina's facing, lesson 61 /
-    -- reference_pike_force_keep_away -- for a line dash that is along the corridor,
+    -- Pike/Force keep-away -- for a line dash that is along the corridor,
     -- not out). NO BKB (physical). Authoritative via ANIM_SAVE_OVERRIDES.
     "item_wind_waker",
     "item_cyclone",
@@ -1294,9 +1296,15 @@ K.FC_DEF_PROACTIVE_RADIUS = 1200  -- proactive band enemy-scan radius (u)
 K.FC_DEF_PROACTIVE_COUNT  = 2     -- proactive band: >= this many enemy heroes near
 K.FC_DEF_PRESSURE_DMG_WINDOW = 2.0   -- v0.5.158.5: a band-only proactive FC fires only under real pressure (damage within this window OR a committed attacker), not bare proximity
 K.FC_TURN             = 0.8   -- v0.5.159 A2: commit FC offense if allies_eff >= K_FC_TURN * enemies_eff (FC swings ~35%, so a modest deficit is still turnable)
+K.FC_TURN_VALUE_RELAX = 0.15  -- v0.5.165 D2: each +1.0 of weighted flip value W above 1 lowers the turn factor by this x K.FC_TURN (FC turns a more-behind fight for a high-value flip)
+K.FC_TURN_MIN         = 0.5   -- v0.5.165 D2: hard floor on the value-modulated turn factor (never green-light a hopeless fight)
 K.FC_MACRO_MIN_ENEMIES = 3    -- v0.5.159: macro_turnable only gates a TEAMFIGHT (>= this many enemies near); fewer = a pick, turnable by the TTK + bailout (a solo Lina bursting 1-2 must NOT read as "outnumbered")
 K.STACK_OPENER_MAX    = 3     -- v0.5.160 A3.2: cold-open fires FC standalone at a TF onset when Fiery Soul stacks <= this (the 0->7 jump is the value)
 K.FC_AOE_FLIP_RADIUS  = 250   -- v0.5.160 A3.1: the W (Light Strike Array) AoE radius -- only enemies the W+Q burst hits can be flip-counted
+K.FC_FLIP_VALUE       = 0.8   -- v0.5.169 D4.4 TUNED 1.0->0.8: TF offense fires when weighted flip value W >= this. 0.8 fires on a core (of~1.1-1.6) / a 2-hard-support flip (~0.8) / a lone mid; holds a lone hard-support (~0.4). Per design 8.2 + the demo-confirmed hero_value of values.
+K.HV_LIVE_LO          = 0.6   -- v0.5.164 D1: hero_value live-multiplier clamp floor (mirrors lib/hero_value LO)
+K.HV_LIVE_HI          = 1.6   -- v0.5.164 D1: hero_value live-multiplier clamp ceil  (mirrors lib/hero_value HI)
+K.HV_AIM_DIST_EPS     = 150  -- v0.5.166 D3: aim tie-break band; burst targets within this many units of the nearest are a tie, broken by HeroValue (kill the more valuable). Demo-tuned.
 K.JUGG_OMNI_DODGE_DELAY   = 0.4  -- v0.5.160.2 Note-1: delay the WW/Eul (untargetable) dodge vs Jugg Omnislash this long past cast-detection so his cast COMMITS first (dodging during the ~0.3s cast point cancels+refunds the ult); the mid-ult dodge then whiffs the rest of the strikes (ends-early on no target) = Jugg loses the ult
 K.JUGG_OMNI_MIN_HP_ACCEPT = 450  -- v0.5.160.2 Note-1: only accept the first strike + defer when Lina has at least this much HP; below it, dodge at cast to SURVIVE (defense first) even though Jugg keeps the ult
 K.FC_MACRO_RADIUS     = 1500  -- v0.5.159 A2: fight-area radius for the eff-strength scan + the dest risk score
@@ -1307,6 +1315,27 @@ K.FC_BAILOUT_SAVES = {        -- v0.5.159 A2: ready non-FC escape/survive items 
     "item_blink", "item_cyclone", "item_wind_waker", "item_black_king_bar",
     "item_glimmer_cape", "item_force_staff", "item_hurricane_pike", "item_aeon_disk",
 }
+
+-- v0.5.16x Phase B: Flame Cloak escape (mobility / survival tier, design 6.1). FC flies Lina
+-- out of a lethal gank when the safest spot is terrain-locked + no ready Blink reaches it.
+K.FC_ESCAPE_HP_FLOOR      = 0.50  -- focused-below HP fraction that counts as lethal-ish
+K.FC_ESCAPE_SAFER_MARGIN  = 20    -- risk-score delta (walkable - overall) to justify flying (~one visible enemy of danger)
+K.FC_ESCAPE_RADIUS        = 700   -- SafestSpotNear sample ring
+K.FC_ESCAPE_GANK_ETA      = 2.0   -- GankImminent look-ahead seconds (min_count uses the lib default 2)
+
+-- v0.5.16x Phase C: Flame Cloak CHASE (kill tier, design 6.2). FC = unobstructed movement (no speed,
+-- Liquipedia); chase is a terrain CUTOFF of a fleeing kill target the offense already committed to.
+K.FC_CHASE_COMMIT_WINDOW = 3.0   -- R-recency (s) that counts as "offense committing to this target"
+K.FC_CHASE_KILL_REACH    = 1200  -- out-of-reach radius (R 750 + a fly-reach term); demo-tune
+K.FC_CHASE_TOWER_RANGE   = 700   -- enemy tower attack range (structure range not queryable)
+K.FC_CHASE_ETA_MARGIN    = 0.5   -- catch must beat escape by this many seconds
+K.FC_CHASE_RISK_MAX      = 50    -- AdvanceRiskScore at the intercept must be below this (start under DEST_RISK_MAX 60)
+K.FC_CHASE_RADIUS        = 700   -- SafestSpotNear/AdvanceRiskScore engage radius reuse
+K.FC_CHASE_MS_FALLBACK   = 300   -- base MS if NPC.GetMovementSpeed reads nil
+K.FC_CHASE_CUTOFF_RATIO  = 1.3   -- v0.5.163 C2: walk path must be >= this x the straight FC line to be a cutoff
+K.FC_CHASE_CUTOFF_MIN    = 250   -- v0.5.163 C2: AND the walk must exceed the straight line by >= this many units
+K.FC_CHASE_FLEE_MARGIN   = 20    -- v0.5.163.1: target counts as fleeing when its 0.3s-predicted pos is >= this many units FARTHER from Lina (moving away). ctx.kiting_us proved structurally false in the demo.
+K.FC_CHASE_FLEE_LOOKAHEAD = 600  -- v0.5.163.4: extrapolate the flee direction this far to BuildPath the target's escape route (does IT wind around terrain Lina can fly straight over) -- the real cutoff value
 
 -- v0.5.110.1 LETHAL-ONLY ITEM RULE (user demo feedback on v0.5.110: "all
 -- attacks are using items, this way it is impossible for me to commit
@@ -2234,6 +2263,28 @@ local LINA_EXPECTED_DAMAGE = {
     modifier_sniper_assassinate    = 600,
     modifier_lion_voodoo           = 0,    -- disable (hex, no reflectable dmg)
     modifier_doom_bringer_doom     = 0,    -- disable (slow DoT, Lotus poor pick)
+    -- v0.5.168 D4.2 (magic-D expansion, design 8.3): high-magnitude MAGICAL nukes
+    -- that previously fell to the coarse fc_severity_D fallback in the FC defense
+    -- grade. Keys are the canonical threat_data THREAT_PROFILE modifier names (what
+    -- the threat system emits); values are conservative best-of-level magical damage
+    -- from Liquipedia (patch 7.41d). school=magical ONLY belongs here (FC's 35% MR
+    -- softens magical): Tinker Laser is PURE -> excluded; Skywrath Arcane Bolt /
+    -- Pugna Nether Blast / Invoker nukes are NOT in THREAT_PROFILE -> a catalog entry
+    -- would be dead (never looked up by fc_defense_claim). Zeus Thundergods Wrath was
+    -- REMOVED v0.5.168.3: modseen shows the instant ult lands NO debuff modifier, so a
+    -- modifier-keyed entry can never match (its detection routes to bkb/pipe, not FC).
+    modifier_zuus_lightning_bolt                = 380,   -- Zeus W, 140/220/300/380 L1-4, single-target magical (FC-graded, demo-confirmed src=catalog)
+    modifier_skywrath_mystic_flare_aura_effect  = 1600,  -- Skywrath ult zone, 800/1200/1600 L1-3 total, UNDIVIDED on a solo target (worst case)
+    modifier_skywrath_mage_mystic_flare_thinker = 1600,  -- same Mystic Flare zone (thinker key variant)
+    modifier_leshrac_split_earth                = 280,   -- Leshrac Q, 115/170/225/280 L1-4 magical (stun + damage)
+    -- v0.5.168.2 D4.2 batch-2 (Liquipedia 7.41d). Clean single-burst magical nukes only.
+    -- Chain Frost (bouncing, no clean per-hero value) + Mortimer Kisses (spread glob
+    -- bombardment, conflicting per-glob sources) were DEFERRED, not guessed. v0.5.168.3:
+    -- modseen demo confirmed the names below; NOTE Ravage/Avalanche route to ITEM saves
+    -- (eul/ww/bkb), so fc_defense_claim's grade does not consult them today (fc_defense_d
+    -- never fired) -- correct-but-unused until FC is their grader. See the bridge.
+    modifier_tidehunter_ravage                  = 400,   -- Tide ult, 200/300/400 L1-3 magical PBAoE (base; +100 talent)
+    modifier_tiny_avalanche_stun                = 360,   -- Tiny Q, 90/180/270/360 L1-4 total magical; KEY = _stun (modseen: bare modifier_tiny_avalanche never lands)
 }
 
 -- Save-cast closures. Universal item self-casts plus the two Lina-specific
@@ -2353,7 +2404,7 @@ local SAVE_FIRE = {
     },
     -- HERO-SPECIFIC: W (light_strike_array) anti-gap arrival stun.
     -- v0.5.44 (DEFENSE_PLAN.md sec 2.1): W has 1.1s prep (0.6 cast point +
-    -- 0.5 delay) + 225 AoE + 1.6s stun. Audit D1 surfaced 4 high-
+    -- 0.5 delay) + 225 AoE + 1.6s stun. Workflow audit D1 surfaced 4 high-
     -- viability targets (Bara Charge, Bara Nether Strike, Tusk Snowball,
     -- MK Primal Spring) and 2 medium (Storm BL landing, Ember Remnant
     -- arrival). All 4 high-viability cases land AT Lina position, so aim
@@ -2409,7 +2460,7 @@ local SAVE_FIRE = {
                 -- interrupt; the real Pugna bail was the menu toggle being off, not
                 -- this gate, and the bypass was speculative. Keep it LOGGED so a
                 -- future silent-bail hunt is a one-line grep, not three demos
-                -- ([[feedback_check_config_before_debugging]]).
+                -- (check config before debugging).
                 tlog(2, "w_defensive_skip_channelling", {
                     intent = tostring(intent or ""),
                     mod    = tostring(threat_mod or "-"),
@@ -3296,10 +3347,10 @@ state.try_blink_in = function(ctx, aim_pos, name, kill_confirmed, cluster_n)
     local mode, risk_cap
     if kill_on and kill_confirmed then
         mode     = "kill"
-        risk_cap = (m.blink_in_kill_risk and m.blink_in_kill_risk:Get()) or 60
+        risk_cap = 60  -- v0.5.172: blink_in_kill_risk hardcoded 60
     elseif initiate_on then
         mode     = "initiate"
-        risk_cap = (m.blink_in_initiate_risk and m.blink_in_initiate_risk:Get()) or 30
+        risk_cap = 30  -- v0.5.172: blink_in_initiate_risk hardcoded 30
         -- v0.5.97 fix #7 (wire the dead gate; best practice = hit the most targets):
         -- blink-INITIATE (no confirmed kill) requires a >=2-hero cluster, so the brain
         -- commits the dagger + WQR onto a multi-hero pile, never a lone target. The
@@ -3312,7 +3363,7 @@ state.try_blink_in = function(ctx, aim_pos, name, kill_confirmed, cluster_n)
             state.blink_in_skip("cluster_small"); return false
         end
         if not state.has_exit_item(me) then state.blink_in_skip("no_exit"); return false end
-        local hp_floor = (m.blink_in_initiate_hp and m.blink_in_initiate_hp:Get()) or 40
+        local hp_floor = 40  -- v0.5.172: blink_in_initiate_hp hardcoded 40
         if state.blink_in_hp_frac(me) * 100 < hp_floor then state.blink_in_skip("hp_floor"); return false end
     else
         return false                                            -- kill mode off and no kill
@@ -3701,7 +3752,7 @@ defense_dispatcher = Defense.New {
     -- (self_hp_fraction below is a real closure; its low_severity_high_hp branch is
     -- unaffected.)
     -- Lina HP fraction for the severity skip. Per
-    -- reference_uczone_hp_api memory HP lives on Entity, not NPC.
+    -- UCZone API: HP lives on Entity, not NPC.
     self_hp_fraction = function()
         local me = state.self_npc
         if not me or not Entity.IsAlive(me) then return nil end
@@ -4023,7 +4074,7 @@ local SAVE_ETA_TRIGGER = {
 -- Keyed by save_name (matches SAVE_FIRE / SAVE_ETA_TRIGGER). Values in DOTA
 -- units; see per-entry rationale in v0.5.9 release notes.
 local SAVE_FIRE_DISTANCE = {
-    item_wind_waker         = 500,  -- v0.5.135.1: 300 -> 500. WW is INSTANT (fire by proximity, no lead math -- [[feedback_instant_save_proximity]]). 300u was the binding gate ONLY for Bara: eta_speed 600 puts the SAVE_ETA_TRIGGER(0.45) eta-gate at 270u < 300u, so WW fired at ~296u = too close vs the real ~690 ramped charge speed (3 late fires). Tusk/Primal (eta_speed 1200) fire via the eta-gate at ~540u and are UNCHANGED (540 > 500). 500u gives Bara ~0.7s real lead (parity with Pike/Force's 500u). (was v0.5.15 PT-01 150 -> 300.)
+    item_wind_waker         = 500,  -- v0.5.135.1: 300 -> 500. WW is INSTANT (fire by proximity, no lead math -- instant saves need no lead/aim). 300u was the binding gate ONLY for Bara: eta_speed 600 puts the SAVE_ETA_TRIGGER(0.45) eta-gate at 270u < 300u, so WW fired at ~296u = too close vs the real ~690 ramped charge speed (3 late fires). Tusk/Primal (eta_speed 1200) fire via the eta-gate at ~540u and are UNCHANGED (540 > 500). 500u gives Bara ~0.7s real lead (parity with Pike/Force's 500u). (was v0.5.15 PT-01 150 -> 300.)
     item_cyclone            = 500,  -- v0.5.135.1: matched item_wind_waker (same instant-airborne fire-by-proximity; Eul's). (was v0.5.15 PT-01 300.)
     item_hurricane_pike     = 500,   -- v0.5.21 PT-02: 360 -> 500. self-cast Pike pushes 425u; 360u gave too tight a margin between threat-impact and displacement-resolution. 500u lets the save fire while the threat is still ~half the push distance away.
     item_force_staff        = 500,   -- v0.5.21 PT-02: 360 -> 500. Same rationale (600u push; 500u trigger leaves clean headroom).
@@ -4877,17 +4928,7 @@ local function try_save_ally(ally, threat_mod, threat_caster)
         { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3
 end
 
--- E12 (deviation, "moved" from Phase E): pre-face an incoming threat so turn
--- time (Lina's 0.6 turn rate) does not extend her next cast. Defense-triggered
--- (scans enemies with a READY targeted-threat ability approaching within TTI),
--- but the payoff is mostly offensive (faster W / R onto the threat) since
--- Lina's save ITEMS are instant and need no facing. Issues a one-frame
--- ATTACK_TARGET that any user input on the next frame supersedes. DEFAULT OFF
--- (it overrides movement); enable in the Defense menu. Ported Sniper.lua:7390.
-K.PRE_FACE_TTI_THRESHOLD = 2.5  -- v0.5.15 PT-04: bumped 1.0 -> 2.5. 1.0s TTI requires >1000u/s closure which no unboosted hero hits; the gate was effectively dead. 2.5s catches Tusk/Bara/PA-class approaches in time for the 0.6 turn rate to matter.
-K.PRE_FACE_COOLDOWN      = 0.4
-K.PRE_FACE_ANGLE_OK      = 25
-K.PRE_FACE_SCAN_RADIUS   = 1000
+-- v0.5.171: K.PRE_FACE_* constants removed with the pre_face_tick feature (menu-simplification).
 
 local function self_alive_ok()
     local me = state.self_npc
@@ -4910,127 +4951,9 @@ end
 -- not_self_alive and it never cast (cast_verify fired=n).
 state.lina_self_alive_ok = self_alive_ok
 
-local function enemy_has_ready_target_threat(enemy)
-    for slot = 0, 5 do
-        local ok_a, a = pcall(NPC.GetAbilityByIndex, enemy, slot)
-        if ok_a and a and Ability.GetLevel(a) > 0 and Ability.IsReady(a) then
-            local ok_n, ability_name = pcall(Ability.GetName, a)
-            if ok_n and ability_name and ABILITY_TO_THREAT[ability_name] then
-                return true, ability_name
-            end
-        end
-    end
-    return false, nil
-end
+-- v0.5.171: enemy_has_ready_target_threat removed with the pre_face_tick feature (its only caller).
 
--- v0.5.6 (E3): per-drop-point skip diagnostics so users can see WHY pre_face
--- did not fire (v0.5.4 B4 fix audit found zero pre_face_* events in the
--- re-test log). Cheap level-3 tlog at every early return; no behaviour change.
-local function pre_face_tick()
-    if not state.menu then return end
-    if state.menu.preface_enable and not state.menu.preface_enable:Get() then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "toggle_off" }) end
-        return
-    end
-    if not defense_enabled() then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "defense_off" }) end
-        return
-    end
-    if state.menu.combo_key and state.menu.combo_key:IsDown() then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "combo_key_down" }) end
-        return
-    end
-    if not self_alive_ok() then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "not_self_alive" }) end
-        return
-    end
-
-    local me = state.self_npc
-    local r_ability = ability(A.R)
-    if r_ability and Ability.IsInAbilityPhase(r_ability) then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "cast_in_progress" }) end
-        return
-    end
-
-    -- v0.5.37 PERF-07: read the per-frame now() sample stashed by OnUpdateEx.
-    -- pre_face_tick is only called from OnUpdateEx (line 5117); the cooldown
-    -- stamp at state.last_preface_t = now_t below uses the same value.
-    local now_t = state.frame_t
-    if (now_t - (state.last_preface_t or 0)) < K.PRE_FACE_COOLDOWN then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "cooldown" }) end
-        return
-    end
-
-    local me_pos = NPCLib.origin(me)
-    if not me_pos then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "no_me_pos" }) end
-        return
-    end
-    local enemies = NPCs.InRadius(me_pos, K.PRE_FACE_SCAN_RADIUS,
-        Entity.GetTeamNum(me), Enum.TeamType.TEAM_ENEMY, true, true)
-    if not enemies or #enemies == 0 then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "no_enemies_in_radius" }) end
-        return
-    end
-
-    local best_e, best_tti, best_via = nil, math.huge, nil
-    for _, e in ipairs(enemies) do
-        if Target.IsValid(e) and Target.IsAlive(e)
-           and Target.IsEnemyHero(e, me) and Target.NotIllusion(e)
-        then
-            local has, ability_name = enemy_has_ready_target_threat(e)
-            -- v0.5.4 (B4 fix): NPC.GetMoveSpeed returns the move-speed STAT and
-            -- is non-zero even while the unit is standing still, so using it as
-            -- a velocity proxy false-trips TTI on any stationary enemy with a
-            -- ready targeted threat. Gate the TTI computation on NPC.IsRunning;
-            -- when the enemy is actually moving the stat is a reasonable speed
-            -- proxy, otherwise skip and let other defenses handle the threat.
-            if has and NPC.IsRunning and NPC.IsRunning(e) then
-                local d = dist_to(e)
-                local sp = NPC.GetMoveSpeed(e) or 300
-                if sp < 200 then sp = 200 end
-                local tti = d / sp
-                if tti < K.PRE_FACE_TTI_THRESHOLD and tti < best_tti then
-                    best_e, best_tti, best_via = e, tti, ability_name
-                end
-            end
-        end
-    end
-
-    if not best_e then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "no_running_enemy_with_threat" }) end
-        return
-    end
-
-    local best_pos = Entity.GetAbsOrigin(best_e)
-    if not best_pos then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "no_me_pos" }) end
-        return
-    end
-    local angle = math.deg(math.abs(NPC.FindRotationAngle(me, best_pos)))
-    if angle < K.PRE_FACE_ANGLE_OK then
-        if TLOG3_ENABLED then tlog(3, "pre_face_skip", { reason = "angle_ok_already" }) end
-        return
-    end
-
-    local ok = safe_issue {
-        hero       = HERO_KEY,
-        layer      = "def",
-        intent     = "preface_" .. uname(best_e),
-        order_type = UO.DOTA_UNIT_ORDER_ATTACK_TARGET,
-        unit       = me,
-        target     = best_e,
-    }
-    if ok then
-        state.last_preface_t = now_t
-        tlog(1, "preface_attack", {
-            target = uname(best_e),
-            tti    = string.format("%.2f", best_tti),
-            angle  = string.format("%.0f", angle),
-            via    = best_via or "?",
-        })
-    end
-end
+-- v0.5.171: pre_face_tick (the preface_enable feature) cut in menu-simplification. It was default OFF, so removing it preserves behavior; the caller, state, and K.PRE_FACE_* are removed too.
 
 -- v0.5.147.x hooks the cast-poll save watches (Pudge Meat Hook + Clockwerk Hookshot).
 -- mod = canonical victim modifier (the v0.5.40 lock key + LINA_SAVE_OVERRIDES key);
@@ -5297,8 +5220,7 @@ local function on_channel_start(ev)
     -- now. A low-HP Lina that cannot safely eat the first strike dodges at cast to
     -- survive. The defer tick fires the SAME chain Dispatch mid-ult.
     if ev.ability_name == "juggernaut_omni_slash" then
-        local defer_on = not (state.menu and state.menu.jugg_omni_defer
-                              and not state.menu.jugg_omni_defer:Get())
+        local defer_on = true  -- v0.5.170: jugg_omni_defer hardcoded ON (menu-simplification)
         local immediate_ready = (state.lina_save_ready and
             (state.lina_save_ready("item_ghost") or state.lina_save_ready("item_ethereal_blade"))) or false
         local me = state.self_npc
@@ -5533,14 +5455,17 @@ end
 -- combo already kills, or the target is un-killable even amped); >=1 = FC rescues that
 -- many kills. Phase 1 gates the existing FC openers on count >= 1 (primary-only); the
 -- per-tick arbiter + the AoE/multi-target magnitude land in later phases.
-state.fc_offense_value = function(ctx, target, enemies_in_aoe)
-    if not (ctx and target) then return 0 end
+-- v0.5.164 D1: the flip predicate is factored out so the unweighted COUNT
+-- (fc_offense_value, the existing contract) and the value-weighted SUM
+-- (fc_offense_value_w, Phase D) cannot diverge. on_hit(unit) is called once per
+-- enemy FC's x(1+FC_SPELL_AMP) amp flips from a non-kill into a kill.
+local function fc_for_each_flip(ctx, target, enemies_in_aoe, on_hit)
+    if not (ctx and target) then return end
     local amp = 1 + FC_SPELL_AMP
-    local count = 0
     local combo_total = ctx.combo_total or 0
     local eff_p = (state.lina_eff_hp_magical and state.lina_eff_hp_magical(target)) or math.huge
     if combo_total > 0 and eff_p > combo_total and eff_p * 1.05 <= combo_total * amp then
-        count = count + 1
+        on_hit(target)
     end
     local aoe_burst = (ctx.q_dmg or 0) + (ctx.w_dmg or 0)
     if aoe_burst > 0 and enemies_in_aoe then
@@ -5549,13 +5474,75 @@ state.fc_offense_value = function(ctx, target, enemies_in_aoe)
             if u and u ~= target then
                 local eff_u = (state.lina_eff_hp_magical and state.lina_eff_hp_magical(u)) or math.huge
                 if eff_u > aoe_burst and eff_u * 1.05 <= aoe_burst * amp then
-                    count = count + 1
+                    on_hit(u)
                 end
             end
         end
     end
+end
+
+state.fc_offense_value = function(ctx, target, enemies_in_aoe)
+    local count = 0
+    fc_for_each_flip(ctx, target, enemies_in_aoe, function() count = count + 1 end)
     return count
 end
+
+-- v0.5.164 D1: value-weighted flip score. W = sum of HeroValue.of over exactly
+-- the flipped set fc_offense_value counts. peers = the AoE cluster (the primary
+-- normalizes against the same set; nil peers -> base only, mult 1.0).
+state.fc_offense_value_w = function(ctx, target, enemies_in_aoe)
+    local w = 0
+    fc_for_each_flip(ctx, target, enemies_in_aoe, function(u)
+        w = w + (HeroValue.of(u, enemies_in_aoe) or 0)
+    end)
+    return w
+end
+
+-- v0.5.164 D1: exposed so in-brain tests can stub of() and the FC sites value-weight.
+state.hero_value = HeroValue
+
+-- v0.5.16x Phase D4 (design 8.1): the unified fc_arbiter decision line. ONE level-1
+-- tlog per FC fire/hold, consolidating the scattered lina_flame_cloak_offensive
+-- (fire) + fc_commit_eval/fc_commit_skip (commit hold) diagnostics into a single
+-- grep-able record so a default-verbosity demo is the read-out surface for the
+-- section-8.2 tuning sweep. fc_arbiter_fields is the PURE formatter (record ->
+-- normalized kv): numbers fixed-width, fired y/n, bailout y/n/na (3-state, na =
+-- no commit eval on this line), absent numerics na, claim defaults none. Exposed
+-- on state for the in-brain FCAR01 test. (claim is carried by the formatter but
+-- populated by the defense pillar's fc_arbiter_defense line; the offense fire/hold
+-- lines default it to none in D4.1 -- the offense tuning knobs do not read it.)
+local function _fcar_num(v, fmt) if type(v) == "number" then return string.format(fmt, v) else return "na" end end
+local function _fcar_yn3(v) if v == true then return "y" elseif v == false then return "n" else return "na" end end
+state.fc_arbiter_fields = function(r)
+    r = r or {}
+    return {
+        tier    = r.tier or "?",
+        reason  = r.reason or "?",
+        fired   = r.fired and "y" or "n",
+        W       = _fcar_num(r.W, "%.2f"),
+        count   = _fcar_num(r.count, "%.0f"),
+        cluster = _fcar_num(r.cluster, "%.0f"),
+        keff    = _fcar_num(r.keff, "%.2f"),
+        ae      = _fcar_num(r.ae, "%.2f"),
+        ee      = _fcar_num(r.ee, "%.2f"),
+        bailout = _fcar_yn3(r.bailout),
+        claim   = r.claim or "none",
+        stacks  = _fcar_num(r.stacks, "%.0f"),
+    }
+end
+-- v0.5.168.4 D4.3 cleanup: emit the fc_arbiter line in a STABLE canonical column order
+-- (design 8.1) so the tuning read-out scans cleanly (tlog's pairs() order jittered the
+-- fields line-to-line). fc_arbiter_line is the pure ordered serializer (FCAR01-tested).
+local FCAR_ORDER = { "tier", "reason", "fired", "W", "count", "cluster", "keff", "ae", "ee", "bailout", "claim", "stacks" }
+state.fc_arbiter_line = function(f)
+    local parts = { "fc_arbiter" }
+    for i = 1, #FCAR_ORDER do local k = FCAR_ORDER[i]; parts[#parts + 1] = k .. "=" .. tostring(f[k]) end
+    return table.concat(parts, " | ")
+end
+state.fc_arbiter_log = function(r) tlog(1, state.fc_arbiter_line(state.fc_arbiter_fields(r))) end
+
+-- v0.5.170: hero_value_eval_log (the fc_value_debug observability probe) cut in
+-- menu-simplification. It was a pure tuning log, no behavior depended on it.
 
 -- v0.5.160 A3.2: the stack-aware cold-open predicate. Low Fiery Soul stacks at a
 -- TF onset justify FC on their OWN (no kill-flip): the 0->7 jump is instant max
@@ -5909,7 +5896,7 @@ local ETHER_MAGIC_AMP = 0.30
 -- The at-a-glance "am I safe right now" set: high-impact defensive saves +
 -- the displacement chain heads. Only items Lina actually owns render (compact
 -- line); each shows "rdy" or remaining cooldown in seconds. Menu-label HUD
--- (1Hz refresh), NOT an OnDraw overlay (feedback_hero_brain_iteration).
+-- (1Hz refresh), NOT an OnDraw overlay.
 local POWER_SPIKE_SAVES = {
     { name = "item_black_king_bar", short = "BKB" },
     { name = "item_lotus_orb",      short = "Lotus" },
@@ -6388,13 +6375,17 @@ state.fc_defense_claim = function(ctx, threat_mod, last_resort)
 
     -- (1) reactive: the largest armed MAGICAL threat (FC's MR softens it).
     local D, pierces = 0, false
+    local D_mod, D_src                       -- v0.5.168.1 D4.2: which mod drove D + catalog|fallback (diag)
     for _key, e in pairs(state.armed_threats) do
         local mod = e and e.threat_mod
         local p   = mod and TD.THREAT_PROFILE[TD.CanonicalMod(mod)]
         if p and p.school == "magical" then
             local d = LINA_EXPECTED_DAMAGE[mod]
                       or fc_severity_D(TD.SeverityOf(mod), hpmax)
-            if d > D then D = d; pierces = p.pierces_spell_immunity and true or false end
+            if d > D then
+                D = d; pierces = p.pierces_spell_immunity and true or false
+                D_mod, D_src = mod, (LINA_EXPECTED_DAMAGE[mod] and "catalog" or "fallback")
+            end
         end
     end
 
@@ -6407,7 +6398,10 @@ state.fc_defense_claim = function(ctx, threat_mod, last_resort)
         if p and p.school == "magical" then
             local d = LINA_EXPECTED_DAMAGE[threat_mod]
                       or fc_severity_D(TD.SeverityOf(threat_mod), hpmax)
-            if d > D then D = d; pierces = p.pierces_spell_immunity and true or false end
+            if d > D then
+                D = d; pierces = p.pierces_spell_immunity and true or false
+                D_mod, D_src = threat_mod, (LINA_EXPECTED_DAMAGE[threat_mod] and "catalog" or "fallback")
+            end
         end
     end
 
@@ -6446,6 +6440,18 @@ state.fc_defense_claim = function(ctx, threat_mod, last_resort)
             lr     = last_resort and "y" or "n",
         })
     end
+    -- v0.5.168.1 D4.2 diag: which magical threat drove the FC-defense D, and whether
+    -- the precise value came from LINA_EXPECTED_DAMAGE (catalog) or the coarse
+    -- fc_severity_D (fallback). armed_D = the pre-proactive-band magical value (the
+    -- catalog/fallback number). Throttled; level 2 (shows at demo verbosity >= 3).
+    -- This is the read-out that confirms a magic-D catalog entry is actually used.
+    if D_mod and (now() - (state.fc_def_d_log_t or 0)) >= 1.0 then
+        tlog(2, "fc_defense_d", {
+            mod = D_mod, d = string.format("%.0f", armed_D), src = D_src,
+            hp = string.format("%.0f", hp), grade = result,
+        })
+        state.fc_def_d_log_t = now()
+    end
     -- v0.5.158.5: source = what drives a firing-tier claim. "armed" = a real
     -- armed/dispatched magical threat at least Tier-B heavy on its own (fire now);
     -- "proactive" = only the proximity band (the tick requires real pressure to
@@ -6454,6 +6460,78 @@ state.fc_defense_claim = function(ctx, threat_mod, last_resort)
     if armed_D >= (K.FC_DEF_TIER_B_FLOOR * hp) then source = "armed"
     elseif sustained then source = "proactive" end
     return result, source
+end
+
+-- PURE (in-brain FCESC01): fly iff the safest spot is terrain-locked AND meaningfully safer
+-- than the best walkable spot. info = Escape.SafestSpotNear's 3rd return.
+state.fc_escape_worth_flying = function(best_score, info, margin)
+    if not info then return false end
+    return info.locked and ((info.walkable_score - best_score) >= (margin or 0))
+end
+
+-- Strict fallback (design D4): a ready Blink that reaches the dest pre-empts FC-escape. Returns
+-- false (Blink does NOT cover -> FC may fire) when Blink is on CD, out of 1200 range, or
+-- damage-broken (the item_saves blink builder skips on recent damage within 3s).
+state.fc_escape_blink_covers = function(dest)
+    local me = state.self_npc
+    if not (me and dest) then return false end
+    if not (state.lina_save_ready and state.lina_save_ready("item_blink")) then return false end
+    local me_pos = NPCLib.origin(me)
+    if not me_pos then return false end
+    local dx, dy = me_pos.x - dest.x, me_pos.y - dest.y
+    if (dx * dx + dy * dy) > (1200 * 1200) then return false end
+    if Damage and Damage.GetRecentDamage then
+        local ok, d = pcall(Damage.GetRecentDamage, me, 3.0)
+        if ok and (d or 0) > 0 then return false end   -- blink damage-broken -> does not cover
+    end
+    return true
+end
+
+-- v0.5.16x Phase B (design 6.1): mobility claim. FC flies Lina out of a lethal gank when the
+-- safest spot is terrain-locked (a walk cannot reach it) AND no ready movement save reaches it.
+-- A DIFFERENT axis from fc_defense_claim (fires even vs PHYSICAL -- the flying, not the MR, is
+-- the value). Returns (best_pos, info) | nil. Reuses fc_severity_D + LINA_EXPECTED_DAMAGE (the
+-- module-locals fc_defense_claim uses; in scope here).
+state.fc_escape_claim = function(ctx)
+    -- v0.5.161.1: a 3rd return `diag` (additive; callers reading <= 2 values are unaffected)
+    -- carries the sub-signal breakdown so fc_escape_tick can log a live fc_escape_eval.
+    local diag = { lethal = false, worth_fly = false, blink_covers = false }
+    local me = state.self_npc
+    if not (me and Entity.IsAlive and Entity.IsAlive(me)) then return nil, nil, diag end
+    local hp    = (Entity.GetHealth and Entity.GetHealth(me)) or 0
+    local hpmax = (Entity.GetMaxHealth and Entity.GetMaxHealth(me)) or 1
+    if hp <= 0 or hpmax <= 0 then return nil, nil, diag end
+    diag.hp_frac = hp / hpmax
+    -- (1) lethal-ish: gank imminent OR focused below the floor OR an armed lethal threat.
+    local me_pos = NPCLib.origin(me)
+    local lethal = false
+    if me_pos and Escape.GankImminent and Escape.GankImminent(me, me_pos, K.FC_ESCAPE_GANK_ETA) then
+        lethal = true; diag.gank = true
+    elseif (hp / hpmax) < K.FC_ESCAPE_HP_FLOOR then
+        lethal = true; diag.low_hp = true
+    else
+        for _k, e in pairs(state.armed_threats) do
+            local mod = e and e.threat_mod
+            if mod then
+                local d = LINA_EXPECTED_DAMAGE[mod] or fc_severity_D(TD.SeverityOf(mod), hpmax)
+                if d >= hp then lethal = true; diag.armed = true; break end
+            end
+        end
+    end
+    diag.lethal = lethal
+    if not lethal then return nil, nil, diag end
+    -- (2) terrain-locked-safer (design D1): best-overall is locked + margin-safer than walkable.
+    local best_pos, best_score, info = Escape.SafestSpotNear(me, K.FC_ESCAPE_RADIUS)
+    if info then
+        diag.locked = info.locked and true or false
+        diag.best_score, diag.walk_score = best_score, info.walkable_score
+    end
+    diag.worth_fly = state.fc_escape_worth_flying(best_score, info, K.FC_ESCAPE_SAFER_MARGIN) and true or false
+    if not diag.worth_fly then return nil, nil, diag end
+    -- (3) strict fallback (design D4): defer to a ready Blink that reaches the spot.
+    diag.blink_covers = state.fc_escape_blink_covers(best_pos) and true or false
+    if diag.blink_covers then return nil, nil, diag end
+    return best_pos, info, diag
 end
 
 -- v0.5.158.5: real-pressure predicate for the PROACTIVE FC fire -- recent damage
@@ -6554,6 +6632,291 @@ state.fc_defense_tick = function()
     state.last_fc_dispatch_t = now()
 end
 
+-- v0.5.16x Phase B (design 6.1): per-tick FC ESCAPE. On a mobility claim (lethal gank +
+-- terrain-locked safest spot + no ready Blink), cast FC for its FLYING and arm a flee move.
+-- Mirrors fc_defense_tick's guards + the SHARED single-spend lock (last_fc_dispatch_t + the
+-- dispatcher) so it never double-casts with the defensive paths. Survival OVERRIDES the FS
+-- shard-window demotion (living > stacks): no shard guard, and fs_shard_window=false to the
+-- dispatcher so FC is not demoted to chain tail.
+state.fc_escape_tick = function()
+    local me = state.self_npc
+    state.fc_escape_active_cache = { t = now(), active = false }
+    if not me then return end
+    if not self_alive_ok() then return end
+    -- v0.5.170: fc_escape hardcoded ON (menu-simplification); always evaluate the escape claim.
+    local best_pos, info, diag = state.fc_escape_claim(nil)
+    -- v0.5.161.1 Phase B diag: while a lethal-ish trigger is live, log the discriminator so a
+    -- low-HP Lina near terrain shows the claim computing even when it correctly holds (throttled
+    -- ~1s; verbosity >= 2). Lets the live path be validated without staging the full fire.
+    if diag and diag.lethal and (now() - (state.fc_escape_eval_log_t or 0)) >= 1.0 then
+        tlog(2, "fc_escape_eval", {
+            gank = diag.gank and "y" or "n", low_hp = diag.low_hp and "y" or "n",
+            armed = diag.armed and "y" or "n",
+            hp = diag.hp_frac and string.format("%.2f", diag.hp_frac) or "?",
+            locked = diag.locked and "y" or "n",
+            best = diag.best_score and string.format("%.0f", diag.best_score) or "?",
+            walk = diag.walk_score and string.format("%.0f", diag.walk_score) or "?",
+            worth_fly = diag.worth_fly and "y" or "n",
+            blink = diag.blink_covers and "y" or "n",
+            fire = best_pos and "y" or "n",
+        })
+        state.fc_escape_eval_log_t = now()
+    end
+    if not best_pos then return end
+    state.fc_escape_active_cache = { t = now(), active = true }   -- veto offense even if the spend throttles
+    -- Coordinate with the defensive FC: if FC is ALREADY up (cast by fc_defense_tick or any path
+    -- this window), do NOT recast -- arm the flee-move on top of the same buff so a defensive FC
+    -- ALSO flees Lina across terrain. Without this the A1 proactive band (low HP + 2 enemies = a
+    -- gank) casts FC first and shadows the escape (demo: 4 fire=y, 0 actual flee). Arm once.
+    if NPC.HasModifier and NPC.HasModifier(me, "modifier_lina_flame_cloak") then
+        if not state.pending_post_airborne_move then
+            tlog(1, "fc_escape_ride", {
+                x = string.format("%.0f", best_pos.x), y = string.format("%.0f", best_pos.y),
+                locked = (info and info.locked) and "y" or "n",
+            })
+            state.arm_fc_escape_move(best_pos)
+        end
+        return
+    end
+    if (now() - (state.last_fc_dispatch_t or 0)) < 1.5 then return end
+    local fc = ability("lina_flame_cloak")
+    if not (fc and Ability.GetLevel(fc) > 0 and Ability.IsReady(fc)) then return end
+    if NPC.IsChannellingAbility and NPC.IsChannellingAbility(me) then return end
+    local mana = (NPC.GetMana and NPC.GetMana(me)) or 0
+    if mana < (ability_mana(A.FC) or 50) then return end
+    tlog(1, "fc_escape", {
+        x = string.format("%.0f", best_pos.x), y = string.format("%.0f", best_pos.y),
+        locked = (info and info.locked) and "y" or "n",
+    })
+    defense_dispatcher:Dispatch(
+        "lina_fc_escape",
+        "lina_fc_escape",
+        me, me,
+        function(intent, _mod, _caster)
+            local ok = issue_cast_notarget(intent, fc, "def")
+            if ok then state.arm_fc_escape_move(best_pos) end
+            return ok
+        end,
+        nil, "lina_flame_cloak", nil, nil,
+        { fs_shard_window = false })   -- survival overrides the shard demotion
+    state.last_fc_dispatch_t = now()
+end
+
+-- Arm the FC-escape flee move on the existing post-airborne move slot + tick (the tick issues
+-- MOVE once the FC modifier lands, then reissues with a SafestSpotNear recompute while FC is
+-- up). FC is movable-throughout (WW-like): moves_during_airborne=true. Only if the slot is free
+-- (do not clobber a WW/Eul post-move).
+state.arm_fc_escape_move = function(dest)
+    if state.pending_post_airborne_move then return end   -- slot busy -> skip
+    state.pending_post_airborne_move = {
+        dest = dest,
+        modifier_name = "modifier_lina_flame_cloak",
+        moves_during_airborne = true,
+        deadline = now() + K.FC_DURATION,
+        intent = "fc_escape",
+        observed_airborne = false, last_reissue_t = 0, reissue_seq = 0,
+        recompute_dest = function() return (Escape.SafestSpotNear(state.self_npc, K.FC_ESCAPE_RADIUS)) end,
+    }
+end
+
+-- Cheap cached read for the offense veto (avoids re-running SafestSpotNear at each opener site).
+state.fc_escape_active = function(_ctx)
+    local c = state.fc_escape_active_cache
+    return (c and c.active and (now() - c.t) < 0.25) and true or false
+end
+
+-- v0.5.163 C2: is the offense pillar demonstrably committing to `target`? Offense-recent (ANY W/Q/R combo
+-- step stamped last_offense_target, R-independent) OR an FC opener fired this engagement, AND the A2 commit
+-- gate. The whole non-autonomous boundary (extend, never initiate).
+state.fc_chase_committing = function(ctx, target)
+    if not target then return false end
+    -- v0.5.163 C2: broad offense commitment (any W/Q/R step stamped last_offense_target), not R-only.
+    local offense_recent = (state.last_offense_target == target)
+        and ((now() - (state.last_offense_dispatch_t or 0)) < K.FC_CHASE_COMMIT_WINDOW)
+    if not (offense_recent or state.fc_tf_opener_fired) then return false end
+    return state.fc_offense_commit_ok and state.fc_offense_commit_ok(ctx, target) or false
+end
+
+-- Lina's live base move speed for catch-ETA (FC adds no speed; falls back to a constant).
+state.fc_chase_move_speed = function()
+    local me = state.self_npc
+    local ms = me and NPC.GetMovementSpeed and NPC.GetMovementSpeed(me)
+    return (ms and ms > 1) and ms or K.FC_CHASE_MS_FALLBACK
+end
+
+-- Gather enemy tower circles for the protection set. Towers.GetAll() is uczone v2.0 (newly documented +
+-- uncertain) -> guarded: nil/empty/error -> {} (fog + out-of-reach carry escape-ETA without towers).
+state.fc_chase_protection_circles = function()
+    local me = state.self_npc
+    if not (me and Towers and Towers.GetAll) then return {} end
+    local ok, all = pcall(Towers.GetAll)
+    if not (ok and type(all) == "table") then return {} end
+    local my_team = Entity.GetTeamNum and Entity.GetTeamNum(me)
+    local out = {}
+    for _, tw in pairs(all) do
+        if tw and Entity.IsAlive and Entity.IsAlive(tw)
+           and (not my_team or (Entity.GetTeamNum(tw) ~= my_team)) then
+            local p = Entity.GetAbsOrigin and Entity.GetAbsOrigin(tw)
+            if p then out[#out + 1] = { pos = p, range = K.FC_CHASE_TOWER_RANGE } end
+        end
+    end
+    return out
+end
+
+-- v0.5.163 C2: guarded straight-line cutoff lock. The OLD discriminator (IsTraversableFromTo) tests path
+-- CONNECTIVITY (~always true) -> locked=n all demo. Measure the real cutoff: the WALK (BuildPath, trees
+-- counted via ignoreTrees=false) vs the straight FC line. Falls back to the old connectivity check only if
+-- BuildPath is unavailable. All pcall-guarded.
+state.fc_chase_cutoff_locked = function(me_pos, intercept)
+    if not (me_pos and intercept and GridNav) then return false, { src = "noargs" } end
+    if GridNav.BuildPath then
+        local ok, path = pcall(GridNav.BuildPath, me_pos, intercept, false)   -- ignoreTrees=false -> trees block
+        if ok and type(path) == "table" and #path >= 2 then
+            local r = Escape.CutoffLock(me_pos, intercept, path,
+                { ratio = K.FC_CHASE_CUTOFF_RATIO, min_gain = K.FC_CHASE_CUTOFF_MIN })
+            return r.locked, { src = "bp", walk = r.walk, straight = r.straight, ratio = r.ratio, n = #path }
+        end
+        -- v0.5.163.2 instrument: BuildPath present but unusable (errored / < 2 points) -> note it, then fall back
+        if GridNav.IsTraversableFromTo then
+            local okC, conn = pcall(GridNav.IsTraversableFromTo, me_pos, intercept)
+            if okC then return (conn == false),
+                { src = "bp_bad", ok = ok and "y" or "n", n = (type(path) == "table" and #path or -1) } end
+        end
+        return false, { src = "bp_bad_nofb", ok = ok and "y" or "n" }
+    end
+    if GridNav.IsTraversableFromTo then   -- fallback only when BuildPath is missing
+        local okC, conn = pcall(GridNav.IsTraversableFromTo, me_pos, intercept)
+        if okC then return (conn == false), { src = "noBP_conn" } end
+    end
+    return false, { src = "none" }
+end
+
+-- v0.5.163.4: does the TARGET take a winding route (around trees/cliffs) that Lina can shortcut by flying
+-- straight? Extrapolate the flee direction K.FC_CHASE_FLEE_LOOKAHEAD ahead and check if the target's
+-- BuildPath route there winds vs the straight line. This is the real FC cutoff value (the OLD lock checked
+-- whether LINA's path was blocked, ~never true when following a runner). Returns (locked, info).
+state.fc_chase_target_winding = function(cur, vel)
+    if not (cur and vel) then return false, { src = "noargs" } end
+    local sp = math.sqrt(vel.x * vel.x + vel.y * vel.y)
+    if sp < 1e-3 then return false, { src = "still" } end
+    local ux, uy = vel.x / sp, vel.y / sp
+    -- v0.5.163.7: the linear flee point can overshoot into unreachable terrain (BuildPath -> bp_bad, no
+    -- winding measure). Try decreasing lookaheads until one lands on the navmesh (src="bp") so we measure
+    -- the target's real winding to a REACHABLE point. fp is a Vector (v0.5.163.6) so fp:Distance2D works.
+    for i = 1, 3 do
+        local d = K.FC_CHASE_FLEE_LOOKAHEAD * (i == 1 and 1.0 or (i == 2 and 0.6 or 0.35))
+        local fp = Vector(cur.x + ux * d, cur.y + uy * d, cur.z or 0)
+        local locked, info = state.fc_chase_cutoff_locked(cur, fp)
+        if type(info) == "table" and info.src == "bp" then
+            info.flee_point = fp
+            return locked, info
+        end
+    end
+    return false, { src = "unreachable" }
+end
+
+-- v0.5.163 C2 (design 6.2): the chase claim. Returns (intercept, info, diag) | nil. Fires only on a
+-- FLEEING + FINISHABLE kill the offense is committing to (D1), that is winnable (catch-ETA + margin <=
+-- escape-ETA), where the straight FC flight is a real terrain/tree cutoff over the walk, and the intercept
+-- risk is bounded. PURE sub-signals exposed via diag (FCCH02).
+state.fc_chase_claim = function(ctx, target)
+    local diag = { committing = false, finishable = false, fleeing = false, winnable = false, terrain_locked = false }
+    local me = state.self_npc
+    if not (me and target and Entity.IsAlive and Entity.IsAlive(target)) then return nil, nil, diag end
+    diag.committing = state.fc_chase_committing(ctx, target) and true or false
+    if not diag.committing then return nil, nil, diag end
+    -- finishable: a kill we can close (R-killable / combo-killable). Cheap ctx check first.
+    diag.finishable = (ctx and (ctx.combo_kill
+                       or (ctx.eff_hp_magical and ctx.r_impact_eff and ctx.eff_hp_magical <= ctx.r_impact_eff)))
+                      and true or false
+    if not diag.finishable then return nil, nil, diag end
+    local me_pos = NPCLib.origin(me)
+    local tp = state.predict_target_pos(target, 0.3)
+    local cur = Entity.GetAbsOrigin(target)
+    if not (me_pos and tp and cur) then return nil, nil, diag end
+    -- v0.5.163.1 fleeing = the runner is moving AWAY from Lina over the lead (predicted pos farther than
+    -- current). ctx.kiting_us (attack-kiting) was structurally false in the v0.5.163 demo, so derive it
+    -- from the actual motion the claim already computes.
+    local cdx, cdy = cur.x - me_pos.x, cur.y - me_pos.y
+    local tdx, tdy = tp.x - me_pos.x, tp.y - me_pos.y
+    local d_cur = math.sqrt(cdx * cdx + cdy * cdy)
+    local d_tp  = math.sqrt(tdx * tdx + tdy * tdy)
+    diag.fleeing = (d_tp > d_cur + K.FC_CHASE_FLEE_MARGIN)
+    if not diag.fleeing then return nil, nil, diag end
+    local vel = { x = (tp.x - cur.x) / 0.3, y = (tp.y - cur.y) / 0.3 }
+    -- the cutoff value: is the TARGET winding around terrain Lina can fly straight over? (sets cut.flee_point + walk)
+    diag.terrain_locked, diag.cutoff = state.fc_chase_target_winding(cur, vel)
+    if not (diag.terrain_locked and diag.cutoff and diag.cutoff.flee_point) then return nil, nil, diag end
+    local fp = diag.cutoff.flee_point
+    -- v0.5.163.5 winnable = Lina flies the straight chord to the cutoff point BEFORE the target winds there.
+    -- FC adds no speed, so the win is purely the shorter PATH: catch = Lina straight to fp; escape = the
+    -- target's winding route (cut.walk) to fp. (The old ChaseWindow modelled a STRAIGHT-line escape, so it
+    -- read not-winnable for a target actually winding ~2300u -- the v0.5.163.4 demo.)
+    local lina_sp = state.fc_chase_move_speed(); if lina_sp < 1 then lina_sp = K.FC_CHASE_MS_FALLBACK end
+    local tgt_sp = (NPC.GetMovementSpeed and NPC.GetMovementSpeed(target)) or 0
+    if tgt_sp < 1 then tgt_sp = K.FC_CHASE_MS_FALLBACK end
+    local fdx, fdy = fp.x - me_pos.x, fp.y - me_pos.y
+    diag.catch_eta  = math.sqrt(fdx * fdx + fdy * fdy) / lina_sp
+    diag.escape_eta = (diag.cutoff.walk or 0) / tgt_sp
+    diag.winnable = (diag.catch_eta + K.FC_CHASE_ETA_MARGIN) <= diag.escape_eta
+    if not diag.winnable then return nil, nil, diag end
+    diag.risk = Escape.AdvanceRiskScore(me, fp, { engage_radius = K.FC_CHASE_RADIUS })
+    if diag.risk >= K.FC_CHASE_RISK_MAX then return nil, nil, diag end
+    return fp, diag.cutoff, diag
+end
+
+-- v0.5.163 C2: per-tick FC CHASE = cast FC only. The brain recognizes a winnable terrain/tree cutoff on a
+-- fleeing finishable kill the offense is committing to, and casts FC (unobstructed movement) at that
+-- instant. The PLAYER steers the cutoff. No move-drive (FC adds no speed; driving it fought the combo +
+-- manual control in the v0.5.162 demo). Survival (escape) always preempts.
+state.fc_chase_tick = function()
+    local me = state.self_npc
+    if not me then return end
+    if not self_alive_ok() then return end
+    -- v0.5.170: fc_chase hardcoded ON (menu-simplification); always evaluate the chase cutoff.
+    if state.fc_escape_active and state.fc_escape_active(nil) then return end                 -- escape > chase
+    if NPC.HasModifier and NPC.HasModifier(me, "modifier_lina_flame_cloak") then return end   -- already up: player has the path
+    local target = state.last_offense_target
+    if not (target and Entity.IsEntity and Entity.IsEntity(target)) then
+        target = state.pick_offense_target and state.pick_offense_target() or nil
+    end
+    if not target then return end
+    -- cheap commit-evidence gate before the expensive ctx build
+    local offense_recent = (state.last_offense_target == target)
+        and ((now() - (state.last_offense_dispatch_t or 0)) < K.FC_CHASE_COMMIT_WINDOW)
+    if not (offense_recent or state.fc_tf_opener_fired) then return end
+    local ctx = state.build_layer1_ctx and state.build_layer1_ctx(target) or nil
+    local intercept, w, diag = state.fc_chase_claim(ctx, target)
+    if diag and diag.committing and (now() - (state.fc_chase_eval_log_t or 0)) >= 1.0 then
+        tlog(2, "fc_chase_eval", {
+            fleeing = diag.fleeing and "y" or "n", fin = diag.finishable and "y" or "n",
+            winnable = diag.winnable and "y" or "n", locked = diag.terrain_locked and "y" or "n",
+            catch = diag.catch_eta and string.format("%.2f", diag.catch_eta) or "?",
+            escape = diag.escape_eta and (diag.escape_eta == math.huge and "inf"
+                     or string.format("%.2f", diag.escape_eta)) or "?",
+            risk = diag.risk and string.format("%.0f", diag.risk) or "?",
+            fire = intercept and "y" or "n",
+            cut = diag.cutoff and diag.cutoff.src or "?",
+            walk = diag.cutoff and diag.cutoff.walk and string.format("%.0f", diag.cutoff.walk) or "?",
+            strt = diag.cutoff and diag.cutoff.straight and string.format("%.0f", diag.cutoff.straight) or "?",
+        })
+        state.fc_chase_eval_log_t = now()
+    end
+    if not intercept then return end
+    -- cast FC only; the player steers the cutoff (FC = unobstructed movement, no speed)
+    if (now() - (state.last_fc_dispatch_t or 0)) < 1.5 then return end
+    local fc = ability("lina_flame_cloak")
+    if not (fc and Ability.GetLevel(fc) > 0 and Ability.IsReady(fc)) then return end
+    if NPC.IsChannellingAbility and NPC.IsChannellingAbility(me) then return end
+    local mana = (NPC.GetMana and NPC.GetMana(me)) or 0
+    if mana < (ability_mana(A.FC) or 50) then return end
+    tlog(1, "fc_chase", { x = string.format("%.0f", intercept.x), y = string.format("%.0f", intercept.y) })
+    defense_dispatcher:Dispatch("lina_fc_chase", "lina_fc_chase", me, me,
+        function(intent, _mod, _caster) return issue_cast_notarget(intent, fc, "def") end,
+        nil, "lina_flame_cloak", nil, nil, { fs_shard_window = false })
+    state.last_fc_dispatch_t = now()
+end
+
 -- ============================ A2: the unified offense-commit gate ============
 -- FLAME_CLOAK_TF_ARBITER_DESIGN.md section 5. FC fires for OFFENSE (opener / amp /
 -- flip / TTK) only when the fight is turnable AND the commit is insured. Items 1-2
@@ -6576,7 +6939,18 @@ end
 -- fight area. eff_strength = sum of HP-fraction over alive non-illusion heroes
 -- (cheap "bodies x health" proxy). Centered on Lina (a body in the fight). No
 -- enemies near -> trivially turnable.
-state.fc_macro_turnable = function()
+-- v0.5.165 D2: the value-modulated turn factor. A high weighted flip value W lowers
+-- the required ally:enemy strength ratio (FC turns a more-behind fight for a juicy
+-- flip), floored at K.FC_TURN_MIN. W nil / <= 1 -> the plain K.FC_TURN (additive: no
+-- change for the cold-open path, the 1-2 TTK starter, the chase, or any pre-D caller).
+state.fc_turn_factor = function(W)
+    if type(W) == "number" and W > 1 then
+        return math.max(K.FC_TURN_MIN, K.FC_TURN * (1 - K.FC_TURN_VALUE_RELAX * (W - 1)))
+    end
+    return K.FC_TURN
+end
+
+state.fc_macro_turnable = function(W)
     local me = state.self_npc
     if not me then return false end
     local me_pos = NPCLib.origin(me)
@@ -6601,9 +6975,9 @@ state.fc_macro_turnable = function()
     -- v0.5.159: macro_turnable is a TEAMFIGHT gate. A pick (< MIN_ENEMIES enemies)
     -- is turnable by construction -- the TTK proves the kill + bailout/dest_safe
     -- insure survival; team body-count is the wrong question for a solo pick.
-    if en < K.FC_MACRO_MIN_ENEMIES then return true end
-    if ee <= 0 then return true end
-    return ae >= (K.FC_TURN * ee)
+    if en < K.FC_MACRO_MIN_ENEMIES then return true, ae, ee end
+    if ee <= 0 then return true, ae, ee end
+    return (ae >= (state.fc_turn_factor(W) * ee)), ae, ee
 end
 
 -- v0.5.160.1 A2-2: favorable = allies_eff >= enemies_eff (even-or-ahead) in the
@@ -6686,20 +7060,39 @@ end
 -- offense with a defensive insure would invade the attack system). The menu
 -- sub-toggle (default ON) isolates the gate for demo: OFF -> returns true (pre-A2).
 -- Logs WHY it vetoes (unturnable vs uninsured) so a demo shows the reason.
-state.fc_offense_commit_ok = function(ctx, target)
-    local m = state.menu
-    if m and m.fc_commit_gate and not m.fc_commit_gate:Get() then return true end
-    if state.fc_enemies_near() < K.FC_MACRO_MIN_ENEMIES then return true end  -- pick: TTK/player owns it, A2 stays out
-    if not state.fc_macro_turnable() then
-        tlog(2, "fc_commit_skip", { reason = "unturnable" })
-        return false
+state.fc_offense_commit_ok = function(ctx, target, W)
+    -- v0.5.170: fc_commit_gate hardcoded ON (menu-simplification); the A2 commit gate always evaluates.
+    local en_near = state.fc_enemies_near()
+    if en_near < K.FC_MACRO_MIN_ENEMIES then
+        state.fc_commit_last = { reason = "pick" }; return true  -- pick: TTK/player owns it, A2 stays out
     end
-    -- v0.5.160.1 A2-2: a FAVORABLE TF (allies_eff >= enemies_eff) commits without the
-    -- insure -- secure the fastest TF. Turnable-but-behind still needs dest_safe/bailout.
-    if state.fc_macro_favorable() then return true end
-    if state.fc_dest_safe() or state.fc_bailout_ready() then return true end
-    tlog(2, "fc_commit_skip", { reason = "uninsured_exposed" })
-    return false
+    local turnable, ae, ee = state.fc_macro_turnable(W)
+    local keff = state.fc_turn_factor(W)
+    -- v0.5.16x D4 (design 8.1): resolve the commit decision + stash the eval on EVERY
+    -- path so the unified fc_arbiter FIRE line (the offense sites, same tick) echoes
+    -- keff/ae/ee/bailout without recomputing and is never stale. Replaces the old
+    -- fc_commit_eval + the two fc_commit_skip probes: a VETO emits the unified HOLD
+    -- line itself (throttled, level 1). Boolean decision logic is byte-identical to
+    -- A2 (turnable) / A2-2 (favorable -> no insure) / D2 (W-modulated turn factor).
+    local ok, reason, insured
+    if not turnable then
+        ok, reason, insured = false, "unturnable", false
+    elseif state.fc_macro_favorable() then
+        ok, reason, insured = true, "favorable", true
+    elseif state.fc_dest_safe() then
+        ok, reason, insured = true, "insured_dest", true
+    elseif state.fc_bailout_ready() then
+        ok, reason, insured = true, "insured_bailout", true
+    else
+        ok, reason, insured = false, "uninsured_exposed", false
+    end
+    state.fc_commit_last = { W = W, ae = ae, ee = ee, keff = keff, insured = insured, reason = reason }
+    if not ok and (now() - (state.fc_arbiter_hold_log_t or 0)) >= 1.0 then
+        state.fc_arbiter_log({ tier = "hold", reason = reason, W = W,
+            keff = keff, ae = ae, ee = ee, bailout = insured, fired = false })
+        state.fc_arbiter_hold_log_t = now()
+    end
+    return ok
 end
 
 -- Fire one step now. kind: ut (R) / pt (W,Q) / nt (Flame Cloak) / item_target
@@ -6743,6 +7136,13 @@ end
 -- Schedule a step for delayed execution. Snapshots ctx; arg_fn / cond_fn are
 -- re-evaluated at fire time against LIVE target_pos + eff_hp_magical.
 local function schedule_step(combo_name, step, ctx, delay)
+    -- v0.5.163 C2: broad chase-commit stamp. Every offense combo step flows through here carrying the
+    -- committed hero in ctx.target; stamp it (R-independent) so fc_chase_committing fires with R on CD too.
+    if ctx.target and Entity.IsEntity and Entity.IsEntity(ctx.target)
+       and Target.IsAlive and Target.IsAlive(ctx.target) then
+        state.last_offense_target     = ctx.target
+        state.last_offense_dispatch_t = now()
+    end
     local snap = {}
     for k, v in pairs(ctx) do snap[k] = v end
     state.pending_steps[#state.pending_steps + 1] = {
@@ -7059,6 +7459,18 @@ local function get_enemies_in_classify_radius(me)
     return list
 end
 
+-- v0.5.166 D3: aim tie-break predicate. Should a candidate at distance hd / value v
+-- replace the current best (cur_d / cur_v)? aim off -> strictly closer (the original
+-- pick_offense_target behavior, byte-identical). aim on -> closer beyond the epsilon
+-- band, OR within the band with a higher HeroValue (kill the more valuable enemy).
+state.fc_aim_prefer = function(hd, v, cur_d, cur_v, aim)
+    if not cur_d then return true end
+    if not aim then return hd < cur_d end
+    if hd < cur_d - K.HV_AIM_DIST_EPS then return true end
+    if hd > cur_d + K.HV_AIM_DIST_EPS then return false end
+    return (v or 0) > (cur_v or 0)
+end
+
 local function pick_offense_target()
     local me = state.self_npc
     if not me then return nil end
@@ -7069,8 +7481,15 @@ local function pick_offense_target()
     -- False Promise / WK Reincarnation ready), so Lina switches off an unkillable
     -- enemy when a killable one exists, but still harasses/W's it if ALL are
     -- unkillable (never idle; R-commit is gated separately by r_target_blocked).
-    local attacking, nearest, best_d                  -- killable-only
-    local fb_attacking, fb_nearest, fb_best_d         -- fallback (incl unkillable)
+    -- v0.5.166 D3: when fc_aim_bias is on, the KILLABLE tier breaks near-equidistant
+    -- ties by HeroValue (and prefers the higher-value attacker); aim off -> the
+    -- original attacking-else-nearest, byte-identical. The fallback (all-unkillable
+    -- harass) tier stays first/nearest. Never overrides the killable/castable filters.
+    local aim = true  -- v0.5.170: fc_aim_bias hardcoded ON (menu-simplification)
+    local function hv_of(h) return (aim and state.hero_value and state.hero_value.of(h, list)) or 0 end
+    local attacking, attacking_v, nearest, best_d, nearest_v   -- killable-only (aim-aware)
+    local pure_attacking, pure_nearest, pure_best_d            -- killable aim-OFF pick (for the fc_aim_flip diag)
+    local fb_attacking, fb_nearest, fb_best_d                   -- fallback (incl unkillable)
     for i = 1, #list do
         local h = list[i]
         -- Skip magic-immune: Lina's entire kit (Q/W/R) is magical, so a BKB'd
@@ -7082,13 +7501,33 @@ local function pick_offense_target()
             if not fb_attacking and atk then fb_attacking = h end
             if not fb_best_d or hd < fb_best_d then fb_best_d, fb_nearest = hd, h end
             if not (Target.IsUnkillableNow and Target.IsUnkillableNow(h)) then
-                if not attacking and atk then attacking = h end
-                if not best_d or hd < best_d then best_d, nearest = hd, h end
+                local v = hv_of(h)
+                if atk and (not attacking or (aim and v > (attacking_v or 0))) then attacking, attacking_v = h, v end
+                if state.fc_aim_prefer(hd, v, best_d, nearest_v, aim) then best_d, nearest, nearest_v = hd, h, v end
+                if atk and not pure_attacking then pure_attacking = h end                      -- aim-OFF pick (diag)
+                if not pure_best_d or hd < pure_best_d then pure_best_d, pure_nearest = hd, h end
             end
         end
     end
-    return attacking or nearest or fb_attacking or fb_nearest
+    local chosen = attacking or nearest or fb_attacking or fb_nearest
+    -- v0.5.166.1 D3 diag: log only when the value tie-break actually flipped the killable
+    -- pick vs the strictly-nearest (aim-OFF) choice, so a staged near-tie demo is readable.
+    if aim then
+        local pure_chosen = pure_attacking or pure_nearest or fb_attacking or fb_nearest
+        if chosen and pure_chosen and chosen ~= pure_chosen
+           and (now() - (state.fc_aim_flip_log_t or 0)) >= 1.0 then
+            tlog(2, "fc_aim_flip", {
+                chose = uname(chosen),      chose_v = string.format("%.2f", hv_of(chosen)),
+                over  = uname(pure_chosen), over_v  = string.format("%.2f", hv_of(pure_chosen)),
+            })
+            state.fc_aim_flip_log_t = now()
+        end
+    end
+    return chosen
 end
+-- v0.5.16x Phase C (Deviation D1): expose the offense-target selector so fc_chase_tick can acquire a
+-- fleeing kill target on the FC-opener-fired-without-R commit path (last_r_target nil before R lands).
+state.pick_offense_target = pick_offense_target
 
 -- v0.5.15 IMP-A2: r_finisher target is NOT necessarily the offense target.
 -- pick_offense_target prefers attackers/nearest; the finisher wants the lowest
@@ -7276,10 +7715,9 @@ state.build_lina_sustain_qw_steps = function(ctx, q_priority_target, w_cluster_t
     -- mana cost so the sustain builder doesn't drain mana below R-viability.
     -- Off-cap and at-cap sustain both honor the reserve. Burst archetypes use
     -- cost_wqr (W+Q+R) for their gates so they're unaffected. Toggle
-    -- m.sustain_r_reserve (default ON) lets the user disable for low-mana
-    -- edge cases. When OFF, behaves exactly as v0.5.34.
-    local sustain_reserve_on = state.menu and state.menu.sustain_r_reserve
-                               and state.menu.sustain_r_reserve:Get()
+    -- v0.5.171: sustain_r_reserve hardcoded ON (menu-simplification). Sustain dispatches
+    -- always reserve R mana (the old default); the disable toggle is gone.
+    local sustain_reserve_on = true
     local r_reserve = sustain_reserve_on and (ability_mana(A.R) or 0) or 0
     if ctx.ready_w and ctx.in_w_range and mana_left >= ability_mana(A.W) + r_reserve then
         local w_indep = w_cluster_target ~= nil
@@ -7361,7 +7799,7 @@ state.lina_starter_tick = function(force)
     -- (sustain_qw here, tf_sustain in TF) in favour of finishers / burst. Cap
     -- state is computed in build_layer1_ctx; this toggle (Brain > Core, default
     -- ON) only changes the dispatch gate.
-    local cap_aware = state.menu and state.menu.fs_cap_aware and state.menu.fs_cap_aware:Get()
+    local cap_aware = true  -- v0.5.171: fs_cap_aware hardcoded ON (menu-simplification)
     local in_lock = layer1_in_lock()
     if in_lock and state.last_layer1_was_r then return end  -- hard R lock
     local r_finish_only = in_lock                            -- light lock: only the finisher
@@ -7504,8 +7942,7 @@ state.lina_starter_tick = function(force)
     -- finisher for a confirmed kill. Toggle (default ON) gates the whole check;
     -- a tlog records each suppression for demo tuning.
     local ether_kill_ok = true
-    local kill_confirm_on = state.menu and state.menu.ether_kill_confirm
-                            and state.menu.ether_kill_confirm:Get()
+    local kill_confirm_on = true  -- v0.5.171: ether_kill_confirm hardcoded ON (menu-simplification)
     if kill_confirm_on and ctx.ether_ready then
         -- v0.5.153: combo_total_eff already folds the FC x1.35 (active-only), so
         -- this stacks FC x Ether multiplicatively; FC off -> combo_total_eff ==
@@ -7673,6 +8110,7 @@ state.lina_starter_tick = function(force)
     local want_fc = fc_menu_on and is_burst_arch
                     and state.fc_offense_ttk(ctx, target)  -- v0.5.156: TTK gate (1-2 starter path: secures or accelerates the kill)
                     and (state.fc_defense_claim(ctx) ~= "A")  -- v0.5.158 A1: stand down when FC is the lethal-magic lifeline
+                    and (not state.fc_escape_active(ctx))  -- v0.5.16x Phase B: stand down while FC is the escape lifeline
                     and state.fc_offense_commit_ok(ctx, target)  -- v0.5.159 A2: turnable + insured commit (sec 5)
                     and ctx.flame_cloak_ready
                     and not ctx.flame_cloak_in_flight  -- v0.5.34 task E (was flame_cloak_active)
@@ -7698,11 +8136,11 @@ state.lina_starter_tick = function(force)
             })
             state.fc_status_probed = true
         end
-        tlog(1, "lina_flame_cloak_offensive", {
-            trigger = "pre_combo", archetype = archetype,
-            fs = tostring(ctx.fiery_soul_stacks or 0),
-            mana = string.format("%.0f", ctx.mana or 0),
-            mana_after = string.format("%.0f", (ctx.mana or 0) - fc_cost),
+        local _ce = state.fc_commit_last or {}
+        state.fc_arbiter_log({  -- v0.5.16x D4: unified decision line (was lina_flame_cloak_offensive)
+            tier = "kill", reason = "ttk",
+            keff = _ce.keff, ae = _ce.ae, ee = _ce.ee, bailout = _ce.insured,
+            stacks = ctx.fiery_soul_stacks or 0, fired = true,
         })
         -- v0.5.40 A6-1: route Layer-1 offensive FC through dispatcher with a
         -- synthetic mod key so offensive + defensive FC fires share the same
@@ -7967,7 +8405,7 @@ state.lina_teamfight_tick = function(force)
     local me = state.self_npc
     -- v0.5.15 IMP-A4 (cap_aware in TF): mirror the starter's read so the TF
     -- branch can honor fs_at_cap (widen r_worth to force burst, suppress sustain).
-    local cap_aware = state.menu and state.menu.fs_cap_aware and state.menu.fs_cap_aware:Get()
+    local cap_aware = true  -- v0.5.171: fs_cap_aware hardcoded ON (menu-simplification)
 
     local cluster_center, cluster_n = state.enemy_cluster_center(me)  -- non-immune only
     if not cluster_center then
@@ -8078,11 +8516,21 @@ state.lina_teamfight_tick = function(force)
                           + ability_mana(A.R)
     local fc_aoe       = cluster_center and aoe_enemy_units(cluster_center, K.FC_AOE_FLIP_RADIUS) or nil  -- v0.5.160 A3.1
     local fc_flip      = state.fc_offense_value(ctx, ctx.target, fc_aoe)  -- v0.5.160 A3.1: AoE flip-count (cluster fed, was nil)
+    local fc_vw_on     = true  -- v0.5.170: fc_value_weight hardcoded ON (menu-simplification)
+    local fc_flip_w    = nil
+    local fc_flip_ok
+    if fc_vw_on then
+        fc_flip_w  = state.fc_offense_value_w(ctx, ctx.target, fc_aoe)  -- v0.5.164 D1: weighted flip value
+        fc_flip_ok = fc_flip_w >= K.FC_FLIP_VALUE
+    else
+        fc_flip_ok = fc_flip >= 1                                        -- toggle off: binary pre-D behavior
+    end
     local fc_cold_open = state.fc_cold_open(ctx)                          -- v0.5.160 A3.2: low-stacks cold-open
     local want_fc_open = fc_menu_on
-                          and (fc_flip >= 1 or fc_cold_open)              -- v0.5.160 A3: AoE flip OR stack cold-open
+                          and (fc_flip_ok or fc_cold_open)                -- v0.5.164 D1: weighted flip (or binary if toggle off) OR stack cold-open
                           and (state.fc_defense_claim(ctx) ~= "A")  -- v0.5.158 A1: survival outranks the kill
-                          and state.fc_offense_commit_ok(ctx, ctx.target)  -- v0.5.159 A2: turnable + insured commit (sec 5)
+                          and (not state.fc_escape_active(ctx))  -- v0.5.16x Phase B: survival outranks the kill
+                          and state.fc_offense_commit_ok(ctx, ctx.target, fc_flip_w)  -- v0.5.159 A2 + v0.5.165 D2: turnable (W-modulated) + insured commit
                           and not state.fc_tf_opener_fired
                           and ctx.ready_w and ctx.ready_r
                           and ctx.flame_cloak_ready
@@ -8111,13 +8559,13 @@ state.lina_teamfight_tick = function(force)
             })
             state.fc_status_probed = true
         end
-        tlog(1, "lina_flame_cloak_offensive", {
-            trigger = "pre_tf_opener", archetype = "tf_opener",
-            cluster = string.format("%d", cluster_n),
-            flip      = string.format("%d", fc_flip),
-            cold_open = (fc_flip < 1 and fc_cold_open) and "y" or "n",
-            fs      = tostring(ctx.fiery_soul_stacks or 0),
-            mana    = string.format("%.0f", ctx.mana or 0),
+        local _ce = state.fc_commit_last or {}
+        state.fc_arbiter_log({  -- v0.5.16x D4: unified decision line (was lina_flame_cloak_offensive)
+            tier = "kill",
+            reason = fc_flip_ok and "opener" or "cold_open",  -- v0.5.168.5: label the GATE that fired (weighted flip-threshold vs stack cold-open), not the raw count
+            W = fc_flip_w, count = fc_flip, cluster = cluster_n,
+            keff = _ce.keff, ae = _ce.ae, ee = _ce.ee, bailout = _ce.insured,
+            stacks = ctx.fiery_soul_stacks or 0, fired = true,
         })
         -- v0.5.40 A6-2: route TF opener FC through dispatcher (synthetic mod).
         -- Gates above (want_fc_open) already passed; thunk fires + returns true
@@ -8209,10 +8657,20 @@ state.lina_teamfight_tick = function(force)
         -- burst-site FC only re-fires after the per-engagement latch clears
         -- (>=4s TF-tick gap), avoiding double-spend on a 25s CD ability.
         local fc_aoe = cluster_center and aoe_enemy_units(cluster_center, K.FC_AOE_FLIP_RADIUS) or nil  -- v0.5.160 A3.1
+        local fc_vw_on   = true  -- v0.5.170: fc_value_weight hardcoded ON (menu-simplification)
+        local fc_burst_w = nil
+        local fc_flip_ok
+        if fc_vw_on then
+            fc_burst_w = state.fc_offense_value_w(ctx, r_target, fc_aoe)  -- v0.5.164 D1: weighted flip value
+            fc_flip_ok = fc_burst_w >= K.FC_FLIP_VALUE
+        else
+            fc_flip_ok = state.fc_offense_value(ctx, r_target, fc_aoe) >= 1  -- toggle off: binary pre-D
+        end
         local want_fc = fc_menu_on
-                        and (state.fc_offense_value(ctx, r_target, fc_aoe) >= 1)  -- v0.5.160 A3.1: AoE flip-count (cluster fed)
+                        and fc_flip_ok                                            -- v0.5.164 D1: weighted flip threshold (cluster fed, or binary if toggle off)
                         and (state.fc_defense_claim(ctx) ~= "A")  -- v0.5.158 A1: survival outranks the kill
-                        and state.fc_offense_commit_ok(ctx, r_target)  -- v0.5.159 A2: turnable + insured commit (sec 5)
+                        and (not state.fc_escape_active(ctx))  -- v0.5.16x Phase B: survival outranks the kill
+                        and state.fc_offense_commit_ok(ctx, r_target, fc_burst_w)  -- v0.5.159 A2 + v0.5.165 D2: turnable (W-modulated) + insured commit
                         and not state.fc_tf_opener_fired
                         and ctx.flame_cloak_ready
                         and not ctx.flame_cloak_in_flight  -- v0.5.34 task E (was flame_cloak_active)
@@ -8236,11 +8694,13 @@ state.lina_teamfight_tick = function(force)
                 })
                 state.fc_status_probed = true
             end
-            tlog(1, "lina_flame_cloak_offensive", {
-                trigger = "pre_tf_burst", archetype = "tf_burst",
-                cluster = string.format("%d", cluster_n),
-                fs = tostring(ctx.fiery_soul_stacks or 0),
-                mana = string.format("%.0f", ctx.mana or 0),
+            local _ce = state.fc_commit_last or {}
+            state.fc_arbiter_log({  -- v0.5.16x D4: unified decision line (was lina_flame_cloak_offensive)
+                tier = "kill", reason = "burst",
+                W = fc_burst_w, count = state.fc_offense_value(ctx, r_target, fc_aoe),
+                cluster = cluster_n,
+                keff = _ce.keff, ae = _ce.ae, ee = _ce.ee, bailout = _ce.insured,
+                stacks = ctx.fiery_soul_stacks or 0, fired = true,
             })
             -- v0.5.40 A6-3: route TF burst FC through dispatcher (synthetic mod).
             -- Gates above (want_fc) already passed; thunk fires + returns true
@@ -8294,53 +8754,9 @@ state.lina_teamfight_tick = function(force)
             end
         end
         tlog(1, "lina_teamfight", { archetype = "tf_sustain", cluster = string.format("%d", cluster_n) })
-        -- v0.5.35 task TF-FC-sustain (Bug B v0.5.33 follow-up): optional FC
-        -- pre-amp in tf_sustain context. Gated by m.fc_offensive_sustain_use
-        -- (default OFF; v0.5.33 design deliberately excluded sustain because
-        -- "no R commit -> 25s CD not worth"). When the user opts in AND the
-        -- cluster is dense enough (cluster_n >= 3) AND FC is ready and not in
-        -- flight, fire FC before the W/Q. Skips at fs_at_cap (FC sets stacks
-        -- to 7 base, would downgrade Shard window cap 12) and during
-        -- fs_shard_window. Throttle uses the same 1.5s state.last_fc_dispatch_t
-        -- cursor as the starter/tf_burst sites - if a burst already ate FC
-        -- recently, sustain won't double-fire.
-        local fc_sustain_on = state.menu and state.menu.fc_offensive_sustain_use
-                              and state.menu.fc_offensive_sustain_use:Get()
-        local fc_sustain_throttled = (now() - (state.last_fc_dispatch_t or 0)) < 1.5
-        local fc_sustain_cost = ctx.flame_cloak_ready and ability_mana(A.FC) or 0
-        local want_fc_sustain = fc_sustain_on
-                                and cluster_n >= 3
-                                and ctx.flame_cloak_ready
-                                and not ctx.flame_cloak_in_flight
-                                and not ctx.is_channelling
-                                and not ctx.fs_at_cap
-                                and not ctx.fs_shard_window
-                                and not fc_sustain_throttled
-                                and ctx.mana >= (fc_sustain_cost + ability_mana(A.W) + ability_mana(A.Q))
-        if want_fc_sustain then
-            tlog(1, "lina_flame_cloak_offensive", {
-                trigger = "pre_tf_sustain", archetype = "tf_sustain",
-                cluster = string.format("%d", cluster_n),
-                fs = tostring(ctx.fiery_soul_stacks or 0),
-                mana = string.format("%.0f", ctx.mana or 0),
-            })
-            -- v0.5.40 A6-4: route TF sustain FC through dispatcher (synthetic mod).
-            -- Gates above (want_fc_sustain) already passed; thunk fires + returns true
-            -- (state.fire_steps returns nil, explicit return true keeps lock HELD).
-            local _a6_fired = defense_dispatcher:Dispatch(
-                "lina_fc_offensive_pre_tf_sustain",
-                "lina_fc_offensive_pre_tf_sustain",
-                state.self_npc,
-                state.self_npc,
-                function(_intent, _mod, _caster)
-                    state.fire_steps("tf_flame_cloak_pre_sustain",
-                        state.build_lina_flame_cloak_steps(ctx), ctx)
-                    return true
-                end,
-                nil, "lina_flame_cloak", nil, nil,
-                { fs_shard_window = fs_shard_window_active() })  -- v0.5.40 B2 GAP-3 (offensive gate above already vetoed in-window; redundant but uniform)
-            state.last_fc_dispatch_t = now()
-        end
+        -- v0.5.170: fc_offensive_sustain_use cut (menu-simplification). The optional
+        -- TF-sustain FC pre-amp (default OFF, never promoted) is removed; tf_sustain
+        -- fires W/Q with no pre-amp FC, exactly as it did with the toggle off.
         state.fire_steps("tf_tf_sustain", state.build_lina_tf_steps(nil, q_priority), ctx)
         mark_layer1("tf_tf_sustain", false)
     else
@@ -8587,73 +9003,17 @@ end
 -- Steps in the middle of a retry-spacing gap, and in-flight steps whose
 -- re-issue is further out than window_s, return false here -- HR is free to
 -- kite between cast windows the way v0.5.6 E1 intended.
-local function pending_step_imminent(window_s)
-    local t       = now()
-    local w       = window_s or 0
-    local horizon = t + w
-    local spacing = state.STEP_REISSUE_SPACING or 0.25
-    for i = 1, #state.pending_steps do
-        local p     = state.pending_steps[i]
-        local tries = p.tries or 0
-        if tries == 0 then
-            local fa = p.fire_at or 0
-            if fa >= t and fa <= horizon then return true end
-        else
-            local first_t = p.first_t
-            if first_t then
-                local next_issue = first_t + tries * spacing
-                if next_issue >= t and next_issue <= horizon then return true end
-            end
-        end
-    end
-    return false
-end
--- v0.5.8 E4 (covers history_F1 / history_F7 / lib_native_F2): belt-and-suspenders
--- watchdog. The framework Hit & Run subsystem has been observed to stay latched
--- in a non-engaging state after our final paused->restored edge of a combo even
--- though Native.RestoreHitRun() re-wrote hr_enabled/hr_override/hr_kiting back
--- to their saved values; the brain's paused/restored accounting ends balanced
--- but auto-attacks never resume. Mitigation: 500ms after the LAST
--- restore-newly-fired transition, while we are still in the restored state,
--- defensively re-assert hr_override=true / hr_enabled=true / hr_kiting=true
--- (idempotent at the widget level - if the framework already holds these, the
--- Set is a no-op). hr_was_paused is the across-tick edge memory; it is reset
--- after every transition so a fresh combo's restore re-arms the watchdog.
+-- v0.5.171: pending_step_imminent removed (menu-simplification). Its only caller was the
+-- narrow-pause branch of update_hitrun_pause, which is gone now that wide-pause is hardcoded ON.
+-- v0.5.171.1: native Hit & Run pause is OFF (user call -- it did not work in practice). With
+-- some per-hero configs (e.g. hr_override=false) the brain's pause cycle is a net harm: it
+-- flickers override=true and breaks mouse-follow even after restore, and the old post-combo
+-- re-assert watchdog never reliably fixed the stuck-auto-attack symptom. So the brain no
+-- longer pauses native HR at all -- the framework's Hit & Run / Orb Walker run normally.
+-- If an older build left HR latched paused, restore it once; otherwise leave it alone.
 local function update_hitrun_pause()
-    local m = state.menu
-    if m and m.pause_hitrun and not m.pause_hitrun:Get() then
-        set_native_hitrun(false)  -- feature off -> ensure restored
-    else
-        local strict = m and m.pause_hitrun_strict and m.pause_hitrun_strict:Get()
-        local active
-        if strict then
-            -- v0.5.5 wide-pause fallback (A/B safety net)
-            active = state.combo_hold_active
-                  or (#state.pending_steps > 0)
-                  or (now() < (state.combo_active_until or 0))
-        else
-            active = combo_spell_phasing() or pending_step_imminent(0.15)
-        end
-        set_native_hitrun(active and true or false)
-    end
-    -- v0.5.8 E4: arm the post-restore re-assert watchdog on the paused->restored
-    -- edge. We sample Native.IsPaused() AFTER set_native_hitrun so the edge
-    -- detection is grounded in the lib's authoritative paused[] flag, not our
-    -- local intent. hr_last_restore_at is cleared after a single re-assert so we
-    -- never spam widget Sets in steady-state.
-    local is_paused_now = (Native.IsPaused and Native.IsPaused(LINA_MENU)) or false
-    if state.hr_was_paused and not is_paused_now then
-        state.hr_last_restore_at = now()
-    end
-    state.hr_was_paused = is_paused_now
-    if state.hr_last_restore_at
-       and (now() - state.hr_last_restore_at) >= 0.5
-       and not is_paused_now then
-        if Native.ReassertEnabled then
-            pcall(Native.ReassertEnabled, LINA_MENU)
-            tlog(1, "native_hr_reassert", { dt_ms = "500" })
-        end
-        state.hr_last_restore_at = nil
+    if Native.IsPaused and Native.IsPaused(LINA_MENU) then
+        set_native_hitrun(false)
     end
 end
 
@@ -8740,7 +9100,7 @@ state.blink_capitalize_tick = function()
     if not offense_enabled() then return end
     local me = state.self_npc
     if not (me and self_alive_ok()) then return end
-    local hp_floor = (m.blink_capitalize_hp and m.blink_capitalize_hp:Get()) or 35
+    local hp_floor = 35  -- v0.5.172: blink_capitalize_hp hardcoded 35
     if state.blink_in_hp_frac(me) * 100 < hp_floor then
         tlog(2, "blink_capitalize_skip", { reason = "hp_floor" }); return
     end
@@ -8787,7 +9147,7 @@ state.w_capitalize_tick = function()
     if not state.combo_can_kill(tgt) then
         tlog(2, "w_capitalize_skip", { reason = "no_kill" }); return     -- W stays defensive
     end
-    local hp_floor = (m.w_capitalize_hp and m.w_capitalize_hp:Get()) or 35
+    local hp_floor = 35  -- v0.5.172: w_capitalize_hp hardcoded 35
     if state.blink_in_hp_frac(me) * 100 < hp_floor then
         tlog(2, "w_capitalize_skip", { reason = "hp_floor" }); return
     end
@@ -8968,19 +9328,18 @@ state.wave_clear_tick = function()
     if not (me and me_pos) then return end
 
     local q_ready = ability_ready("lina_dragon_slave")
-    local w_ready = m.wave_use_w and m.wave_use_w:Get()
-                    and ability_ready("lina_light_strike_array")
+    local w_ready = ability_ready("lina_light_strike_array")  -- v0.5.172: wave_use_w hardcoded ON
     if not (q_ready or w_ready) then return end
 
     -- mana gates
     local mana    = (NPC.GetMana and NPC.GetMana(me)) or 0
     local maxmana = (NPC.GetMaxMana and NPC.GetMaxMana(me)) or 0
-    local floor_frac = (m.wave_mana_floor and (m.wave_mana_floor:Get() / 100)) or 0
-    local reserve_r  = m.wave_reserve_r and m.wave_reserve_r:Get()
+    local floor_frac = 0.30  -- v0.5.172: wave_mana_floor hardcoded 30%
+    local reserve_r  = true  -- v0.5.172: wave_reserve_r hardcoded ON
     local r_cost = reserve_r and ability_mana("lina_laguna_blade") or 0
     if maxmana > 0 and (mana / maxmana) < floor_frac then return end
 
-    local min_creeps = (m.wave_min_creeps and m.wave_min_creeps:Get()) or 3
+    local min_creeps = 3  -- v0.5.172: wave_min_creeps hardcoded 3
     local creeps = state.farm_gather_creeps(Q_LENGTH)
     if #creeps == 0 then return end
 
@@ -9288,7 +9647,7 @@ state.tests["A9_pudge_chain_order"] = {
 -- v0.5.82 quality: contract / no-throw smoke test for the v0.5.76-78 lib-alias
 -- surface (fog + escape + farm). Drives each alias with state.self_npc = nil
 -- and asserts the documented return shape WITHOUT erroring -- exactly the class
--- of nil-deref / shape-divergence the optimization review flagged. Mock-driven:
+-- of nil-deref / shape-divergence the optimization workflow flagged. Mock-driven:
 -- nils self_npc via the cleanup stack, restores after. Complements the offline
 -- tools/run_tests.lua pure-lib tests by covering the Lina-side glue (aliases +
 -- _fog_opts + arg passing).
@@ -9476,6 +9835,116 @@ state.tests["FC01_offense_value_flip"] = {
         return { pass = true }
     end,
 }
+state.tests["FCVW01_offense_value_weighted"] = {
+    desc = "v0.5.164 D1: fc_offense_value_w sums HeroValue.of over the SAME flip set fc_offense_value counts (shared predicate); weighted, not a raw count",
+    fn = function(cu)
+        if type(state.fc_offense_value_w) ~= "function" then
+            return { pass = false, reason = "state.fc_offense_value_w not exposed" }
+        end
+        local s_eff = state.lina_eff_hp_magical
+        local s_of  = state.hero_value and state.hero_value.of
+        _cu_push(cu, function()
+            state.lina_eff_hp_magical = s_eff
+            if state.hero_value then state.hero_value.of = s_of end
+        end)
+        -- pin the same flip geometry as FC01: combo 1000 (band (1000,1285.7]),
+        -- aoe_burst 400 (band (400,514.3]). eff: T=1100 (primary flips),
+        -- U1=450 (aoe flips), U2=600 (no flip).
+        local eff_map = { T = 1100, U1 = 450, U2 = 600 }
+        state.lina_eff_hp_magical = function(u) return eff_map[u] or math.huge end
+        -- value stub: T worth 1.0, U1 worth 0.4 -> W = 1.4 over the 2 flips.
+        local val = { T = 1.0, U1 = 0.4, U2 = 0.9 }
+        state.hero_value.of = function(u, _peers) return val[u] or 0 end
+        local actx = { combo_total = 1000, q_dmg = 200, w_dmg = 200 }
+        local w = state.fc_offense_value_w(actx, "T", { "T", "U1", "U2" })
+        if math.abs(w - 1.4) > 1e-9 then
+            return { pass = false, reason = ("weighted W got=%s want=1.4 (T 1.0 + U1 0.4)"):format(tostring(w)) }
+        end
+        -- count parity: the unweighted count over the same inputs is still 2.
+        if state.fc_offense_value(actx, "T", { "T", "U1", "U2" }) ~= 2 then
+            return { pass = false, reason = "shared predicate broke fc_offense_value count (want 2)" }
+        end
+        -- nil guards
+        if state.fc_offense_value_w(nil, "T", nil) ~= 0 then return { pass = false, reason = "nil ctx -> 0" } end
+        if state.fc_offense_value_w({ combo_total = 1000 }, nil, nil) ~= 0 then return { pass = false, reason = "nil target -> 0" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCVW02_turn_factor"] = {
+    desc = "v0.5.165 D2: fc_turn_factor lowers the turn factor as the weighted flip value W rises (W nil/<=1 -> K.FC_TURN; higher W -> lower; huge W -> floored at K.FC_TURN_MIN)",
+    fn = function(_cu)
+        if type(state.fc_turn_factor) ~= "function" then
+            return { pass = false, reason = "state.fc_turn_factor not exposed" }
+        end
+        local base = K.FC_TURN
+        if state.fc_turn_factor(nil) ~= base then return { pass = false, reason = "nil W must be base" } end
+        if state.fc_turn_factor(1.0) ~= base then return { pass = false, reason = "W=1 must be base" } end
+        if state.fc_turn_factor(0.4) ~= base then return { pass = false, reason = "W<1 must be base" } end
+        local want2 = math.max(K.FC_TURN_MIN, base * (1 - K.FC_TURN_VALUE_RELAX * 1))
+        if math.abs(state.fc_turn_factor(2.0) - want2) > 1e-9 then
+            return { pass = false, reason = ("W=2 got=%s want=%s"):format(tostring(state.fc_turn_factor(2.0)), tostring(want2)) }
+        end
+        if state.fc_turn_factor(3.0) > state.fc_turn_factor(2.0) then
+            return { pass = false, reason = "higher W must not raise the factor" }
+        end
+        if math.abs(state.fc_turn_factor(99.0) - K.FC_TURN_MIN) > 1e-9 then
+            return { pass = false, reason = "huge W must floor at K.FC_TURN_MIN" }
+        end
+        return { pass = true }
+    end,
+}
+state.tests["FCVW03_aim_prefer"] = {
+    desc = "v0.5.166 D3: fc_aim_prefer -- aim off = strictly closer; aim on = closer beyond K.HV_AIM_DIST_EPS, or within the band the higher HeroValue wins; clearly-farther always loses",
+    fn = function(_cu)
+        if type(state.fc_aim_prefer) ~= "function" then
+            return { pass = false, reason = "state.fc_aim_prefer not exposed" }
+        end
+        local eps = K.HV_AIM_DIST_EPS
+        if not state.fc_aim_prefer(500, 0.4, nil, nil, true) then return { pass = false, reason = "nil cur must prefer" } end
+        if not state.fc_aim_prefer(100, 0.1, 200, 9.9, false) then return { pass = false, reason = "aim off: closer must win" } end
+        if state.fc_aim_prefer(200, 9.9, 100, 0.1, false) then return { pass = false, reason = "aim off: farther must lose even if higher value" } end
+        if not state.fc_aim_prefer(100, 0.1, 100 + eps + 50, 9.9, true) then return { pass = false, reason = "aim on: clearly-closer must win" } end
+        if state.fc_aim_prefer(100 + eps + 50, 9.9, 100, 0.1, true) then return { pass = false, reason = "aim on: clearly-farther must lose" } end
+        if not state.fc_aim_prefer(100 + eps - 10, 0.9, 100, 0.4, true) then return { pass = false, reason = "aim on: in-band higher value must win" } end
+        if state.fc_aim_prefer(100 + eps - 10, 0.3, 100, 0.4, true) then return { pass = false, reason = "aim on: in-band lower value must lose" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCAR01_arbiter_fields"] = {
+    desc = "v0.5.16x D4 (design 8.1): fc_arbiter_fields normalizes a decision record -> the unified kv line (numbers fixed-width, fired/bailout y/n, bailout 3-state na, absent numerics na, claim default none, nil record safe)",
+    fn = function(_cu)
+        if type(state.fc_arbiter_fields) ~= "function" then
+            return { pass = false, reason = "state.fc_arbiter_fields not exposed" }
+        end
+        local f = state.fc_arbiter_fields({ tier = "kill", reason = "opener", fired = true,
+            W = 1.4, count = 2, cluster = 3, keff = 0.5, ae = 2.1, ee = 3.0, bailout = true, claim = "B", stacks = 7 })
+        local want = { tier = "kill", reason = "opener", fired = "y", W = "1.40", count = "2", cluster = "3",
+                       keff = "0.50", ae = "2.10", ee = "3.00", bailout = "y", claim = "B", stacks = "7" }
+        for k, v in pairs(want) do
+            if f[k] ~= v then return { pass = false, reason = ("full.%s got=%s want=%s"):format(k, tostring(f[k]), v) } end
+        end
+        local s = state.fc_arbiter_fields({ tier = "hold", reason = "unturnable", fired = false })
+        local sw = { fired = "n", W = "na", count = "na", cluster = "na", keff = "na", ae = "na", ee = "na", bailout = "na", claim = "none", stacks = "na" }
+        for k, v in pairs(sw) do
+            if s[k] ~= v then return { pass = false, reason = ("sparse.%s got=%s want=%s"):format(k, tostring(s[k]), v) } end
+        end
+        if state.fc_arbiter_fields({ bailout = false }).bailout ~= "n" then
+            return { pass = false, reason = "bailout=false must be n (3-state)" }
+        end
+        if state.fc_arbiter_fields(nil).tier ~= "?" then
+            return { pass = false, reason = "nil record must default tier ?" }
+        end
+        -- v0.5.168.4 D4.3: the ordered serializer (canonical field order, design 8.1)
+        if type(state.fc_arbiter_line) ~= "function" then
+            return { pass = false, reason = "state.fc_arbiter_line not exposed" }
+        end
+        local want_line = "fc_arbiter | tier=kill | reason=opener | fired=y | W=1.40 | count=2 | cluster=3 | keff=0.50 | ae=2.10 | ee=3.00 | bailout=y | claim=B | stacks=7"
+        if state.fc_arbiter_line(f) ~= want_line then
+            return { pass = false, reason = ("ordered line got=[%s]"):format(tostring(state.fc_arbiter_line(f))) }
+        end
+        return { pass = true }
+    end,
+}
 state.tests["FCDEF10_cold_open"] = {
     desc = "v0.5.160 A3 fc_cold_open: Fiery Soul stacks <= STACK_OPENER_MAX -> standalone cold-open true; above -> false; nil ctx -> false",
     fn = function(_cu)
@@ -9516,6 +9985,227 @@ state.tests["FCDEF11_jugg_omni_defer"] = {
                 return { pass = false, reason = ("imm=%s hp=%d got=%s want=%s (%s)"):format(tostring(c.imm), c.hp, tostring(got), tostring(c.want), c.why) }
             end
         end
+        return { pass = true }
+    end,
+}
+state.tests["FCESC01_worth_flying"] = {
+    desc = "Phase B fc_escape_worth_flying: fly iff best-overall terrain-locked AND >= margin safer than walkable",
+    fn = function(_cu)
+        if type(state.fc_escape_worth_flying) ~= "function" then
+            return { pass = false, reason = "state.fc_escape_worth_flying not exposed" }
+        end
+        local M = K.FC_ESCAPE_SAFER_MARGIN
+        local cases = {
+            { best = 10, info = { locked = true,  walkable_score = 10 + M },     want = true,  why = "locked + exactly margin safer" },
+            { best = 10, info = { locked = true,  walkable_score = 10 + M - 1 }, want = false, why = "locked but under margin" },
+            { best = 10, info = { locked = false, walkable_score = 10 + M + 5 }, want = false, why = "safer but walkable -> just walk" },
+            { best = 10, info = nil,                                            want = false, why = "no info -> no fly" },
+        }
+        for _, c in ipairs(cases) do
+            local got = state.fc_escape_worth_flying(c.best, c.info, M) and true or false
+            if got ~= c.want then
+                return { pass = false, reason = ("got=%s want=%s (%s)"):format(tostring(got), tostring(c.want), c.why) }
+            end
+        end
+        return { pass = true }
+    end,
+}
+state.tests["FCESC02_claim_gate"] = {
+    desc = "Phase B fc_escape_claim: fires on lethal + locked-safer + no-blink; defers when blink covers / not lethal / walkable",
+    fn = function(cu)
+        if type(state.fc_escape_claim) ~= "function" then
+            return { pass = false, reason = "state.fc_escape_claim not exposed" }
+        end
+        local s_ssn, s_gi = Escape.SafestSpotNear, Escape.GankImminent
+        local s_hp, s_mhp = Entity.GetHealth, Entity.GetMaxHealth
+        local s_bc, s_armed = state.fc_escape_blink_covers, state.armed_threats
+        _cu_push(cu, function()
+            Escape.SafestSpotNear, Escape.GankImminent = s_ssn, s_gi
+            Entity.GetHealth, Entity.GetMaxHealth = s_hp, s_mhp
+            state.fc_escape_blink_covers, state.armed_threats = s_bc, s_armed
+        end)
+        Entity.GetHealth    = function() return 1000 end
+        Entity.GetMaxHealth = function() return 1000 end          -- full HP -> not low-HP lethal
+        state.armed_threats = {}                                  -- no armed lethal threat
+        local locked_info = { locked = true,  walkable_score = 1000 }
+        local walk_info   = { locked = false, walkable_score = 1000 }
+        Escape.SafestSpotNear = function() return { x = 700, y = 0, z = 0 }, 1, locked_info end
+
+        -- gank + locked-safer + blink does NOT cover -> claim fires
+        Escape.GankImminent = function() return true end
+        state.fc_escape_blink_covers = function() return false end
+        if state.fc_escape_claim(nil) == nil then return { pass = false, reason = "expected claim (gank+locked+no-blink)" } end
+
+        -- blink covers -> defer
+        state.fc_escape_blink_covers = function() return true end
+        if state.fc_escape_claim(nil) ~= nil then return { pass = false, reason = "should defer when blink covers" } end
+
+        -- not lethal (no gank, full HP, no armed) -> nil
+        state.fc_escape_blink_covers = function() return false end
+        Escape.GankImminent = function() return false end
+        if state.fc_escape_claim(nil) ~= nil then return { pass = false, reason = "should be nil when not lethal" } end
+
+        -- lethal but the safe spot is walkable -> nil (just walk)
+        Escape.GankImminent = function() return true end
+        Escape.SafestSpotNear = function() return { x = 0, y = 700, z = 0 }, 1, walk_info end
+        if state.fc_escape_claim(nil) ~= nil then return { pass = false, reason = "should be nil when spot is walkable" } end
+
+        return { pass = true }
+    end,
+}
+state.tests["FCESC03_fire_arms_move_and_veto"] = {
+    desc = "Phase B: arm_fc_escape_move sets the post-move slot (FC modifier + recompute_dest, slot-guarded); fc_escape_active reads the veto cache",
+    fn = function(cu)
+        if type(state.arm_fc_escape_move) ~= "function" or type(state.fc_escape_active) ~= "function" then
+            return { pass = false, reason = "fc_escape fire path not exposed" }
+        end
+        local s_pending, s_cache = state.pending_post_airborne_move, state.fc_escape_active_cache
+        _cu_push(cu, function()
+            state.pending_post_airborne_move = s_pending
+            state.fc_escape_active_cache = s_cache
+        end)
+        state.pending_post_airborne_move = nil
+        state.arm_fc_escape_move({ x = 700, y = 0, z = 0 })
+        local p = state.pending_post_airborne_move
+        if not p then return { pass = false, reason = "pending not armed" } end
+        if p.modifier_name ~= "modifier_lina_flame_cloak" then return { pass = false, reason = "wrong modifier" } end
+        if not p.moves_during_airborne then return { pass = false, reason = "FC must be movable-throughout" } end
+        if type(p.recompute_dest) ~= "function" then return { pass = false, reason = "recompute_dest missing" } end
+        state.arm_fc_escape_move({ x = 0, y = 900, z = 0 })   -- slot busy -> must NOT clobber
+        if state.pending_post_airborne_move.dest.x ~= 700 then return { pass = false, reason = "slot guard failed" } end
+        state.fc_escape_active_cache = { t = now(), active = true }
+        if not state.fc_escape_active(nil) then return { pass = false, reason = "veto cache not read" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCESC04_rides_active_fc"] = {
+    desc = "Phase B: FC already active (modifier up) + claim holds -> fc_escape_tick arms the flee-move WITHOUT recasting (coordinate with defensive FC)",
+    fn = function(cu)
+        if type(state.fc_escape_tick) ~= "function" then
+            return { pass = false, reason = "fc_escape_tick not exposed" }
+        end
+        local s_claim, s_hasmod = state.fc_escape_claim, NPC.HasModifier
+        local s_pending = state.pending_post_airborne_move
+        _cu_push(cu, function()
+            state.fc_escape_claim, NPC.HasModifier = s_claim, s_hasmod
+            state.pending_post_airborne_move = s_pending
+        end)
+        state.fc_escape_claim = function() return { x = 700, y = 0, z = 0 }, { locked = true }, { lethal = true } end
+        NPC.HasModifier = function(_u, m) return m == "modifier_lina_flame_cloak" end  -- FC already up
+        state.pending_post_airborne_move = nil
+        state.fc_escape_tick()
+        local p = state.pending_post_airborne_move
+        if not p then return { pass = false, reason = "flee-move not armed while FC already active (self_alive_ok?)" } end
+        if p.intent ~= "fc_escape" or p.modifier_name ~= "modifier_lina_flame_cloak" then
+            return { pass = false, reason = "wrong pending shape" }
+        end
+        if type(p.recompute_dest) ~= "function" then return { pass = false, reason = "recompute_dest missing" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCCH01_committing"] = {
+    desc = "Phase C2 fc_chase_committing: offense-recent (last_offense_target) OR fc_tf_opener_fired, AND fc_offense_commit_ok",
+    fn = function(cu)
+        if type(state.fc_chase_committing) ~= "function" then
+            return { pass = false, reason = "fc_chase_committing not exposed" }
+        end
+        local s_ot, s_od, s_of, s_co = state.last_offense_target, state.last_offense_dispatch_t,
+                                        state.fc_tf_opener_fired, state.fc_offense_commit_ok
+        _cu_push(cu, function()
+            state.last_offense_target, state.last_offense_dispatch_t = s_ot, s_od
+            state.fc_tf_opener_fired, state.fc_offense_commit_ok = s_of, s_co
+        end)
+        local TGT = {}
+        state.fc_offense_commit_ok = function() return true end
+        -- offense-recent on TGT -> committing
+        state.last_offense_target, state.last_offense_dispatch_t, state.fc_tf_opener_fired = TGT, now(), false
+        if not state.fc_chase_committing(nil, TGT) then return { pass = false, reason = "offense-recent should commit" } end
+        -- offense on a DIFFERENT target -> not committing (no opener)
+        state.last_offense_target = {}
+        if state.fc_chase_committing(nil, TGT) then return { pass = false, reason = "offense on other target must not commit" } end
+        -- opener fired -> committing even without an offense stamp
+        state.fc_tf_opener_fired = true
+        if not state.fc_chase_committing(nil, TGT) then return { pass = false, reason = "opener-fired should commit" } end
+        -- A2 gate false -> never commits
+        state.fc_offense_commit_ok = function() return false end
+        if state.fc_chase_committing(nil, TGT) then return { pass = false, reason = "A2 gate false must block" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCCH02_claim_gate"] = {
+    desc = "Phase C2 fc_chase_claim: committing + finishable + fleeing + target-winding + winnable(Lina chord < target wind) + risk-ok -> intercept; any gate off -> nil",
+    fn = function(cu)
+        if type(state.fc_chase_claim) ~= "function" then
+            return { pass = false, reason = "fc_chase_claim not exposed" }
+        end
+        local s_commit, s_pred, s_ms = state.fc_chase_committing, state.predict_target_pos, state.fc_chase_move_speed
+        local s_geo, s_wind, s_ars, s_alive = Entity.GetAbsOrigin, state.fc_chase_target_winding,
+                                              Escape.AdvanceRiskScore, Entity.IsAlive
+        local s_origin, s_gms = NPCLib.origin, NPC.GetMovementSpeed
+        _cu_push(cu, function()
+            state.fc_chase_committing, state.predict_target_pos, state.fc_chase_move_speed = s_commit, s_pred, s_ms
+            Entity.GetAbsOrigin, state.fc_chase_target_winding = s_geo, s_wind
+            Escape.AdvanceRiskScore, Entity.IsAlive = s_ars, s_alive
+            NPCLib.origin, NPC.GetMovementSpeed = s_origin, s_gms
+        end)
+        local TGT = {}
+        local CTX = { target = TGT, combo_kill = true }   -- finishable
+        local WIND = function() return true, { flee_point = { x = 1200, y = 0, z = 0 }, walk = 3000, straight = 600 } end
+        NPCLib.origin = function() return { x = 0, y = 0, z = 0 } end
+        Entity.GetAbsOrigin = function() return { x = 400, y = 0, z = 0 } end   -- current target pos
+        Entity.IsAlive = function() return true end
+        NPC.GetMovementSpeed = function() return 300 end
+        state.fc_chase_committing = function() return true end
+        state.predict_target_pos = function() return { x = 440, y = 0, z = 0 } end   -- predicted FARTHER (440>400) -> fleeing
+        state.fc_chase_move_speed = function() return 400 end
+        -- target winds 3000u to a cutoff point 1200u from Lina: catch 1200/400=3.0 < escape 3000/300=10.0 -> winnable
+        state.fc_chase_target_winding = WIND
+        Escape.AdvanceRiskScore = function() return 10 end
+
+        if not state.fc_chase_claim(CTX, TGT) then return { pass = false, reason = "expected a claim (all gates ok)" } end
+        -- not committing -> nil
+        state.fc_chase_committing = function() return false end
+        if state.fc_chase_claim(CTX, TGT) ~= nil then return { pass = false, reason = "not committing must be nil" } end
+        state.fc_chase_committing = function() return true end
+        -- not finishable -> nil (returns before the predict)
+        if state.fc_chase_claim({ target = TGT, combo_kill = false, eff_hp_magical = 9999, r_impact_eff = 100 }, TGT) ~= nil then
+            return { pass = false, reason = "not finishable must be nil" } end
+        -- not fleeing (predicted pos APPROACHES me) -> nil
+        state.predict_target_pos = function() return { x = 360, y = 0, z = 0 } end
+        if state.fc_chase_claim(CTX, TGT) ~= nil then return { pass = false, reason = "not fleeing must be nil" } end
+        state.predict_target_pos = function() return { x = 440, y = 0, z = 0 } end
+        -- not winding (no cutoff) -> nil
+        state.fc_chase_target_winding = function() return false, { src = "x" } end
+        if state.fc_chase_claim(CTX, TGT) ~= nil then return { pass = false, reason = "no cutoff must be nil" } end
+        -- unwinnable: target barely winds (walk 800) vs Lina chord 1200 -> target arrives first -> nil
+        state.fc_chase_target_winding = function() return true, { flee_point = { x = 1200, y = 0, z = 0 }, walk = 800, straight = 600 } end
+        if state.fc_chase_claim(CTX, TGT) ~= nil then return { pass = false, reason = "unwinnable (Lina chord > target wind) must be nil" } end
+        state.fc_chase_target_winding = WIND
+        -- high risk -> nil
+        Escape.AdvanceRiskScore = function() return 99 end
+        if state.fc_chase_claim(CTX, TGT) ~= nil then return { pass = false, reason = "high risk must be nil" } end
+        return { pass = true }
+    end,
+}
+state.tests["FCCH03_cutoff_lock"] = {
+    desc = "Phase C2 fc_chase_cutoff_locked: walk >> straight (BuildPath, trees counted) -> locked; straight walk -> not; BuildPath missing -> connectivity fallback",
+    fn = function(cu)
+        if type(state.fc_chase_cutoff_locked) ~= "function" then
+            return { pass = false, reason = "fc_chase_cutoff_locked not exposed" }
+        end
+        local s_grid = GridNav
+        _cu_push(cu, function() GridNav = s_grid end)
+        local me = { x = 0, y = 0, z = 0 }
+        local ip = { x = 1000, y = 0, z = 0 }
+        GridNav = { BuildPath = function() return
+            { { x = 0, y = 0 }, { x = 0, y = 900 }, { x = 1000, y = 900 }, { x = 1000, y = 0 } } end }  -- walk 2800
+        if not state.fc_chase_cutoff_locked(me, ip) then return { pass = false, reason = "big detour should lock" } end
+        GridNav = { BuildPath = function() return { { x = 0, y = 0 }, { x = 1000, y = 0 } } end }      -- walk 1000
+        if state.fc_chase_cutoff_locked(me, ip) then return { pass = false, reason = "straight walk must not lock" } end
+        GridNav = { IsTraversableFromTo = function() return false end }   -- fallback: no path -> lock
+        if not state.fc_chase_cutoff_locked(me, ip) then return { pass = false, reason = "fallback no-path should lock" } end
+        GridNav = { IsTraversableFromTo = function() return true end }    -- fallback: path exists -> no lock
+        if state.fc_chase_cutoff_locked(me, ip) then return { pass = false, reason = "fallback path-exists must not lock" } end
         return { pass = true }
     end,
 }
@@ -9928,18 +10618,17 @@ state.tests["FCDEF08_dest_safe"] = {
     end,
 }
 state.tests["FCDEF09_offense_commit_ok"] = {
-    desc = "A2 fc_offense_commit_ok: TEAMFIGHT-scoped -- pick (<3 enemies) -> no-op true; else macro_turnable AND (favorable OR dest_safe OR bailout); menu OFF -> true",
+    desc = "A2 fc_offense_commit_ok: TEAMFIGHT-scoped -- pick (<3 enemies) -> no-op true; else macro_turnable AND (favorable OR dest_safe OR bailout)",
     fn = function(cu)
         if type(state.fc_offense_commit_ok) ~= "function" then return { pass = false, reason = "fc_offense_commit_ok not exposed" } end
-        local s_menu, s_en, s_mt, s_fv, s_ds, s_br = state.menu, state.fc_enemies_near, state.fc_macro_turnable, state.fc_macro_favorable, state.fc_dest_safe, state.fc_bailout_ready
-        _cu_push(cu, function() state.menu = s_menu; state.fc_enemies_near = s_en; state.fc_macro_turnable = s_mt; state.fc_macro_favorable = s_fv; state.fc_dest_safe = s_ds; state.fc_bailout_ready = s_br end)
+        local s_en, s_mt, s_fv, s_ds, s_br = state.fc_enemies_near, state.fc_macro_turnable, state.fc_macro_favorable, state.fc_dest_safe, state.fc_bailout_ready
+        _cu_push(cu, function() state.fc_enemies_near = s_en; state.fc_macro_turnable = s_mt; state.fc_macro_favorable = s_fv; state.fc_dest_safe = s_ds; state.fc_bailout_ready = s_br end)
         local en, mt, fv, ds, br = 3, true, false, true, true
         state.fc_enemies_near    = function() return en end
         state.fc_macro_turnable  = function() return mt end
         state.fc_macro_favorable = function() return fv end
         state.fc_dest_safe       = function() return ds end
         state.fc_bailout_ready   = function() return br end
-        state.menu = { fc_commit_gate = { Get = function() return true end } }
         en, mt, fv, ds, br = 3, true, false, true, false
         if state.fc_offense_commit_ok({}, "T") ~= true then return { pass = false, reason = "TF turnable+safe -> true" } end
         en, mt, fv, ds, br = 3, true, false, false, true
@@ -9952,9 +10641,6 @@ state.tests["FCDEF09_offense_commit_ok"] = {
         if state.fc_offense_commit_ok({}, "T") ~= false then return { pass = false, reason = "TF unturnable -> false (favorable moot)" } end
         en, mt, fv, ds, br = 2, false, false, false, false
         if state.fc_offense_commit_ok({}, "T") ~= true then return { pass = false, reason = "pick (<3 enemies) -> no-op true" } end
-        state.menu = { fc_commit_gate = { Get = function() return false end } }
-        en, mt, fv, ds, br = 3, false, false, false, false
-        if state.fc_offense_commit_ok({}, "T") ~= true then return { pass = false, reason = "gate OFF -> no-op true" } end
         return { pass = true }
     end,
 }
@@ -10840,14 +11526,7 @@ local function setup_menu()
     m.combo_key = gCore:Bind("Combo key", Enum.ButtonCode.KEY_MOUSE5)
     m.combo_key:ToolTip("HOLD = adaptive Starter (1-2 enemies) / Team Fight "
         .. "(3+) loop. TAP is stubbed for Lina (no 750u-R use case).")
-    m.force_key = gCore:Bind("Force-commit key (bypass commit check)",
-                             Enum.ButtonCode.KEY_NONE)
-    m.force_key:ToolTip("Hold to force a combo even when the kill check refuses.")
-    m.panic_key = gCore:Bind("Panic-save key (force next save)",
-                             Enum.ButtonCode.KEY_NONE)
-    m.panic_key:ToolTip("Press to force the defense layer to fire its next "
-        .. "save immediately.")
-    m.enable_offense = gCore:Switch("Enable offense (Layer 1)", true)
+    m.enable_offense = gCore:Switch("Enable offense", true)
     m.enable_offense:ToolTip("Master toggle for the HOLD-only adaptive combo "
         .. "(Starter / Team Fight) on the combo key. Off = combo key does "
         .. "nothing; defense and auto-R are unaffected by this toggle.")
@@ -10855,64 +11534,19 @@ local function setup_menu()
     m.auto_r:ToolTip("Fire Laguna automatically (no combo key) when R alone "
         .. "(plus Slow Burn) kills a visible enemy in range. Skips magic-immune "
         .. "and Linkens-protected targets.")
-    m.pause_hitrun = gCore:Switch("Pause native Hit & Run in combos", true)
-    m.pause_hitrun:ToolTip("Disable the framework's built-in Hit & Run (MOVE "
-        .. "flood) AND Orb Walker (auto-attack flood) while a combo runs, so their "
-        .. "orders stop cancelling the brain's deferred Q / R. Both restored once "
-        .. "the combo finishes.")
-    -- v0.5.8 (E1, covers history_F1/F3/F4/F7, lib_native_F7, log_timing_F1):
-    -- restore the v0.5.5 wide-pause discipline as the default. Wide-pause issues
-    -- exactly one Set(Enabled=false) edge on combo entry and one Set(Enabled=true)
-    -- edge on full combo release; the v0.5.6 E1 / v0.5.7 E3 narrow-pause regime
-    -- floods the framework HR module with 3+ edges per combo, which (with no Orb
-    -- Walker Enabled widget present for Lina, F1/F5 cross-lens) leaves HR latched
-    -- in a non-engaging state after the final restore. Narrow-pause code path is
-    -- preserved behind this toggle for A/B once the framework-recovery question
-    -- is answered. update_hitrun_pause() above already implements the strict
-    -- branch unchanged -- this registration just flips the default from
-    -- nil/false (toggle never registered pre-v0.5.8) to true.
-    m.pause_hitrun_strict = gCore:Switch("Wide-pause HR (strict mode)", true)
-    m.pause_hitrun_strict:ToolTip("Wide-pause HR for full combo lifecycle "
-        .. "(v0.5.5 default, recommended). OFF = narrow per-cast-window pause "
-        .. "(v0.5.6-v0.5.7 experimental, known to leave AA stuck off post-combo "
-        .. "on heroes lacking Orb Walker Enabled widget).")
-    -- v0.5.5: Fiery Soul cap-aware TF. Single shipping toggle so the new
-    -- ELIMINATION-mode behaviour at FS cap (7 base, 12 with Aghs Shard for 5s
-    -- post-R) can be A/B-tested against the v0.5.4 baseline. Default ON because
-    -- v0.5.5 ships the change active. Read exclusively by E4 (offense layer);
-    -- no other archetype consults it. Stack count itself comes from the
-    -- ctx.fiery_soul_stacks B2 path (NPC.GetModifier + Modifier.GetStackCount,
-    -- in build_layer1_ctx where ctx.fiery_soul_stacks is populated).
-    m.fs_cap_aware = gCore:Switch("Cap-aware TF (Fiery Soul)", true)
-    m.fs_cap_aware:ToolTip("At Fiery Soul cap (7 base, 12 with Aghs Shard for 5s "
-        .. "post-R), pivot to ELIMINATION mode: suppress stack-building archetypes "
-        .. "(sustain_qw, tf_sustain) and commit tf_burst on full-HP snipes too. "
-        .. "Below cap, behaves exactly like v0.5.4.")
-
-    -- v0.5.35 task Q6 (sustain-QW mana floor from v0.5.33 audit): reserve R
-    -- cost across all sustain dispatches so the brain doesn't drain mana
-    -- below the R kill-floor. Default ON.
-    m.sustain_r_reserve = gCore:Switch("Sustain reserves R mana", true)
-    m.sustain_r_reserve:ToolTip("When ON, sustain_qw / sustain_qw_cap skip W "
-        .. "(and Q) when firing them would leave mana below ability_mana(R). "
-        .. "Keeps Lina's R viable for the next ready window. OFF reverts to "
-        .. "the v0.5.34 behaviour of spending W/Q whenever mana > the single "
-        .. "spell cost. Burst archetypes (which already gate on cost_wqr) "
-        .. "are unaffected by this toggle.")
+    -- v0.5.171 menu-simplification: pause_hitrun + pause_hitrun_strict (wide-pause)
+    -- hardcoded ON in update_hitrun_pause(); the narrow-pause branch is removed.
+    -- v0.5.171 menu-simplification: fs_cap_aware + sustain_r_reserve hardcoded ON in code.
 
     -- v0.5.33 FC-C-08: Flame Cloak offensive auto-fire toggle. FC is the
     -- Aghs-Scepter-granted instant (+35% spell amp / +35% magic res / 7s) we
     -- want to fire BEFORE the burst archetype so the amp applies to W/Q/R.
     -- Default ON. Toggle OFF for clean revert if mana-burn or unexpected
     -- combo timing surfaces in real games.
-    m.fc_offensive_use = gCore:Switch("Flame Cloak auto-fire (offensive)", true)
-    m.fc_commit_gate = gCore:Switch("FC offense-commit gate (A2)", true)
-    m.jugg_omni_defer = gCore:Switch("Jugg Omnislash mid-ult dodge", true)
-    m.jugg_omni_defer:ToolTip("Vs Juggernaut Omnislash, delay the WW/Eul untargetable "
-        .. "dodge until just after his cast commits (accept the first strike) so the "
-        .. "rest of the slashes whiff and he loses the ult; dodging during the cast "
-        .. "point only cancels and refunds it. Ghost/Ethereal fire immediately; a "
-        .. "low-HP Lina dodges at cast to survive. OFF = dodge at cast (pre-v0.5.160.2).")
+    m.fc_offensive_use = gCore:Switch("Flame Cloak: offensive amp", true)
+    -- v0.5.170 menu-simplification: fc_commit_gate / jugg_omni_defer / fc_escape /
+    -- fc_chase / fc_value_weight / fc_aim_bias are hardcoded ON in code below; the
+    -- fc_value_debug probe is cut. Only fc_offensive_use remains as the FC control.
     m.fc_offensive_use:ToolTip("Aghs Scepter only. Before any burst combo "
         .. "(ether_wqr / eul_wrq / ww_wrq / wqr / r_first_rwq), fire Flame "
         .. "Cloak first so its +35% spell amp lifts W/Q/R damage. Triggers: "
@@ -10920,34 +11554,25 @@ local function setup_menu()
         .. "in active fight when stacks<4. Skipped during fs_shard_window "
         .. "(would downgrade cap 12->7) and during r_finisher (R alone "
         .. "kills, FC is waste). Defensive save-chain use unaffected.")
+    -- v0.5.137: W-capitalize -- after the defensive W stuns a gap-closer / committed attacker,
+    -- commit the combo on that stunned target IF killable. Default ON (offensive completion of the W save).
+    m.w_capitalize = gCore:Switch("W-capitalize", true)
+    m.w_capitalize:ToolTip("After the defensive W stuns an incoming gap-closer "
+        .. "or committed attacker, fire the W-Q-R combo to SECURE the kill -- "
+        .. "but only when the remaining Q+R clearly kills it (else the W stays "
+        .. "purely defensive). Gated on HP floor + not-into-a-gank. Default ON.")
 
-    -- v0.5.35 task TF-FC-sustain (v0.5.33 Bug B follow-up): optional FC
-    -- pre-amp in tf_sustain when cluster_n >= 3. Default OFF - the v0.5.33
-    -- design rationale ("no R commit -> 25s CD not worth") stands; this is
-    -- the opt-in for players who want maximum spell-amp on dense pile damage
-    -- even at the cost of FC's 25s CD between bursts.
-    m.fc_offensive_sustain_use = gCore:Switch("Flame Cloak pre-amp on TF sustain (opt-in)", false)
-    m.fc_offensive_sustain_use:ToolTip("Aghs Scepter only. When ON and the "
-        .. "teamfight cluster has >=3 enemies, fire Flame Cloak before the "
-        .. "tf_sustain W/Q so the +35% spell amp covers the pile damage. "
-        .. "Default OFF: FC's 25s CD is reserved for tf_burst R commits. "
-        .. "Skipped at fs_at_cap / fs_shard_window / in_flight / channelling, "
-        .. "same as the starter and tf_burst sites; shares the 1.5s "
-        .. "state.last_fc_dispatch_t throttle.")
+    -- v0.5.170 menu-simplification: fc_offensive_sustain_use cut (niche opt-in,
+    -- default OFF, never promoted); the tf_sustain pre-amp branch is removed in code.
 
-    -- v0.5.79 feature C: Ethereal+R kill-confirm. Gate the ether_wqr starter
-    -- commit on a calculated post-amp magical kill so Lina does not blow the
-    -- 4s-lockout Ethereal on a target it will not finish. On a no-kill verdict
-    -- the ladder falls through to eul/ww/wqr (still engages, ethereal saved).
-    m.ether_kill_confirm = gCore:Switch("Ethereal+R kill-confirm", true)
-    m.ether_kill_confirm:ToolTip("Only commit the Ethereal+W+Q+R starter combo "
-        .. "when the ethereal-amplified Laguna (r_total x 1.40) covers the "
-        .. "target's effective magical HP. If it would not kill, skip ethereal "
-        .. "and fall through to Eul / Wind Waker / bare WQR so the 4s-lockout "
-        .. "Ethereal finisher is preserved for a confirmed kill. OFF = v0.5.78 "
-        .. "behaviour (ether_wqr fires whenever ethereal is 'needed' per the "
-        .. "MR / undershoot gate, kill or not).")
+    -- v0.5.171 menu-simplification: ether_kill_confirm hardcoded ON in code.
 
+    gCore:Label("- Advanced -")
+    m.force_key = gCore:Bind("Force-commit key (bypass commit check)", Enum.ButtonCode.KEY_NONE)
+    m.force_key:ToolTip("Hold to force a combo even when the kill check refuses.")
+    m.panic_key = gCore:Bind("Panic-save key (force next save)", Enum.ButtonCode.KEY_NONE)
+    m.panic_key:ToolTip("Press to force the defense layer to fire its next "
+        .. "save immediately.")
     -- v0.5.78 wave-clear (HOLD): mana-floor + creep-count gated lane/jungle farm
     -- (v0.5.86: comment corrected -- there is NO stack-TIMING logic; the
     -- min-creeps gate is "fire only on enough creeps", i.e. effective on already-
@@ -10960,24 +11585,8 @@ local function setup_menu()
         .. "dense camp when mana-rich. Player controls movement; the brain only "
         .. "nukes creeps already in range. Gated by min-creeps + mana floor + "
         .. "R reserve. KEY_NONE = off until you assign a key.")
-    m.wave_min_creeps = gCore:Slider("Wave-clear: min creeps to fire Q", 1, 6, 3)
-    m.wave_min_creeps:ToolTip("Only cast Q when the line would hit at least this "
-        .. "many creeps. 3 = won't waste Q on a lone creep; fires on stacked "
-        .. "camps / lane waves. Set 1 to nuke anything. W fires at min+1 (a real "
-        .. "pack, not a pair).")
-    m.wave_mana_floor = gCore:Slider("Wave-clear: mana floor %", 0, 90, 30)
-    m.wave_mana_floor:ToolTip("Skip wave-clear entirely while mana fraction is "
-        .. "below this %. Keeps a buffer for fights / saves. 30 = stop farming "
-        .. "below 30% mana.")
-    m.wave_reserve_r = gCore:Switch("Wave-clear reserves R mana", true)
-    m.wave_reserve_r:ToolTip("When ON, never spend Q/W on farm if it would drop "
-        .. "mana below Laguna Blade's cost, so R stays available for a kill. "
-        .. "OFF = farm down to the mana-floor % only.")
-    m.wave_use_w = gCore:Switch("Wave-clear uses W on dense camps", true)
-    m.wave_use_w:ToolTip("Also drop Light Strike Array (W) on a tightly-packed "
-        .. "camp (min-creeps + 1 in the W AoE) when mana allows after Q + the R "
-        .. "reserve. Faster clear + a Fiery Soul stack; spends the stun. OFF = "
-        .. "Q only.")
+    -- v0.5.172 menu-simplification: wave_min_creeps (3) / wave_mana_floor (30) / wave_reserve_r (ON) /
+    -- wave_use_w (ON) hardcoded to defaults in the wave-clear code; the wave_key feature switch stays.
 
     -- v0.5.94: engine-blink CAPITALIZE -- the brain does not cast Blink; it seizes
     -- the engine's blink to fire a free-gap-close combo. Default OFF.
@@ -10985,16 +11594,7 @@ local function setup_menu()
     m.blink_capitalize:ToolTip("When the framework blinks Lina into range of a "
         .. "target, fire the W-Q-R combo (use the engine's blink as a free "
         .. "gap-close). Gated on HP floor + not-into-a-gank. Default OFF.")
-    m.blink_capitalize_hp = gCore:Slider("Blink-capitalize: min HP %", 0, 90, 35)
-    -- v0.5.137: W-capitalize -- after the defensive W stuns a gap-closer /
-    -- committed attacker, commit the combo on that stunned target IF killable.
-    -- Default ON (the offensive completion of the W save).
-    m.w_capitalize = gCore:Switch("W-capitalize (combo the W-stunned target if killable)", true)
-    m.w_capitalize:ToolTip("After the defensive W stuns an incoming gap-closer "
-        .. "or committed attacker, fire the W-Q-R combo to SECURE the kill -- "
-        .. "but only when the remaining Q+R clearly kills it (else the W stays "
-        .. "purely defensive). Gated on HP floor + not-into-a-gank. Default ON.")
-    m.w_capitalize_hp = gCore:Slider("W-capitalize: min HP %", 0, 90, 35)
+    -- v0.5.172 menu-simplification: blink_capitalize_hp + w_capitalize_hp hardcoded to 35 in code.
     -- v0.5.95: brain-cast Blink-in (re-enabled FALLBACK) -- when the engine did NOT
     -- blink (dagger ready) + you hold combo on an out-of-range target, the brain
     -- blinks in itself, then combos. Reserves the dagger if a threat is incoming.
@@ -11006,12 +11606,11 @@ local function setup_menu()
     m.blink_in_initiate:ToolTip("Brain casts Blink to engage without a guaranteed "
         .. "kill -- gated on exit item + HP + fog, and reserves the dagger if a "
         .. "threat is incoming. Default OFF.")
-    m.blink_in_kill_risk = gCore:Slider("Blink-in kill: max fog-risk score", 0, 100, 60)
-    m.blink_in_initiate_risk = gCore:Slider("Blink-in initiate: max fog-risk score", 0, 100, 30)
-    m.blink_in_initiate_hp = gCore:Slider("Blink-in initiate: min HP %", 0, 90, 40)
+    -- v0.5.172 menu-simplification: blink_in_kill_risk (60) / blink_in_initiate_risk (30) /
+    -- blink_in_initiate_hp (40) hardcoded to defaults in code.
 
     ------------------------------------------------------------- Defense --
-    m.auto_defense = gDef:Switch("Enable auto-defense (Layer 2)", true)
+    m.auto_defense = gDef:Switch("Enable auto-defense", true)
     m.auto_defense:ToolTip("Always-on save layer: Wind Waker / Flame Cloak / "
         .. "BKB / Glimmer / Lotus / Force / Pike on incoming threats.")
     m.ally_save = gDef:Switch("Enable ally-save (threat-reactive)", false)
@@ -11020,6 +11619,7 @@ local function setup_menu()
         .. "ally hero, fire an ally-castable save ON them: Glimmer to break a "
         .. "target lock, Lotus to dispel / reflect, Force to reposition. "
         .. "Threat-triggered, not an HP threshold. Off by default.")
+    gDef:Label("- Subsystem switches -")
     -- v0.5.21 OBS-11: per-subsystem defense toggles. auto_defense (above) is
     -- the master switch; these three carve out individual layers so a
     -- misbehaving subsystem can be silenced without dropping the rest of
@@ -11114,11 +11714,7 @@ local function setup_menu()
     -- explicit no-op since v0.5.54 (the Pike-on-Bara conflict is handled at the
     -- data layer by dropping Pike's prep_time; state.AD.disable is gone from
     -- OnUpdateEx). The toggle was read nowhere functional -- pure menu clutter.
-    m.preface_enable = gDef:Switch("Pre-face incoming threats", false)
-    m.preface_enable:ToolTip("Turn to face an approaching enemy that has a "
-        .. "ready targeted threat, so Lina's 0.6 turn rate does not delay her "
-        .. "next W / R. Off by default; issues a brief attack-face your next "
-        .. "input overrides. Most useful once offense (Phase F) ships.")
+    -- v0.5.171 menu-simplification: preface_enable cut (niche, default OFF, never promoted); pre_face_tick removed in code.
 
     --------------------------------------------------------- Diagnostics --
     m.diag = gDiag:Slider("Log verbosity", 0, 3, 1)
@@ -11867,6 +12463,7 @@ function callbacks.OnUpdateEx()
             tlog(1, "self_acquired", { name = uname(h) })
         end
     end
+    -- v0.5.170: hero_value_eval_log (fc_value_debug probe) removed (menu-simplification)
     -- v0.5.15 OBS-01 (modseen POST_GAME dump): the PE-06 accumulator at ~3765
     -- grew state.seen_modifiers unbounded with no reader. Mirror Sniper.lua
     -- line 9269 (GameRules.GetGameState transition to POST_GAME, one-shot via
@@ -12027,11 +12624,9 @@ function callbacks.OnUpdateEx()
                                          -- fire Pike OR Force once the
                                          -- turn-then-fire harness reaches
                                          -- alignment (or timeout drops it)
-        state.pending_post_airborne_move_tick()  -- v0.5.62 Phase 5 slice 3 fix:
-                                         -- fire EUL / WW post-move once
-                                         -- the airborne modifier clears
-                                         -- (or restore Native on timeout)
-        pre_face_tick()            -- E12: opt-in pre-face incoming threats
+        state.pending_post_airborne_move_tick()  -- v0.5.62 Phase 5 slice 3: fire EUL / WW post-move once
+                                         -- the airborne modifier clears (or restore Native on timeout)
+        -- v0.5.171: pre_face_tick() call removed (preface_enable feature cut in menu-simplification)
         cast_poll_save_tick()      -- v0.5.147.x hook cast-poll save (detect hook cast -> displacement save)
         -- Layer 1 offense (Phase F): latch -> scheduled steps -> R-abort ->
         -- auto-R kill-steal -> HOLD/TAP combo-key dispatch.
@@ -12065,6 +12660,8 @@ function callbacks.OnUpdateEx()
             end
         end
         state.fc_defense_tick()    -- v0.5.158 A1: proactive defensive FC reserve (Tier-A) before the offense dispatch
+        state.fc_escape_tick()     -- v0.5.16x Phase B: proactive FC terrain-escape (mobility claim)
+        state.fc_chase_tick()      -- v0.5.16x Phase C: FC terrain-cutoff chase (offense already committing)
         state.jugg_omni_defer_tick()  -- v0.5.160.2 Note-1: fire the deferred Jugg Omnislash dodge mid-ult
         state.combo_key_tick()     -- HOLD/TAP classify + starter/teamfight dispatch
         state.blink_capitalize_tick()  -- v0.5.94: seize engine blinks (auto-combo, default OFF)
@@ -13071,6 +13668,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.160.4 (Note-1 FIX: the deferred dodge now keys on the RUNTIME modifier modifier_juggernaut_omnislash (was ..._omni_slash, never matched) and waits through the cast point before clearing (was cleared each cast-point frame so it never fired); the defer mechanism is in lib/defense (hero-agnostic, Sniper can opt in); A2 soften + Jugg Omni timing on the A3 + A1 build. A2-2: a FAVORABLE teamfight (allies_eff >= enemies_eff) commits FC offense without the bailout/dest_safe insure (secure the fast TF). Note-1: vs Jugg Omnislash the WW/Eul untargetable dodge defers ~0.4s past cast so his ult COMMITS then the rest whiffs (he loses it); Ghost/E-blade + a low-HP Lina fire at cast. Flame Cloak arbiter Phase A3 + A1 touch-up. A1: proactive defensive FC stands down when a ready full-negate save (WW/Eul/BKB) covers (fixes FC-fired-instead-of-WW); verbose proactive skip logs throttled to >=1s; the framework auto-BKB is the Dodger Specific-Settings panel (Min Enemies=1), unreachable via Menu.Find, disable it manually in the UCZone UI. A3: TF FC now actually fires - 7.1 AoE flip-count across the W+Q cluster (was primary-only; fed aoe_enemy_units at radius 250) + 7.2 a stack-aware cold-open (FC standalone at a 3+ teamfight onset when Fiery Soul stacks <= 3, the 0-to-7 jump is the value), both behind the A2 teamfight commit gate so A2 finally bites. Phase A2: the offense-commit gate, TEAMFIGHT-scoped -- in a 3+ fight FC commits for offense only when turnable (allies_eff >= 0.8 x enemies_eff) AND insured (a ready non-FC bail-out OR a safe spot); a 1-2 pick is the shipped TTK plus the player call, the gate no-ops there. A1 defense reserve + the v0.5.158.5 proactive-pressure fire unchanged). FC fires defensively for its 35-percent magic resistance vs an uncovered MAGIC threat: proactively when lethal-survivable (Tier-A: HP <= D < HP/0.65) or Lina is low and focused; reactively as the save chain last-resort tail (Tier-B heavy, and even unsurvivable since FC still mitigates) when every better save is down. The fire is gated on Lina being able to cast (not stunned/hexed/silenced/invulnerable/airborne) so the engine does not drop it. A ready matched save (BKB / Eul / WW / Linkens / Lotus) releases the claim, and the 3 offense FC openers stand down when FC is the lethal-magic lifeline. FC is injected as a tail of targeted_burst / lockdown / delayed_aoe, so magical nukes (Sniper Assassinate) and magical zones (Skywrath Mystic Flare, when the displacement to dodge it is down) reach it. New state.fc_macro_turnable / fc_bailout_ready / fc_dest_safe / fc_offense_commit_ok, ANDed into the 3 offense openers (menu-toggleable, OFF = pre-A2); in-brain FCDEF01-09; offline 387 of 387; coverage 48 of 48. Lina.lua only, no lib change. Next slices (TF last, per the original plan): B mobility escape, C mobility chase, D TF AoE flip-count plus tuning.")
+LOG:info("Lina brain v0.5.173 (Menu-simplification batch D (final): reorganized the 26 survivors flat -- essentials on top, force/panic + wave/blink under a Core Advanced label, the 9 defense subsystem kill-switches under a Subsystem-switches label; relabeled (dropped Layer 1/2 jargon, Flame Cloak offensive amp, W-capitalize). No removals; menu 49 -> 26, simplification complete. Offline 420/420, coverage 48/48, luac 5/5. Full history in changelog.md.")
 
 return callbacks

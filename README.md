@@ -15,7 +15,7 @@ five stacks away. A per-threat dispatch lock that closes the
 layer inherits sooner or later.
 
 This repository is the full source: the brain itself
-(`Lina/Lina.lua`, around 7,000 lines), the shared Lua libraries it
+(`Lina/Lina.lua`, around 13,700 lines), the shared Lua libraries it
 sits on (`lib/`), the code generators that build the data libraries
 from Valve's KV files (`tools/`), and the architecture and reference
 documents written alongside it.
@@ -97,6 +97,12 @@ What the brain adds on top of the native Lina script:
 - A teamfight-opener FC pre-amp at the first tick of a new
   engagement that pre-amps the W+R burst before the user's combo
   reaches the spells.
+- Value-weighted teamfight flips: a teamfight FC flip only commits
+  when it kills something worth the 25s cooldown (a fed core yes, a
+  lone support no), scored by a per-hero combat-value model (role
+  base times a live fed-ness multiplier read from peer-relative
+  stats). The same model breaks aim ties toward the higher-value
+  target instead of just the nearest.
 
 **Defense, always on, no key:**
 
@@ -144,6 +150,16 @@ What the brain adds on top of the native Lina script:
   clutch saves; healthy-Lina threats go to the next save in the chain.
   Within the 5s post-R Aghs-Shard window FC is demoted to chain
   tail (firing it would downgrade the 12-stack FS cap to 7).
+- Flame Cloak escape over terrain: in a lethal gank, when the safe
+  spot is across terrain a walk cannot reach and Blink is down, the
+  brain uses FC's unobstructed movement (Lina moves over cliffs and
+  trees at base speed) to flee. Survival only; it never escapes into
+  a chase.
+- Flame Cloak chase cutoff: when the offense is already committed to
+  a kill (R cast, opener fired) and the target runs, FC can cut
+  straight over terrain to catch it. Terrain shortcut only, FC adds
+  no move speed; it aborts if the target reaches safety or the dive
+  turns risky, and an escape need always preempts the chase.
 - A panic-key bypass that drops both the dispatcher's reaction-window
   throttle and the per-threat lock for one save, so a user-driven
   panic frame is never silenced by a routine prior save against
@@ -235,47 +251,70 @@ brain is deciding, and when it refuses a combo, why.
 ## Menu settings
 
 The brain's settings are under **Heroes -> Hero List -> Lina ->
-Brain**, split across three pages.
+Brain**, split across three pages. The menu is deliberately small (26
+controls): once a behavior is validated it is hardcoded to its proven
+default rather than left as a toggle, so what stays is the genuine
+playstyle choices plus the per-subsystem kill-switches. The
+v0.5.170-173 pass removed the development toggles.
 
 ### Core
 
+Essentials first, then an `- Advanced -` divider for the opt-in features and manual override keys.
+
 | Setting | Default | Meaning |
 |---|---|---|
-| Enable Lina brain | on | Master toggle. When off the brain issues nothing and the native Lina runs alone. |
-| Combo key | Mouse5 | Hold for the adaptive Starter / Team Fight loop. |
-| Use Flame Cloak offensively | on | Enable the offensive FC pre-amp on starter and teamfight bursts. |
-| Use Flame Cloak in sustain (opt-in) | off | Extend the FC pre-amp to `tf_sustain` (W+Q-only paths). Off by default; FC is normally reserved for kill-commits, not poke. |
-| R commit floor | 100 (40-150) | Kill-value gate for Laguna Blade. 40 fishes for any kill, 100 is strict, 150 is conservative. |
+| Enable Lina brain | on | Master toggle. Off = the brain issues nothing, native Lina runs alone. |
+| Combo key | Mouse5 | Hold for the adaptive Starter (1-2) / Team Fight (3+) loop. |
+| Enable offense | on | Master toggle for the combo-key offense. Off = defense and auto-R still run. |
+| Auto-R kill steal | on | Fire Laguna Blade automatically when R alone is a lethal, unblocked snipe. |
+| Flame Cloak: offensive amp | on | Pre-amp a burst with FC so the +35% spell amp lifts W+Q+R. The arbiter holds FC when a save may need it. |
+| W-capitalize | on | After a defensive W stun lands, commit the W+Q+R if it clearly secures the kill. |
+| *(- Advanced -)* | | *divider* |
 | Force-commit key | unbound | Hold to force a burst when the kill check would refuse. |
-| Panic-save key | unbound | Press to force the defense layer to fire its next save immediately. |
+| Panic-save key | unbound | Press to force the next save past the reaction-window throttle. |
+| Wave-clear key (HOLD) | unbound | Hold to farm: Q on the best creep line, optional W on a dense camp. |
+| Blink-capitalize | off | When the framework blinks Lina into range, auto-fire the combo. |
+| Blink-in kill-commit | off | Brain casts Blink to secure a confirmed kill the engine did not blink for. |
+| Blink-in initiate | off | Brain casts Blink to engage without a guaranteed kill (gated on exit item + HP + fog). |
 
 ### Defense
 
+Two essentials, then a `- Subsystem switches -` divider: each switch silences one defense subsystem mid-game without dropping the rest of the layer.
+
 | Setting | Default | Meaning |
 |---|---|---|
-| Enable auto-defense (Layer 2) | on | The always-on save layer: Lotus, BKB, Force, Pike, WW, Glimmer, Aeon, and FC as a low-HP backstop. |
-| Auto-punish enemy channels | on | Auto-fire Laguna Blade or W on an enemy starting a channel or a teleport in range. |
-| Pre-face imminent threats | on | Briefly rotates Lina to beat fast enemy cast points so an interrupt-style threat can be Q-stunned. |
-| Lotus first vs single-target burst | on | Lotus is the chain head for Sniper-Assassinate-class threats. The Lotus-defer-if-close branch arms when Lotus is on CD but recovers within 1.2s of the cast point. |
-| Save ally toggle | on | The ally-save layer (Glimmer, Lotus on ally, etc.) runs on its own lock domain, independent of self-save. |
+| Enable auto-defense | on | The always-on save layer (WW / Flame Cloak / BKB / Glimmer / Lotus / Force / Pike). |
+| Enable ally-save | off | Opt-in: cast ally-castable saves (Glimmer / Lotus / Force) on a threatened ally, on its own lock domain. |
+| *(- Subsystem switches -)* | | *divider* |
+| Persistent re-fire (Duel/Static Storm) | on | Periodic save re-fire while a persistent lockdown modifier is on Lina. |
+| Line-projectile intercept (Pudge hook) | on | Displace out of a created line skillshot (Hook, Arrow, Skewer, Fissure). |
+| Hook cast-poll save | on | Detect Pudge Hook / Clockwerk Hookshot at cast and fire a displacement save before it lands. |
+| Lotus-worthy ult reflect-first | on | Try Lotus first on a reflectable ult (Duel, Doom, Hex) before walking the normal ladder. |
+| Enable commit-attacker close-gap | on | Treat an enemy auto-attacking Lina at melee as a threat and fire a close-gap save. |
+| Enable W anti-gap defensive | on | Use W as a tertiary arrival-stun save vs slow gap-closers when the items are on CD. |
+| Override Linkbreaker defense items | on | Match-scoped: zero the 5 overlap items in the framework Linkbreaker so the brain owns them. |
+| Override Dodger defense items | on | Match-scoped: zero the 7 overlap items in the Umbrella Dodger so the brain owns them. |
+| Override Dodger BKB auto-cast | on | Match-scoped: neuter the Dodger's dedicated BKB panel so the brain's BKB save owns the item. |
 
 ### Diagnostics
 
 | Setting | Default | Meaning |
 |---|---|---|
 | Log verbosity | 1 (0-3) | 0 silent, 1 decisions, 2 adds skipped decisions, 3 full trace. Written to the debug log. |
-| Show raw-API debug panel | off | Extra read-only labels exposing raw framework reads. A research aid, leave off in normal play. |
+| Dump brain state (one-shot) | unbound | Press to emit a forensic snapshot: armed threats, pending steps, last saves, Fiery Soul stacks. |
+| Run all brain tests (one-shot) | unbound | Press to run the in-brain mock-driven test suite; results print to the log between `test_session_begin/end`. |
 
-The page also carries a live, read-only status panel: current Layer
-1 archetype, Layer 2 last save, Fiery Soul stack count, cap window
-(7 base, 12 in the 5s post-R Aghs-Shard window), dispatcher lock
-state, and cooldown readiness.
+The page also carries a live, read-only status panel: self status,
+combo readiness (R-CD / mana% / FS / WQR-ready), Layer 1 / Layer 2
+counters, save readiness for owned items, and the fog signals (gank =
+enemies arrivable soon, missing = enemies off-minimap). Fiery Soul cap
+is 7 base, 12 in the 5s post-R Aghs-Shard window.
 
 ## Repository layout
 
 ```
 Lina/
-  Lina.lua              the brain (one file, ~7k lines)
+  Lina.lua              the brain (one file, ~13.7k lines)
 lib/                    shared Lua libraries (see "The library set")
 tools/                  KV-data generators + log/test tooling
 DEFENSE_CATEGORIES.md   threat-category -> save-chain mapping
@@ -365,6 +404,35 @@ when Aghs Shard is owned. Several decisions key on stack state:
   stacks multiplicatively with the Ethereal resist-reduction, so
   with the buff up the brain commits kills the un-amped burst
   would not have secured.
+
+### The Flame Cloak arbiter
+
+Flame Cloak (the Aghs ability) is one button on a ~25s cooldown that
+can serve four different jobs, only one per cast. Rather than a fixed
+priority, the brain runs an arbiter that weighs the best use each tick:
+
+- **Offensive amp** (the pre-amp above): fire FC before a burst for
+  the +35% spell amp, skipped when it would be wasted (R alone already
+  kills, or inside the Aghs-Shard cap window).
+- **Defense reserve / commit gate:** FC is not spent on offense if it
+  might be needed to survive. The commit gate is item-aware and only
+  releases FC offensively when the play is genuinely safe and the flip
+  is turnable; otherwise FC is held for a save.
+- **Escape over terrain:** FC's unobstructed movement flees a lethal
+  gank across terrain a walk cannot cross when Blink is down.
+- **Chase cutoff:** the same terrain movement cuts off a fleeing kill
+  target the offense has already committed to. Escape always preempts
+  chase.
+- **Value-weighting:** a teamfight flip is judged by who it kills (fed
+  core vs lone support) through the per-hero combat-value model, which
+  is also the aim tie-breaker.
+
+Every arbiter decision emits one `fc_arbiter` log line (tier, reason,
+weighted value, whether it fired), so a log review shows exactly why FC
+fired or held on any tick. The offensive and defensive uses share the
+one cooldown through the same per-(target, mod, caster) dispatch lock
+(synthetic mod keys for the offensive use), so a pre-amp and a save
+never collide on FC.
 
 ### Defense: anim + cast-point arming
 

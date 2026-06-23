@@ -805,7 +805,7 @@ CH.PRIMAL_ONSLAUGHT = {
     -- Same escape set as Mars Arena: WW/Eul are airborne + untargetable (no
     -- knockback/stun applies to a cycloned unit, regardless of position); Blink
     -- repositions clear. NO Force/Pike (push along Lina's facing, lesson 61 /
-    -- Pike/Force keep-away -- for a line dash that is along the corridor,
+    -- pike/force keep-away -- for a line dash that is along the corridor,
     -- not out). NO BKB (physical). Authoritative via ANIM_SAVE_OVERRIDES.
     "item_wind_waker",
     "item_cyclone",
@@ -1259,6 +1259,13 @@ K.W_INTERCEPT_MARGIN_S = 0.345
 -- only, so the horizon is ~1.12 and the {cur,pred} band is narrower (cover-both
 -- catches more kiters). The CLUSTER path keeps K.W_INTERCEPT_MARGIN_S unchanged.
 K.W_COMMITTED_LEAD_MARGIN_S = 0.17
+-- v0.5.175 offense cover-both margin (units). w_aim passes W_AOE - this to
+-- BestAoeCenter so a 2nd enemy is committed only when it sits >= this far INSIDE
+-- the real 250 AoE -> a GUARANTEED double over the 0.95s lead, not a rim gamble.
+-- Double threshold = ~2*(250 - 25) = ~450u apart; past it W single-targets the
+-- priority. The real W still casts the full 250 AoE, so this only gates the
+-- cover-both COMMIT; the lib midpoint placement makes the committed center robust.
+K.W_COVER_MARGIN = 25
 -- v0.5.111.1 lethality horizon in HITS (user demo note: "ww fired when
 -- lethal but too close to lethal ... it was about the calculation based on
 -- hits"). The old inline 4.25 made lethal flip only when ~4 sustained
@@ -1291,7 +1298,7 @@ K.LINA_BASE_ATTACK_TIME = 1.7   -- Lina base attack time (Liquipedia; no GetBase
 -- uncovered lethal-survivable MAGIC threat. All demo-tuned.
 K.FC_DEF_MR_MULT          = 0.65  -- FC incoming-magic multiplier (Tier-A ceiling D < HP/0.65)
 K.FC_DEF_TIER_B_FLOOR     = 0.6   -- Tier-B: 0.6*HP <= D < HP (FC saves >= 21% HP)
-K.FC_DEF_PROACTIVE_HP     = 0.50  -- proactive focus band: Lina HP fraction below this
+K.FC_DEF_PROACTIVE_HP     = 0.35  -- v0.5.180: proactive (gank) FC band fires only when Lina HP fraction below this (was 0.50, too eager mid-gank)
 K.FC_DEF_PROACTIVE_RADIUS = 1200  -- proactive band enemy-scan radius (u)
 K.FC_DEF_PROACTIVE_COUNT  = 2     -- proactive band: >= this many enemy heroes near
 K.FC_DEF_PRESSURE_DMG_WINDOW = 2.0   -- v0.5.158.5: a band-only proactive FC fires only under real pressure (damage within this window OR a committed attacker), not bare proximity
@@ -2274,17 +2281,29 @@ local LINA_EXPECTED_DAMAGE = {
     -- REMOVED v0.5.168.3: modseen shows the instant ult lands NO debuff modifier, so a
     -- modifier-keyed entry can never match (its detection routes to bkb/pipe, not FC).
     modifier_zuus_lightning_bolt                = 380,   -- Zeus W, 140/220/300/380 L1-4, single-target magical (FC-graded, demo-confirmed src=catalog)
-    modifier_skywrath_mystic_flare_aura_effect  = 1600,  -- Skywrath ult zone, 800/1200/1600 L1-3 total, UNDIVIDED on a solo target (worst case)
-    modifier_skywrath_mage_mystic_flare_thinker = 1600,  -- same Mystic Flare zone (thinker key variant)
+    -- v0.5.179 (bridge #4 Round 3, pointwise): was 1600 (base L3 only). Liquipedia
+    -- (7.41d): base 800/1200/1600 L1-3 + the L25 talent "+400 Mystic Flare damage" ->
+    -- 2000 worst case, UNDIVIDED on a solo target. The base-only 1600 under-graded a
+    -- maxed Skywrath as `none` at full HP (1600 < 0.6*HP=1668), so FC held the channel
+    -- as the last-resort save and Lina ate it raw (demo: hp 2781->803, ~1978 == the
+    -- talented total). 2000 lands in Tier-B at full HP -> FC fires. Aghs Scepter casts
+    -- a 2nd instance on ANOTHER hero (not stackable on solo Lina); the Shard does not
+    -- touch Mystic Flare. Damage is divided among heroes in the zone -> solo = worst case.
+    modifier_skywrath_mystic_flare_aura_effect  = 2000,  -- Skywrath ult zone, base 800/1200/1600 L1-3 + L25 talent +400 = 2000 solo worst case
+    modifier_skywrath_mage_mystic_flare_thinker = 2000,  -- same Mystic Flare zone (thinker key variant)
     modifier_leshrac_split_earth                = 280,   -- Leshrac Q, 115/170/225/280 L1-4 magical (stun + damage)
     -- v0.5.168.2 D4.2 batch-2 (Liquipedia 7.41d). Clean single-burst magical nukes only.
     -- Chain Frost (bouncing, no clean per-hero value) + Mortimer Kisses (spread glob
-    -- bombardment, conflicting per-glob sources) were DEFERRED, not guessed. v0.5.168.3:
-    -- modseen demo confirmed the names below; NOTE Ravage/Avalanche route to ITEM saves
-    -- (eul/ww/bkb), so fc_defense_claim's grade does not consult them today (fc_defense_d
-    -- never fired) -- correct-but-unused until FC is their grader. See the bridge.
-    modifier_tidehunter_ravage                  = 400,   -- Tide ult, 200/300/400 L1-3 magical PBAoE (base; +100 talent)
-    modifier_tiny_avalanche_stun                = 360,   -- Tiny Q, 90/180/270/360 L1-4 total magical; KEY = _stun (modseen: bare modifier_tiny_avalanche never lands)
+    -- bombardment, conflicting per-glob sources) stay DEFERRED (niche + no clean D).
+    -- v0.5.178.3 DECISION (FC-grade-magical-nukes review, bridge #4): the two entries
+    -- below are INERT BY DESIGN, not pending. Both are primary_harm="disable" AoE STUNS
+    -- (THREAT_PROFILE save="bkb_or_blink" / "eul_or_bkb"), so the threat system routes
+    -- them to the ITEM-save chain, NOT the FC magical-D reserve (fc_defense_claim never
+    -- grades them; fc_defense_d never fires). CORRECT + FINAL: FC's 35% MR cuts only the
+    -- DAMAGE, never the stun, so a dodge/immunity item is strictly better. Kept as a
+    -- damage reference only -- do NOT wire Ravage/Avalanche into FC.
+    modifier_tidehunter_ravage                  = 400,   -- Tide ult, 200/300/400 L1-3 magical PBAoE (base; +100 talent). ITEM-save routed (AoE stun); inert here.
+    modifier_tiny_avalanche_stun                = 360,   -- Tiny Q, 90/180/270/360 L1-4 magical; KEY=_stun. ITEM-save routed (AoE stun); inert here.
 }
 
 -- Save-cast closures. Universal item self-casts plus the two Lina-specific
@@ -2460,7 +2479,7 @@ local SAVE_FIRE = {
                 -- interrupt; the real Pugna bail was the menu toggle being off, not
                 -- this gate, and the bypass was speculative. Keep it LOGGED so a
                 -- future silent-bail hunt is a one-line grep, not three demos
-                -- (check config before debugging).
+                -- (check the menu toggle/config before deep debugging).
                 tlog(2, "w_defensive_skip_channelling", {
                     intent = tostring(intent or ""),
                     mod    = tostring(threat_mod or "-"),
@@ -3752,7 +3771,7 @@ defense_dispatcher = Defense.New {
     -- (self_hp_fraction below is a real closure; its low_severity_high_hp branch is
     -- unaffected.)
     -- Lina HP fraction for the severity skip. Per
-    -- UCZone API: HP lives on Entity, not NPC.
+    -- UCZone HP API: HP lives on Entity, not NPC.
     self_hp_fraction = function()
         local me = state.self_npc
         if not me or not Entity.IsAlive(me) then return nil end
@@ -4074,7 +4093,7 @@ local SAVE_ETA_TRIGGER = {
 -- Keyed by save_name (matches SAVE_FIRE / SAVE_ETA_TRIGGER). Values in DOTA
 -- units; see per-entry rationale in v0.5.9 release notes.
 local SAVE_FIRE_DISTANCE = {
-    item_wind_waker         = 500,  -- v0.5.135.1: 300 -> 500. WW is INSTANT (fire by proximity, no lead math -- instant saves need no lead/aim). 300u was the binding gate ONLY for Bara: eta_speed 600 puts the SAVE_ETA_TRIGGER(0.45) eta-gate at 270u < 300u, so WW fired at ~296u = too close vs the real ~690 ramped charge speed (3 late fires). Tusk/Primal (eta_speed 1200) fire via the eta-gate at ~540u and are UNCHANGED (540 > 500). 500u gives Bara ~0.7s real lead (parity with Pike/Force's 500u). (was v0.5.15 PT-01 150 -> 300.)
+    item_wind_waker         = 500,  -- v0.5.135.1: 300 -> 500. WW is INSTANT (fire by proximity, no lead math -- instant saves fire by proximity). 300u was the binding gate ONLY for Bara: eta_speed 600 puts the SAVE_ETA_TRIGGER(0.45) eta-gate at 270u < 300u, so WW fired at ~296u = too close vs the real ~690 ramped charge speed (3 late fires). Tusk/Primal (eta_speed 1200) fire via the eta-gate at ~540u and are UNCHANGED (540 > 500). 500u gives Bara ~0.7s real lead (parity with Pike/Force's 500u). (was v0.5.15 PT-01 150 -> 300.)
     item_cyclone            = 500,  -- v0.5.135.1: matched item_wind_waker (same instant-airborne fire-by-proximity; Eul's). (was v0.5.15 PT-01 300.)
     item_hurricane_pike     = 500,   -- v0.5.21 PT-02: 360 -> 500. self-cast Pike pushes 425u; 360u gave too tight a margin between threat-impact and displacement-resolution. 500u lets the save fire while the threat is still ~half the push distance away.
     item_force_staff        = 500,   -- v0.5.21 PT-02: 360 -> 500. Same rationale (600u push; 500u trigger leaves clean headroom).
@@ -5935,7 +5954,31 @@ state.w_aim = function(target)
     if not tp or not me then return state.predict_target_pos(target, W_LEAD) end
     local units = aoe_enemy_units(tp, 2 * W_AOE)
     if #units == 0 then units = { target } end
-    local c = Geometry.BestAoeCenter(units, W_AOE, W_LEAD, target)
+    -- v0.5.175: pass W_AOE - K.W_COVER_MARGIN so the cover-both center commits a 2nd
+    -- enemy only when it sits MARGIN inside the real 250 AoE = a GUARANTEED double
+    -- over the 0.95s lead (the lib's midpoint placement puts each at <= radius-margin).
+    -- Past ~2*(250-25)=~450u apart the far enemy is dropped and W single-targets the
+    -- priority. The real W still casts the full 250 AoE, so a committed pair has >=
+    -- MARGIN to spare. Fixes the v<=0.5.174 rim placement that dropped a catchable
+    -- 2nd enemy at the boundary (demo: d=482 -> covered=1).
+    local c, n = Geometry.BestAoeCenter(units, W_AOE - K.W_COVER_MARGIN, W_LEAD, target)
+    -- Throttled cover-both diagnostic (level 2 -> shows at demo verbosity >= 2; zero
+    -- cost at default play). sep = nearest 2nd enemy's current distance to the target.
+    if v_level() >= 2 and (now() - (state.w_aim_diag_t or 0)) >= 0.2 then
+        state.w_aim_diag_t = now()
+        local sep
+        for i = 1, #units do
+            local u = units[i]
+            if u ~= target and Entity.IsEntity(u) then
+                local up = Entity.GetAbsOrigin(u)
+                local dcur = (up and tp) and up:Distance2D(tp) or nil
+                if dcur and (not sep or dcur < sep) then sep = dcur end
+            end
+        end
+        tlog(2, "w_aim", { units = string.format("%d", #units),
+            covered = string.format("%d", n or 0),
+            sep = sep and string.format("%.0f", sep) or "na" })
+    end
     return c or state.predict_target_pos(target, W_LEAD)
 end
 
@@ -8191,7 +8234,7 @@ state.enemy_cluster_center = function(me)
         state.cluster_cache_t, state.cluster_cache_center, state.cluster_cache_n = frame_t, nil, 0
         return nil, 0
     end
-    local pts = {}
+    local pts, ents = {}, {}
     for i = 1, #list do
         local e = list[i]
         -- Only count enemies W can actually affect: magic-immune enemies take
@@ -8200,28 +8243,53 @@ state.enemy_cluster_center = function(me)
         if e and Target.IsAlive(e) and Target.NotIllusion(e)
            and not NPC.HasState(e, MS.MODIFIER_STATE_MAGIC_IMMUNE) then
             local p = Entity.GetAbsOrigin(e)
-            if p then pts[#pts + 1] = p end
+            if p then pts[#pts + 1] = p; ents[#ents + 1] = e end
         end
     end
     if #pts == 0 then
         state.cluster_cache_t, state.cluster_cache_center, state.cluster_cache_n = frame_t, nil, 0
         return nil, 0
     end
-    -- The enemy with the most neighbours within 250u anchors the densest
-    -- cluster; centroid via VectorCenter (extension global) with a safe
-    -- fallback to that anchor's own position (always a valid W center).
-    -- v0.5.24 PERF-03 stretch: track winning anchor index + count only; build
-    -- the members list once for the winner instead of allocating per-anchor.
-    local best_n, best_anchor_idx = 0, 1
+    -- v0.5.178 D3b cluster value-bias: per-anchor neighbour COUNT + summed HeroValue,
+    -- then a value tie-break. Each enemy's value is precomputed once (peer-relative
+    -- over the live list), guarded so a missing hero_value lib degrades to pure
+    -- density. best = max count, EXACT-count ties broken by higher summed value (never
+    -- trades stun-count for value); pure = first max count (the geometric pick).
+    -- VectorCenter centroid + count are built from the winning anchor exactly as before.
+    local hv = state.hero_value
+    local vals = {}
+    for i = 1, #ents do vals[i] = (hv and hv.of and hv.of(ents[i], list)) or 0 end
+    local counts, sums = {}, {}
     for i = 1, #pts do
         local pi = pts[i]
-        local n = 0
+        local n, sv = 0, 0
         for j = 1, #pts do
-            if pi:Distance2D(pts[j]) <= 250 then n = n + 1 end
+            if pi:Distance2D(pts[j]) <= 250 then n = n + 1; sv = sv + vals[j] end
         end
-        if n > best_n then best_n, best_anchor_idx = n, i end
+        counts[i], sums[i] = n, sv
     end
-    local best_anchor = pts[best_anchor_idx]
+    local best_idx, pure_idx
+    if hv and hv.best_cluster then best_idx, pure_idx = hv.best_cluster(counts, sums) end
+    if not best_idx then          -- lib absent: inline first-max-count (pre-3b behaviour)
+        best_idx = 1
+        for i = 2, #counts do if counts[i] > counts[best_idx] then best_idx = i end end
+        pure_idx = best_idx
+    end
+    -- fc_cluster_flip diag (mirror of fc_aim_flip): only when value changed the pick
+    -- vs the first-found densest. D3b DEMO-CONFIRMED v0.5.178.1: the always-on probe
+    -- logged tied=3 chose=antimage (value 0.93) on real 3-way ties; reverted here to
+    -- the lean flip-only form (the override path itself is offline-proven via best_cluster).
+    if best_idx ~= pure_idx and (frame_t - (state.fc_cluster_flip_log_t or 0)) >= 1.0 then
+        state.fc_cluster_flip_log_t = frame_t
+        tlog(2, "fc_cluster_flip", {
+            chose = uname(ents[best_idx]), chose_n = string.format("%d", counts[best_idx]),
+            chose_v = string.format("%.2f", sums[best_idx]),
+            over = uname(ents[pure_idx]), over_n = string.format("%d", counts[pure_idx]),
+            over_v = string.format("%.2f", sums[pure_idx]),
+        })
+    end
+    local best_anchor = pts[best_idx]
+    local best_n = counts[best_idx]
     local best_members = {}
     for j = 1, #pts do
         if best_anchor:Distance2D(pts[j]) <= 250 then best_members[#best_members + 1] = pts[j] end
@@ -10374,7 +10442,7 @@ state.tests["FCDEF03_grade_last_resort"] = {
     end,
 }
 state.tests["FCDEF04_claim_wrapper"] = {
-    desc = "v0.5.158 FC defense LIVE claim wrapper (real grader, no spy): magical-only filter (e), pierce threading, armed-D severity fallback, proactive band <50%HP+>=2 enemies + count threshold (d), item-release wiring (b), Tier-A veto input (c), threat_mod last-resort path",
+    desc = "v0.5.158 FC defense LIVE claim wrapper (real grader, no spy): magical-only filter (e), pierce threading, armed-D severity fallback, proactive band <35%HP+>=2 enemies + count threshold (d), item-release wiring (b), Tier-A veto input (c), threat_mod last-resort path",
     fn = function(cu)
         if type(state.fc_defense_claim) ~= "function" then
             return { pass = false, reason = "state.fc_defense_claim not exposed" }
@@ -10439,14 +10507,18 @@ state.tests["FCDEF04_claim_wrapper"] = {
             { "b_magical_eul_none",    "mod_fcdef04_mag",   1000, 1000, 0, { item_cyclone = true }, "none" },
             -- pierce threading: magical-pierce + ready BKB -> still A (BKB cannot cover a pierce).
             { "pierce_bkb_A",          "mod_fcdef04_mag_p", 1000, 1000, 0, { item_black_king_bar = true }, "A" },
-            -- (d) proactive band: <50% HP + 2 enemies, no item -> A (sustained focus, no BKB).
-            { "d_band_A",              nil,                  400, 1000, 2, NONE, "A" },
+            -- (d) proactive band (v0.5.180: HP gate FC_DEF_PROACTIVE_HP 0.50 -> 0.35):
+            -- <35% HP + 2 enemies, no item -> A. 300/1000 = 30% < 35% triggers the band.
+            { "d_band_A",              nil,                  300, 1000, 2, NONE, "A" },
             -- (d) band + BKB ready -> none (sustained focus -> only BKB releases).
-            { "d_band_bkb_none",       nil,                  400, 1000, 2, { item_black_king_bar = true }, "none" },
+            { "d_band_bkb_none",       nil,                  300, 1000, 2, { item_black_king_bar = true }, "none" },
             -- (d) band + Eul ready (not BKB) -> still A (Eul does not release a sustained focus).
-            { "d_band_eul_A",          nil,                  400, 1000, 2, { item_cyclone = true }, "A" },
-            -- (d) count threshold: <50% HP but only 1 enemy near -> no band -> none.
-            { "d_count_1_none",        nil,                  400, 1000, 1, NONE, "none" },
+            { "d_band_eul_A",          nil,                  300, 1000, 2, { item_cyclone = true }, "A" },
+            -- (d) count threshold: <35% HP but only 1 enemy near -> no band -> none.
+            { "d_count_1_none",        nil,                  300, 1000, 1, NONE, "none" },
+            -- (d) v0.5.180 threshold guard: 40% HP + 2 enemies, no item -> none. 40% is ABOVE the
+            -- new 0.35 gate (the old 0.50 would have fired A here), so the gank band now holds.
+            { "d_band_above_thresh_none", nil,               400, 1000, 2, NONE, "none" },
         }
         for _, c in ipairs(cases) do
             local err = chk(c[1], c[2], c[3], c[4], c[5], c[6], c[7])
@@ -10464,7 +10536,7 @@ state.tests["FCDEF04_claim_wrapper"] = {
         -- v0.5.158.5: the claim's 2nd return (source) drives the proactive fire gate.
         -- A band-only Tier-A -> "proactive" (tick requires pressure); an armed magical
         -- Tier-A -> "armed" (tick pre-fires). The result VALUE is unchanged either way.
-        hp_cur, hp_max = 400, 1000
+        hp_cur, hp_max = 300, 1000   -- v0.5.180: 30% < the new 0.35 gate, so the band still triggers
         state.armed_threats = {}
         Heroes.InRadius = function() return { {}, {} } end
         state.lina_save_ready = function() return false end
@@ -11026,7 +11098,12 @@ local function dodger_chain_disable()
     if state.dodger_retry_t and (now_t - state.dodger_retry_t) < 5.0 then return end
     state.dodger_retry_t = now_t
     state.dodger_retry_n = (state.dodger_retry_n or 0) + 1
-    if state.dodger_retry_n > 24 then          -- ~2 min of retries
+    -- v0.5.177: retry cap trimmed 24 -> 2. The lazy Cyrillic submenu is a PROVEN
+    -- Menu.Find dead-end (6 repros; the v0.5.176 vals probe logged read=x even with
+    -- the items set ON, cloud-persisted, AND held by the hero), so the long retry
+    -- only spammed the log. Two quick attempts, then give up quietly (manual uncheck
+    -- is the fallback). Kept dormant in case a future framework build instantiates it.
+    if state.dodger_retry_n > 2 then           -- ~10s of retries
         if not state.dodger_gaveup then
             state.dodger_gaveup = true
             tlog(1, "dodger_chain_giveup", { attempts = tostring(state.dodger_retry_n - 1),
@@ -11039,6 +11116,19 @@ local function dodger_chain_disable()
         local v, shape = _dodger_read(item)
         saved[item] = v
         read_shape = read_shape or shape
+    end
+    -- v0.5.176 DIAGNOSTIC: per-item captured read value + hero-inventory presence,
+    -- to settle dead-end vs config. With Eul/WW set ON + cloud-persisted, a reachable
+    -- override must log cyclone=1.. / wind_waker=1.. here; all-x = still unreachable.
+    -- read: 1=on, 0=off, x=unread(nil). have: h=held, -=not held, ?=hero unacquired.
+    local me_d = state.self_npc
+    local _vals = {}
+    for _, item in ipairs(DODGER_CHAIN_ITEMS) do
+        local v = saved[item]
+        local r = (v == true) and "1" or ((v == false) and "0" or "x")
+        local h = (not me_d) and "?" or ((NPCLib.item and NPCLib.item(me_d, item)) and "h" or "-")
+        local nm = item:gsub("^item_", "")
+        _vals[#_vals + 1] = nm .. "=" .. r .. h
     end
     local n_set, write_shape, failed = 0, nil, {}
     for _, item in ipairs(DODGER_CHAIN_ITEMS) do
@@ -11053,6 +11143,7 @@ local function dodger_chain_disable()
         failed     = (#failed > 0) and table.concat(failed, ",") or "-",
         read_shape = tostring(read_shape or "nil"),
         write_shape = tostring(write_shape or "nil"),
+        vals       = table.concat(_vals, ","),
     })
     if n_set > 0 then
         state.dodger_saved = saved
@@ -11218,11 +11309,18 @@ DODGER_BKB.disable = function()
     state.dodger_bkb_failed_w = failed_w
     state.dodger_bkb_retry_n  = 0
     state.dodger_bkb_retry_t  = state.frame_t or now()
+    -- v0.5.176 DIAGNOSTIC: per-widget captured slider value (x = unread/unreachable).
+    local _bvals = {}
+    for _, w in ipairs(DODGER_BKB.widgets) do
+        local sv = saved[w.name]
+        _bvals[#_bvals + 1] = w.name .. "=" .. (sv ~= nil and tostring(sv) or "x")
+    end
     tlog(1, "dodger_bkb_disabled", {
         widgets = tostring(#DODGER_BKB.widgets),
         set_ok  = tostring(n_set),
         failed  = (#failed > 0) and table.concat(failed, ",") or "-",
         shape   = tostring(shape_seen or "nil"),
+        vals    = table.concat(_bvals, ","),
     })
     -- v0.5.103: probe EVERY failed widget (was: only on set_ok==0, and only
     -- the Conditions path -- which is the one that already resolves).
@@ -13668,6 +13766,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.173 (Menu-simplification batch D (final): reorganized the 26 survivors flat -- essentials on top, force/panic + wave/blink under a Core Advanced label, the 9 defense subsystem kill-switches under a Subsystem-switches label; relabeled (dropped Layer 1/2 jargon, Flame Cloak offensive amp, W-capitalize). No removals; menu 49 -> 26, simplification complete. Offline 420/420, coverage 48/48, luac 5/5. Full history in changelog.md.")
+LOG:info("Lina brain v0.5.180 (gank-band tuning: the proactive defensive FC HP gate FC_DEF_PROACTIVE_HP lowered 0.50 -> 0.35, so the multi-enemy focus band pre-fires FC only when Lina HP fraction is below 0.35 (was 0.50, too eager mid-gank). Single knob; the reactive armed-threat FC path is unchanged. FCDEF04 band cases moved to 0.30 HP + a 0.40-holds guard added (in-brain test, verify via the test key). Offline 452/452, coverage 48/48, luac 5/5. Full history in changelog.md.)")
 
 return callbacks

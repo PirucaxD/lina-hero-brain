@@ -1,5 +1,5 @@
 ---@meta
----lib/geometry.lua , generic 2D position / distance / prediction helpers.
+---lib/geometry.lua - generic 2D position / distance / prediction helpers.
 ---
 ---Hero-agnostic. All functions take entity or vector args explicitly
 ---(no implicit hero-state reads).
@@ -39,7 +39,7 @@ end
 ---Returns the target's CURRENT position (no lead) when the target is
 ---valid but not actually moving.
 ---
----v6.15.125 REWRITE , the old model was mathematically wrong. It used
+---v6.15.125 REWRITE - the old model was mathematically wrong. It used
 ---`NPC.GetMoveSpeed`, which is a move-speed STAT (≈285-330 for any hero,
 ---non-zero while standing still), projected along the facing yaw. So a
 ---STATIONARY target had its zone placed `GetMoveSpeed * lead_s` (~450u
@@ -53,7 +53,7 @@ end
 ---(a stationary target keeps its centre), real velocity → correct
 ---travel direction and speed. `future = pos + velocity * lead_s`.
 ---Pattern proven in the Windranger 2 third-party script (Shackleshot
----leads). `m_vecVelocity` is an undocumented Source 2 field , pcall-
+---leads). `m_vecVelocity` is an undocumented Source 2 field - pcall-
 ---guarded; the fallback (facing × move-speed, only while a move order
 ---is live) is the old model but at least gated so it never leads a
 ---standing unit.
@@ -212,6 +212,16 @@ function Geometry.BestAoeCenter(units, radius, lead_s, must_cover)
         for i = 1, #preds do
             local d = anchor:Distance2D(preds[i])
             if d > 1 and d <= 2 * radius then
+                -- v0.5.175: MIDPOINT placement (anchor..pred). For d <= 2*radius the
+                -- midpoint sits d/2 <= radius from BOTH, so the anchor stays covered
+                -- and the far unit is INSIDE the radius with margin (d/2). Robust vs
+                -- the old rim placement (off = d - radius put the far unit at exactly
+                -- `radius`, which floating-point could round just outside, collapsing
+                -- a catchable pair to single-target -- the Lina w_aim demo logged
+                -- d=482 -> covered=1). Generated FIRST so it wins coverage ties over
+                -- the rim candidate, which is kept so coverage never regresses for 3+.
+                cand[#cand + 1] = Vector((anchor.x + preds[i].x) * 0.5,
+                                         (anchor.y + preds[i].y) * 0.5, anchor.z)
                 local off = d - radius; if off < 0 then off = 0 end  -- in [0, radius]
                 local f = off / d
                 cand[#cand + 1] = Vector(anchor.x + (preds[i].x - anchor.x) * f,

@@ -11605,30 +11605,77 @@ end
 ------------------------------------------------------------------ menu ------
 local function setup_menu()
     local m = {}
+    -- Russian localization (v0.5.181). ponytail: load-time language; a runtime toggle
+    -- needs a menu rebuild (labels are set at Create). Keyed by the English literal so
+    -- any miss falls back to English. Language auto-follows the UCZone framework (ui_language below).
+    local function ui_language()
+        local ok, v = pcall(function()
+            local w = Menu.Find("SettingsHidden", "", "", "", "Main", "Language")
+            return w and w.Get and w:Get()
+        end)
+        if not ok then return "en" end
+        if type(v) == "number" then return (v == 1) and "ru" or "en" end   -- 1=ru; 2=cn falls to en (no cn table)
+        v = tostring(v or "en"):lower()
+        if v == "ru" or v:find("рус", 1, true) or v:find("russian", 1, true) then return "ru" end
+        return "en"
+    end
+    local RU = {
+        ["Core"] = "Основное", ["Defense"] = "Защита", ["Diagnostics"] = "Диагностика",
+        ["Enable Lina brain"]                              = "Включить мозг Лины",
+        ["Combo key"]                                      = "Клавиша комбо",
+        ["Enable offense"]                                 = "Включить атаку",
+        ["Auto-R kill steal"]                              = "Авто-R добивание",
+        ["Flame Cloak: offensive amp"]                     = "Flame Cloak: усиление атаки",
+        ["W-capitalize"]                                   = "Добивание после W",
+        ["- Advanced -"]                                   = "- Расширенные -",
+        ["Force-commit key (bypass commit check)"]         = "Клавиша форс-комбо (без проверки)",
+        ["Panic-save key (force next save)"]               = "Клавиша паник-спасения (форс след. спасения)",
+        ["Wave-clear key (HOLD)"]                          = "Клавиша зачистки волны (УДЕРЖ)",
+        ["Blink-capitalize (auto-combo on engine blink)"] = "Добивание после блинка (авто-комбо на блинк фреймворка)",
+        ["Blink-in kill-commit (brain-cast)"]              = "Блинк-вход на добивание (каст мозгом)",
+        ["Blink-in initiate (brain-cast, no-kill)"]        = "Блинк-вход инициация (каст мозгом, без килла)",
+        ["Enable auto-defense"]                            = "Включить авто-защиту",
+        ["Enable ally-save (threat-reactive)"]             = "Спасение союзников (по угрозе)",
+        ["- Subsystem switches -"]                         = "- Переключатели подсистем -",
+        ["Persistent re-fire (Duel/Static Storm)"]         = "Повторный каст при контроле (Duel/Static Storm)",
+        ["Line-projectile intercept (Pudge hook)"]         = "Перехват линейных снарядов (крюк Пуджа)",
+        ["Hook cast-poll save"]                            = "Спасение от крюка (опрос каста)",
+        ["Lotus-worthy ult reflect-first"]                 = "Лотос против ультов (отражение в приоритете)",
+        ["Enable commit-attacker close-gap"]               = "Спасение от атаки вплотную",
+        ["Enable W anti-gap defensive"]                    = "Защитный W против сближения",
+        ["Override Linkbreaker defense items"]             = "Перехват предметов Linkbreaker",
+        ["Override Dodger defense items"]                  = "Перехват предметов Dodger",
+        ["Override Dodger BKB auto-cast"]                  = "Перехват авто-БКБ у Dodger",
+        ["Log verbosity"]                                  = "Подробность лога",
+        ["- Brain status (live) -"]                        = "- Статус мозга (онлайн) -",
+        ["Dump brain state (one-shot)"]                    = "Дамп состояния мозга (разово)",
+        ["Run all brain tests (one-shot)"]                 = "Запуск всех тестов мозга (разово)",
+    }
+    local function L(s) return (ui_language() == "ru" and RU[s]) or s end
     -- Menu.Find-then-Create so a script reload reuses the existing tabs
     -- instead of erroring on a duplicate Create.
     local function group(name)
-        return Menu.Find("Heroes", "Hero List", "Lina", "Brain", name)
-            or Menu.Create("Heroes", "Hero List", "Lina", "Brain", name)
+        return Menu.Find("Heroes", "Hero List", "Lina", "Brain", L(name))
+            or Menu.Create("Heroes", "Hero List", "Lina", "Brain", L(name))
     end
     local gCore = group("Core")
     local gDef  = group("Defense")
     local gDiag = group("Diagnostics")
 
     ---------------------------------------------------------------- Core --
-    m.enable = gCore:Switch("Enable Lina brain", true)
+    m.enable = gCore:Switch(L("Enable Lina brain"), true)
     m.enable:ToolTip("Master toggle. When off the brain issues nothing; the "
         .. "native / baseline Lina runs alone.")
     -- Brain combo key is intentionally separate from the native Lina combo key
     -- (gui.json keycode 16) to reduce the native order flood (lesson 131).
-    m.combo_key = gCore:Bind("Combo key", Enum.ButtonCode.KEY_MOUSE5)
+    m.combo_key = gCore:Bind(L("Combo key"), Enum.ButtonCode.KEY_MOUSE5)
     m.combo_key:ToolTip("HOLD = adaptive Starter (1-2 enemies) / Team Fight "
         .. "(3+) loop. TAP is stubbed for Lina (no 750u-R use case).")
-    m.enable_offense = gCore:Switch("Enable offense", true)
+    m.enable_offense = gCore:Switch(L("Enable offense"), true)
     m.enable_offense:ToolTip("Master toggle for the HOLD-only adaptive combo "
         .. "(Starter / Team Fight) on the combo key. Off = combo key does "
         .. "nothing; defense and auto-R are unaffected by this toggle.")
-    m.auto_r = gCore:Switch("Auto-R kill steal", true)
+    m.auto_r = gCore:Switch(L("Auto-R kill steal"), true)
     m.auto_r:ToolTip("Fire Laguna automatically (no combo key) when R alone "
         .. "(plus Slow Burn) kills a visible enemy in range. Skips magic-immune "
         .. "and Linkens-protected targets.")
@@ -11641,7 +11688,7 @@ local function setup_menu()
     -- want to fire BEFORE the burst archetype so the amp applies to W/Q/R.
     -- Default ON. Toggle OFF for clean revert if mana-burn or unexpected
     -- combo timing surfaces in real games.
-    m.fc_offensive_use = gCore:Switch("Flame Cloak: offensive amp", true)
+    m.fc_offensive_use = gCore:Switch(L("Flame Cloak: offensive amp"), true)
     -- v0.5.170 menu-simplification: fc_commit_gate / jugg_omni_defer / fc_escape /
     -- fc_chase / fc_value_weight / fc_aim_bias are hardcoded ON in code below; the
     -- fc_value_debug probe is cut. Only fc_offensive_use remains as the FC control.
@@ -11654,7 +11701,7 @@ local function setup_menu()
         .. "kills, FC is waste). Defensive save-chain use unaffected.")
     -- v0.5.137: W-capitalize -- after the defensive W stuns a gap-closer / committed attacker,
     -- commit the combo on that stunned target IF killable. Default ON (offensive completion of the W save).
-    m.w_capitalize = gCore:Switch("W-capitalize", true)
+    m.w_capitalize = gCore:Switch(L("W-capitalize"), true)
     m.w_capitalize:ToolTip("After the defensive W stuns an incoming gap-closer "
         .. "or committed attacker, fire the W-Q-R combo to SECURE the kill -- "
         .. "but only when the remaining Q+R clearly kills it (else the W stays "
@@ -11665,10 +11712,10 @@ local function setup_menu()
 
     -- v0.5.171 menu-simplification: ether_kill_confirm hardcoded ON in code.
 
-    gCore:Label("- Advanced -")
-    m.force_key = gCore:Bind("Force-commit key (bypass commit check)", Enum.ButtonCode.KEY_NONE)
+    m.sec_advanced = gCore:Label(L("- Advanced -"))
+    m.force_key = gCore:Bind(L("Force-commit key (bypass commit check)"), Enum.ButtonCode.KEY_NONE)
     m.force_key:ToolTip("Hold to force a combo even when the kill check refuses.")
-    m.panic_key = gCore:Bind("Panic-save key (force next save)", Enum.ButtonCode.KEY_NONE)
+    m.panic_key = gCore:Bind(L("Panic-save key (force next save)"), Enum.ButtonCode.KEY_NONE)
     m.panic_key:ToolTip("Press to force the defense layer to fire its next "
         .. "save immediately.")
     -- v0.5.78 wave-clear (HOLD): mana-floor + creep-count gated lane/jungle farm
@@ -11677,7 +11724,7 @@ local function setup_menu()
     -- stacked camps, not a pull/stack-window scheduler). Q (Dragon
     -- Slave) line nuke at the aim hitting the most creeps; optional W on a dense
     -- camp. Opt-in: KEY_NONE default so the bind does nothing until assigned.
-    m.wave_key = gCore:Bind("Wave-clear key (HOLD)", Enum.ButtonCode.KEY_NONE)
+    m.wave_key = gCore:Bind(L("Wave-clear key (HOLD)"), Enum.ButtonCode.KEY_NONE)
     m.wave_key:ToolTip("HOLD to farm: fire Dragon Slave (Q) at the line aim "
         .. "hitting the most nearby creeps, plus Light Strike Array (W) on a "
         .. "dense camp when mana-rich. Player controls movement; the brain only "
@@ -11688,7 +11735,7 @@ local function setup_menu()
 
     -- v0.5.94: engine-blink CAPITALIZE -- the brain does not cast Blink; it seizes
     -- the engine's blink to fire a free-gap-close combo. Default OFF.
-    m.blink_capitalize = gCore:Switch("Blink-capitalize (auto-combo on engine blink)", false)
+    m.blink_capitalize = gCore:Switch(L("Blink-capitalize (auto-combo on engine blink)"), false)
     m.blink_capitalize:ToolTip("When the framework blinks Lina into range of a "
         .. "target, fire the W-Q-R combo (use the engine's blink as a free "
         .. "gap-close). Gated on HP floor + not-into-a-gank. Default OFF.")
@@ -11697,10 +11744,10 @@ local function setup_menu()
     -- blink (dagger ready) + you hold combo on an out-of-range target, the brain
     -- blinks in itself, then combos. Reserves the dagger if a threat is incoming.
     -- Both default OFF.
-    m.blink_in_kill = gCore:Switch("Blink-in kill-commit (brain-cast)", false)
+    m.blink_in_kill = gCore:Switch(L("Blink-in kill-commit (brain-cast)"), false)
     m.blink_in_kill:ToolTip("Brain casts Blink to secure a CONFIRMED kill on an "
         .. "out-of-range target, only when the engine did not blink. Default OFF.")
-    m.blink_in_initiate = gCore:Switch("Blink-in initiate (brain-cast, no-kill)", false)
+    m.blink_in_initiate = gCore:Switch(L("Blink-in initiate (brain-cast, no-kill)"), false)
     m.blink_in_initiate:ToolTip("Brain casts Blink to engage without a guaranteed "
         .. "kill -- gated on exit item + HP + fog, and reserves the dagger if a "
         .. "threat is incoming. Default OFF.")
@@ -11708,38 +11755,38 @@ local function setup_menu()
     -- blink_in_initiate_hp (40) hardcoded to defaults in code.
 
     ------------------------------------------------------------- Defense --
-    m.auto_defense = gDef:Switch("Enable auto-defense", true)
+    m.auto_defense = gDef:Switch(L("Enable auto-defense"), true)
     m.auto_defense:ToolTip("Always-on save layer: Wind Waker / Flame Cloak / "
         .. "BKB / Glimmer / Lotus / Force / Pike on incoming threats.")
-    m.ally_save = gDef:Switch("Enable ally-save (threat-reactive)", false)
+    m.ally_save = gDef:Switch(L("Enable ally-save (threat-reactive)"), false)
     m.ally_save:ToolTip("Opt-in (support builds). When a recognized threat "
         .. "(gap-close, hard disable, targeted burst, channel) lands on an "
         .. "ally hero, fire an ally-castable save ON them: Glimmer to break a "
         .. "target lock, Lotus to dispel / reflect, Force to reposition. "
         .. "Threat-triggered, not an HP threshold. Off by default.")
-    gDef:Label("- Subsystem switches -")
+    m.sec_subsystem = gDef:Label(L("- Subsystem switches -"))
     -- v0.5.21 OBS-11: per-subsystem defense toggles. auto_defense (above) is
     -- the master switch; these three carve out individual layers so a
     -- misbehaving subsystem can be silenced without dropping the rest of
     -- the defense layer. Ally-save is omitted from this set on purpose -
     -- the existing m.ally_save opt-in above is the canonical ally control;
     -- adding a sibling switch would create two confusingly-named controls.
-    m.enable_persistent_refire = gDef:Switch("Persistent re-fire (Duel/Static Storm)", true)
+    m.enable_persistent_refire = gDef:Switch(L("Persistent re-fire (Duel/Static Storm)"), true)
     m.enable_persistent_refire:ToolTip("Periodic re-fire of self-saves while "
         .. "a persistent lockdown modifier (LD Duel, Razor Static Storm) is "
         .. "on Lina. Disable to suppress the persistent_threats_tick re-fire "
         .. "loop without touching the rest of the defense layer.")
-    m.enable_line_intercept = gDef:Switch("Line-projectile intercept (Pudge hook)", true)
+    m.enable_line_intercept = gDef:Switch(L("Line-projectile intercept (Pudge hook)"), true)
     m.enable_line_intercept:ToolTip("OnLinearProjectileCreate intercept for "
         .. "line-traveling threats (Pudge Hook, Mirana Arrow, Magnus Skewer, "
         .. "Sven Storm Bolt, ES Fissure). Disable if the intercept fires on "
         .. "hooks you wanted to dodge manually.")
-    m.hook_cast_poll = gDef:Switch("Hook cast-poll save", true)
+    m.hook_cast_poll = gDef:Switch(L("Hook cast-poll save"), true)
     m.hook_cast_poll:ToolTip("Detect Pudge Hook / Clockwerk Hookshot AT CAST via an "
         .. "active-ability poll (the line-projectile + anim paths do NOT fire for "
         .. "hooks) and fire a displacement save (Force/Pike/Blink, WW/Eul fallback) "
         .. "before it lands. Facing-cone gated, with a close-range proximity fallback.")
-    m.enable_lotus_first = gDef:Switch("Lotus-worthy ult reflect-first", true)
+    m.enable_lotus_first = gDef:Switch(L("Lotus-worthy ult reflect-first"), true)
     m.enable_lotus_first:ToolTip("When a Lotus-reflectable threat lands "
         .. "(LC Duel, Doom, Hex, etc.), try Lotus Orb FIRST to reflect the "
         .. "cast before falling back through the normal save ladder. Disable "
@@ -11757,7 +11804,7 @@ local function setup_menu()
     -- routes through v0.5.40 dispatcher to fire close-gap saves (Force /
     -- Pike / WW / Eul / Glimmer / W tail). Off = brain only responds to
     -- SPELL threats; raw auto-attacks go ignored (pre-v0.5.45 behavior).
-    m.enable_commit_attacker = gDef:Switch('Enable commit-attacker close-gap', true)
+    m.enable_commit_attacker = gDef:Switch(L('Enable commit-attacker close-gap'), true)
     m.enable_commit_attacker:ToolTip("Detect enemy heroes auto-attacking "
         .. "Lina at melee range (700u) and trigger close-gap saves (Force "
         .. "/ Pike / WW / Eul / Glimmer / W tail). Sniper-precedent port. "
@@ -11770,7 +11817,7 @@ local function setup_menu()
     -- enforces +450 r_reserve so defensive W cannot starve the kill combo.
     -- Off = W never fires defensively, chain falls through to no_effective_
     -- save_for_threat if all items also on CD.
-    m.enable_w_anti_gap = gDef:Switch('Enable W anti-gap defensive', true)
+    m.enable_w_anti_gap = gDef:Switch(L('Enable W anti-gap defensive'), true)
     m.enable_w_anti_gap:ToolTip("Fire light_strike_array as a tertiary "
         .. "save when WW / Force / Pike / Glimmer are all on CD against a "
         .. "slow-arrival gap-closer (Bara, Tusk, MK Primal Spring). Mana "
@@ -11783,7 +11830,7 @@ local function setup_menu()
     -- demo: Bara charge fired brain W + framework Pike together; W landed on
     -- empty position because Pike pushed Bara out of W's 225u AoE). Same
     -- match-scoped capture+restore pattern as v0.5.43 Dodger override.
-    m.override_linkbreaker = gDef:Switch('Override Linkbreaker defense items', true)
+    m.override_linkbreaker = gDef:Switch(L('Override Linkbreaker defense items'), true)
     m.override_linkbreaker:ToolTip("On match start (GAME_IN_PROGRESS), "
         .. "capture and zero the 5 chain-overlap items in the per-hero "
         .. "Linkbreaker subsystem (Eul / Ether / Force / Pike / WW). "
@@ -11791,7 +11838,7 @@ local function setup_menu()
         .. "Off = Linkbreaker and brain both fire (causes the Bara double-"
         .. "fire pattern observed in v0.5.45 demo where W missed because "
         .. "framework Pike already pushed Bara out of W's AoE).")
-    m.override_dodger = gDef:Switch('Override Dodger defense items', true)
+    m.override_dodger = gDef:Switch(L('Override Dodger defense items'), true)
     m.override_dodger:ToolTip("On match start (GAME_IN_PROGRESS), capture "
         .. "and zero the 7 self-defense items in the Umbrella Dodger that "
         .. "overlap the brain's chain (Eul/Glimmer/Lotus/Shadow Blade/Silver "
@@ -11802,7 +11849,7 @@ local function setup_menu()
     -- its own dedicated Dodger panel (Conditions/BKB Settings + Specific
     -- Settings/BKB Settings), so the items override never reached it and
     -- the framework raced/mistimed the brain's BKB save.
-    m.override_dodger_bkb = gDef:Switch('Override Dodger BKB auto-cast', true)
+    m.override_dodger_bkb = gDef:Switch(L('Override Dodger BKB auto-cast'), true)
     m.override_dodger_bkb:ToolTip("On match start, neuter the Dodger's "
         .. "dedicated BKB panel (enemy-count thresholds to max, search "
         .. "radius to min) so the brain's BKB save owns the item. Restored "
@@ -11815,10 +11862,10 @@ local function setup_menu()
     -- v0.5.171 menu-simplification: preface_enable cut (niche, default OFF, never promoted); pre_face_tick removed in code.
 
     --------------------------------------------------------- Diagnostics --
-    m.diag = gDiag:Slider("Log verbosity", 0, 3, 1)
+    m.diag = gDiag:Slider(L("Log verbosity"), 0, 3, 1)
     m.diag:ToolTip("0 = silent, 1 = decisions, 2 = + skips, 3 = full trace. "
         .. "Written to C:\\Umbrella\\debug.log.")
-    gDiag:Label("- Brain status (live) -")
+    m.sec_status = gDiag:Label(L("- Brain status (live) -"))
     m.lbl_self     = gDiag:Label("self: not acquired")
     -- v0.5.88: offensive combo-readiness chip (R-CD / mana% / FS / WQR-ready),
     -- the counterpart to the defensive saves chip below.
@@ -11835,7 +11882,7 @@ local function setup_menu()
     -- responded_threats, last_save_*, fs stacks. Press fires one multi-line
     -- tlog burst at level 1 (always on at default verbosity). KEY_NONE so
     -- the bind is opt-in: assign a key in the menu to enable.
-    m.dump_key = gDiag:Bind("Dump brain state (one-shot)",
+    m.dump_key = gDiag:Bind(L("Dump brain state (one-shot)"),
                             Enum.ButtonCode.KEY_NONE)
     m.dump_key:ToolTip("Press to emit a forensic snapshot of armed threats, "
         .. "pending combo steps, responded threats, last save fields, and "
@@ -11845,13 +11892,51 @@ local function setup_menu()
     -- test_session_begin / test_run_begin / test_run_end / test_summary /
     -- test_session_end rows at level 1 (visible at default verbosity).
     -- KEY_NONE so the bind is opt-in: assign a key in the menu to enable.
-    m.test_key = gDiag:Bind("Run all brain tests (one-shot)",
+    m.test_key = gDiag:Bind(L("Run all brain tests (one-shot)"),
                             Enum.ButtonCode.KEY_NONE)
     m.test_key:ToolTip("Press to run the in-Brain test suite (mock-driven, "
         .. "no Dota state needed). Grep C:\\Umbrella\\debug.log between "
         .. "test_session_begin and test_session_end for the results.")
 
-    state.menu = m
+    -- v0.5.183 live language switch: re-apply labels when the UCZone Language widget
+    -- changes, no reload (pattern from a working RU script). ponytail: ForceLocalization on
+    -- every stored widget; binds / section labels re-render if the framework supports it,
+    -- else they update on the next reload.
+    local LOC = {
+        enable = "Enable Lina brain", combo_key = "Combo key", enable_offense = "Enable offense",
+        auto_r = "Auto-R kill steal", fc_offensive_use = "Flame Cloak: offensive amp", w_capitalize = "W-capitalize",
+        force_key = "Force-commit key (bypass commit check)", panic_key = "Panic-save key (force next save)",
+        wave_key = "Wave-clear key (HOLD)", blink_capitalize = "Blink-capitalize (auto-combo on engine blink)",
+        blink_in_kill = "Blink-in kill-commit (brain-cast)", blink_in_initiate = "Blink-in initiate (brain-cast, no-kill)",
+        auto_defense = "Enable auto-defense", ally_save = "Enable ally-save (threat-reactive)",
+        enable_persistent_refire = "Persistent re-fire (Duel/Static Storm)", enable_line_intercept = "Line-projectile intercept (Pudge hook)",
+        hook_cast_poll = "Hook cast-poll save", enable_lotus_first = "Lotus-worthy ult reflect-first",
+        enable_commit_attacker = "Enable commit-attacker close-gap", enable_w_anti_gap = "Enable W anti-gap defensive",
+        override_linkbreaker = "Override Linkbreaker defense items", override_dodger = "Override Dodger defense items",
+        override_dodger_bkb = "Override Dodger BKB auto-cast", diag = "Log verbosity",
+        dump_key = "Dump brain state (one-shot)", test_key = "Run all brain tests (one-shot)",
+        sec_advanced = "- Advanced -", sec_subsystem = "- Subsystem switches -", sec_status = "- Brain status (live) -",
+    }
+    local function apply_language()
+        for field, key in pairs(LOC) do
+            local w = m[field]
+            if w and w.ForceLocalization then w:ForceLocalization(L(key)) end
+        end
+        local tabs = { { gCore, "Core" }, { gDef, "Defense" }, { gDiag, "Diagnostics" } }
+        for i = 1, #tabs do
+            if tabs[i][1] and tabs[i][1].ForceLocalization then tabs[i][1]:ForceLocalization(L(tabs[i][2])) end
+        end
+    end
+    pcall(function()
+        local lw = Menu.Find("SettingsHidden", "", "", "", "Main", "Language")
+        if lw and lw.SetCallback then
+            local prev = ui_language()
+            lw:SetCallback(function()
+                local cur = ui_language()
+                if cur ~= prev then prev = cur; apply_language() end
+            end)
+        end
+    end)    state.menu = m
 end
 
 -- Per-enemy animation->ability catalog (v0.2.5, deviation E/B5). Ported from
@@ -13766,6 +13851,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-LOG:info("Lina brain v0.5.180 (gank-band tuning: the proactive defensive FC HP gate FC_DEF_PROACTIVE_HP lowered 0.50 -> 0.35, so the multi-enemy focus band pre-fires FC only when Lina HP fraction is below 0.35 (was 0.50, too eager mid-gank). Single knob; the reactive armed-threat FC path is unchanged. FCDEF04 band cases moved to 0.30 HP + a 0.40-holds guard added (in-brain test, verify via the test key). Offline 452/452, coverage 48/48, luac 5/5. Full history in changelog.md.)")
+LOG:info("Lina brain v0.5.183 (menu localization live-switch: a SetCallback on the UCZone Language widget re-applies all labels via ForceLocalization when the framework language changes, no reload. Switches/sliders/tabs update live; binds and section labels re-render if the framework supports it, else on next reload. Auto-language (v0.5.182) + en/ru table unchanged. No logic change. Offline 580/580, coverage 48/48, luac 5/5. Full history in changelog.md.)")
 
 return callbacks
